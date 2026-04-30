@@ -1,0 +1,41 @@
+[package]
+name = "woohoo-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Web 框架
+axum = { version = "0.8", features = ["ws", "multipart"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+
+# 数据库（嵌入式 SQLite）
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+
+# 缓存 / 任务队列
+redis = { version = "0.27", features = ["tokio-comp", "aio"] }
+
+# AI 调用（直连外部 API）
+reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest-eventsource = "0.6"
+futures = "0.3"
+async-stream = "0.3"
+
+# 序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 认证
+jsonwebtoken = "9"
+bcrypt = "0.17"
+
+# 工具
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "2"
+dotenvy = "0.15"
+sha2 = "0.10"
