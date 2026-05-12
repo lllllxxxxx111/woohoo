@@ -307,3 +307,142 @@ export interface AiSettings {
   pipelineRetryBackoffSec: number;
   pipelineRetryMaxBackoffSec: number;
 }
+
+export type CollaborationSessionState =
+  | 'discovery'
+  | 'delegating'
+  | 'resolving_questions'
+  | 'workspace_admission'
+  | 'workspace_execution'
+  | 'completed'
+  | 'halted';
+
+export type CollaborationAssignmentStatus =
+  | 'idle'
+  | 'assigned'
+  | 'questioning'
+  | 'ready'
+  | 'running'
+  | 'blocked'
+  | 'done'
+  | 'failed';
+
+export type CollaborationMessageKind = 'assign' | 'question' | 'answer' | 'status' | 'escalation';
+
+export interface CollaborationSession {
+  id: string;
+  userId: string;
+  projectId: string;
+  conversationId: string;
+  entryMessageId?: string;
+  state: CollaborationSessionState;
+  orchestratorAgentId?: string;
+  admissionDecisionJson?: string;
+  loopStatusJson?: string;
+  replyQueueJson?: string;
+  roundCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CollaborationAssignment {
+  id: string;
+  sessionId: string;
+  agentId: string;
+  taskType: string;
+  goal: string;
+  inputJson?: string;
+  dependsOnJson?: string;
+  status: CollaborationAssignmentStatus;
+  blockingQuestionCount: number;
+  lastQuestionFingerprint?: string;
+  aiTaskId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CollaborationMessage {
+  id: string;
+  sessionId: string;
+  sourceAgentId?: string;
+  targetAgentId?: string;
+  messageKind: CollaborationMessageKind;
+  content: string;
+  questionFingerprint?: string;
+  replyToMessageId?: string;
+  queueOrder: number;
+  createdAt: string;
+}
+
+export interface CollaborationEvent {
+  id: string;
+  sessionId: string;
+  eventType: string;
+  payloadJson?: string;
+  createdAt: string;
+}
+
+export interface CollaborationSessionSummary {
+  session: CollaborationSession;
+  assignments: CollaborationAssignment[];
+}
+
+export interface CreateCollaborationSessionReq {
+  projectId: string;
+  conversationId: string;
+  entryMessageId?: string;
+  orchestratorAgentId?: string;
+}
+
+export interface DispatchAssignmentReq {
+  agentId: string;
+  taskType: string;
+  goal: string;
+  dependsOn?: string[];
+  input?: unknown;
+}
+
+export interface DispatchReq {
+  assignments: DispatchAssignmentReq[];
+}
+
+export interface DispatchResponse {
+  dispatchedCount: number;
+  assignments: CollaborationAssignment[];
+}
+
+export interface SendCollaborationMessageReq {
+  sourceAgentId?: string;
+  targetAgentId?: string;
+  messageKind: CollaborationMessageKind;
+  content: string;
+  questionFingerprint?: string;
+  replyToMessageId?: string;
+}
+
+export interface LoopCheckResponse {
+  loopDetected: boolean;
+  signals: string[];
+  level: number;
+  action: string;
+  message: string;
+}
+
+export interface AdmitResponse {
+  admitted: boolean;
+  pipelineRunId?: string;
+  reason: string;
+  blockingIssues?: BlockingIssue[];
+}
+
+export interface BlockingIssue {
+  assignmentId: string;
+  agentId: string;
+  question: string;
+  status: string;
+}
+
+export interface HaltReq {
+  reason: string;
+  detail?: string;
+}

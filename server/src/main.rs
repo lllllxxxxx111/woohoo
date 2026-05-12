@@ -1,6 +1,7 @@
 mod ai;
 mod asset;
 mod auth;
+mod collaboration;
 mod config;
 mod conversation;
 mod db;
@@ -458,6 +459,35 @@ async fn main() {
         .route(
             "/api/ai/action-audits/consume-token",
             post(ai::policy_handlers::consume_confirmation_token),
+        )
+        // 协同会话
+        .route(
+            "/api/collaboration/sessions",
+            post(collaboration::handlers::create_session),
+        )
+        .route(
+            "/api/collaboration/sessions/{id}",
+            get(collaboration::handlers::get_session),
+        )
+        .route(
+            "/api/collaboration/sessions/{id}/dispatch",
+            post(collaboration::handlers::dispatch),
+        )
+        .route(
+            "/api/collaboration/sessions/{id}/messages",
+            post(collaboration::handlers::send_message),
+        )
+        .route(
+            "/api/collaboration/sessions/{id}/loop-check",
+            post(collaboration::handlers::loop_check),
+        )
+        .route(
+            "/api/collaboration/sessions/{id}/admit",
+            post(collaboration::handlers::admit),
+        )
+        .route(
+            "/api/collaboration/sessions/{id}/halt",
+            post(collaboration::handlers::halt),
         )
         .route("/api/ops/overview", get(ops::handlers::overview))
         .route("/api/ops/heartbeats", get(ops::handlers::list_heartbeats))

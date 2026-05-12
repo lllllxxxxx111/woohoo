@@ -13,9 +13,6 @@ tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 # 数据库（嵌入式 SQLite）
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 
-# 缓存 / 任务队列
-redis = { version = "0.27", features = ["tokio-comp", "aio"] }
-
 # AI 调用（直连外部 API）
 reqwest = { version = "0.12", features = ["json", "stream"] }
 reqwest-eventsource = "0.6"

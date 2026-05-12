@@ -12,6 +12,7 @@ import type {
   StoryboardLine,
 } from '../types';
 import { createAgentApi } from './serverApi.agents';
+import { createCollaborationApi } from './serverApi.collaboration';
 import { createEndpointApi } from './serverApi.endpoints';
 import { createNotificationApi } from './serverApi.notifications';
 import { createUsageTaskPipelineApi } from './serverApi.pipeline';
@@ -1692,3 +1693,13 @@ export const pausePipelineRun = usageTaskPipelineApi.pausePipelineRun;
 export const resumePipelineRun = usageTaskPipelineApi.resumePipelineRun;
 export const cancelPipelineRun = usageTaskPipelineApi.cancelPipelineRun;
 export const retryPipelineStep = usageTaskPipelineApi.retryPipelineStep;
+
+const collaborationApi = createCollaborationApi({ requestApi });
+
+export const createCollaborationSession = collaborationApi.createSession;
+export const getCollaborationSession = collaborationApi.getSession;
+export const dispatchCollaboration = collaborationApi.dispatch;
+export const sendCollaborationMessage = collaborationApi.sendMessage;
+export const checkCollaborationLoop = collaborationApi.loopCheck;
+export const admitCollaboration = collaborationApi.admit;
+export const haltCollaboration = collaborationApi.halt;
