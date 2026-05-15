@@ -10,7 +10,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    include: ['src/**/*.{test,spec}.{ts,tsx}', 'src-image-studio/**/*.{test,spec}.{ts,tsx}'],
   },
   build: {
     chunkSizeWarningLimit: 600,

@@ -22,6 +22,100 @@ impl Default for StreamFallbackMode {
     }
 }
 
+/// 图片生成请求参数
+#[derive(Debug, Serialize)]
+struct ImageGenerateRequest {
+    model: String,
+    prompt: String,
+    n: u32,
+    size: String,
+    response_format: String,
+}
+
+/// 图片生成响应
+#[derive(Debug, Deserialize)]
+pub struct ImageGenerateResponse {
+    pub created: i64,
+    pub data: Vec<ImageDataItem>,
+}
+
+/// 图片数据项
+#[derive(Debug, Deserialize)]
+pub struct ImageDataItem {
+    #[serde(rename = "b64_json")]
+    pub b64_json: Option<String>,
+    pub url: Option<String>,
+    #[serde(rename = "revised_prompt")]
+    pub revised_prompt: Option<String>,
+}
+
+impl AiClient {
+    /**
+     * 调用 OpenAI 兼容的图片生成 API（如 DALL-E 3）
+     * 支持 base64 和 URL 两种返回格式
+     */
+    pub async fn generate_image(
+        &self,
+        base_url: &str,
+        api_key: &str,
+        model: &str,
+        prompt: &str,
+        size: &str,
+        n: u32,
+        response_format: &str,
+    ) -> AppResult<ImageGenerateResponse> {
+        let normalized = base_url.trim().trim_end_matches('/');
+        let url = if normalized.ends_with("/v1") || normalized.ends_with("/v2") {
+            format!("{}/images/generations", normalized)
+        } else if normalized.contains("api.openai.com") {
+            let url_with_v1 = if !normalized.contains("/v1") {
+                format!("{}/v1", normalized)
+            } else {
+                normalized.to_string()
+            };
+            format!("{}/images/generations", url_with_v1)
+        } else {
+            format!("{}/v1/images/generations", normalized)
+        };
+
+        let req = ImageGenerateRequest {
+            model: model.to_string(),
+            prompt: prompt.to_string(),
+            n: n.min(4),
+            size: size.to_string(),
+            response_format: response_format.to_string(),
+        };
+
+        let mut request = self
+            .http
+            .post(&url)
+            .header("Content-Type", "application/json");
+
+        if !api_key.trim().is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", api_key.trim()));
+        }
+
+        let resp = request
+            .json(&req)
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("图片生成 API 调用失败: {}", e)))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(AppError::Internal(format!(
+                "图片生成 API 返回错误 {}: {}",
+                status, body
+            )));
+        }
+
+        resp.json::<ImageGenerateResponse>()
+            .await
+            .map_err(|e| AppError::Internal(format!("图片生成响应解析失败: {}", e)))
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 struct StreamFallbackState {
     consecutive_hits: u32,

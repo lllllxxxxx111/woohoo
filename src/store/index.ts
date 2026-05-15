@@ -5,6 +5,9 @@ import type {
   AgentContact,
   AiSettings,
   Asset,
+  CollaborationSession,
+  CollaborationAssignment,
+  LoopCheckResponse,
   Message,
   Project,
   Script,
@@ -63,6 +66,11 @@ export interface AppStoreState {
   isSseConnected: boolean;
   sseError: string | null;
 
+  /** 协同会话状态（由 SSE 协同事件填充） */
+  activeCollaborationSession: CollaborationSession | null;
+  activeCollaborationAssignments: CollaborationAssignment[];
+  collaborationLoopCheckResult: LoopCheckResponse | null;
+
   // Actions
   setTheme: (theme: 'dark' | 'light') => void;
   setLanguage: (lang: string) => void;
@@ -78,6 +86,10 @@ export interface AppStoreState {
   setAiTasks: (tasks: AiTask[]) => void;
   setSseConnected: (connected: boolean) => void;
   setSseError: (error: string | null) => void;
+  setCollaborationSession: (session: CollaborationSession | null) => void;
+  setCollaborationAssignments: (assignments: CollaborationAssignment[]) => void;
+  setCollaborationLoopCheckResult: (result: LoopCheckResponse | null) => void;
+  clearCollaboration: () => void;
 }
 
 export const useAppStore = create<AppStoreState>((set, get) => ({
@@ -109,6 +121,9 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   aiTasks: [],
   isSseConnected: false,
   sseError: null,
+  activeCollaborationSession: null,
+  activeCollaborationAssignments: [],
+  collaborationLoopCheckResult: null,
 
   setTheme: (theme) => set({ theme }),
   setLanguage: (language) => {
@@ -161,4 +176,8 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   setAiTasks: (aiTasks) => set({ aiTasks }),
   setSseConnected: (isSseConnected) => set({ isSseConnected }),
   setSseError: (sseError) => set({ sseError }),
+  setCollaborationSession: (activeCollaborationSession) => set({ activeCollaborationSession }),
+  setCollaborationAssignments: (activeCollaborationAssignments) => set({ activeCollaborationAssignments }),
+  setCollaborationLoopCheckResult: (collaborationLoopCheckResult) => set({ collaborationLoopCheckResult }),
+  clearCollaboration: () => set({ activeCollaborationSession: null, activeCollaborationAssignments: [], collaborationLoopCheckResult: null }),
 }));

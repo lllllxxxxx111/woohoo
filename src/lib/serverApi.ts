@@ -14,10 +14,18 @@ import type {
 import { createAgentApi } from './serverApi.agents';
 import { createCollaborationApi } from './serverApi.collaboration';
 import { createEndpointApi } from './serverApi.endpoints';
+import { createImageGenApi } from './serverApi.imageGen';
 import { createNotificationApi } from './serverApi.notifications';
 import { createUsageTaskPipelineApi } from './serverApi.pipeline';
 
 export type { CreateAgentInput, ProjectAgentInput } from './serverApi.agents';
+export type {
+  CreateImageGenerationInput,
+  CreditTransaction,
+  ImageGeneration,
+  ImageGenerationStatus,
+  UserCredits,
+} from './serverApi.imageGen';
 export type {
   NotificationChannelType,
   OpsNotificationChannel,
@@ -1703,3 +1711,11 @@ export const sendCollaborationMessage = collaborationApi.sendMessage;
 export const checkCollaborationLoop = collaborationApi.loopCheck;
 export const admitCollaboration = collaborationApi.admit;
 export const haltCollaboration = collaborationApi.halt;
+
+const imageGenApi = createImageGenApi(requestApi);
+
+export const listImageGenerations = imageGenApi.listGenerations;
+export const getImageGeneration = imageGenApi.getGeneration;
+export const createImageGeneration = imageGenApi.createGeneration;
+export const getImageCredits = imageGenApi.getCredits;
+export const listImageCreditTransactions = imageGenApi.listCreditTransactions;

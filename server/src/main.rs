@@ -1,11 +1,13 @@
 mod ai;
 mod asset;
 mod auth;
+mod billing;
 mod collaboration;
 mod config;
 mod conversation;
 mod db;
 mod error;
+mod image_gen;
 mod middleware; // 速率限制中间件
 mod ops; // 分页查询支持
 mod pagination; // 分页查询支持
@@ -510,6 +512,21 @@ async fn main() {
             axum::routing::put(ops::handlers::update_notification_channel)
                 .delete(ops::handlers::delete_notification_channel),
         )
+        // 图片生成（Image Studio）
+        .route(
+            "/api/image-gen/generations",
+            post(image_gen::handlers::create_generation).get(image_gen::handlers::list_generations),
+        )
+        .route(
+            "/api/image-gen/generations/{id}",
+            get(image_gen::handlers::get_generation),
+        )
+        // 计费
+        .route("/api/billing/credits", get(billing::handlers::get_credits))
+        .route(
+            "/api/billing/transactions",
+            get(billing::handlers::list_credit_transactions),
+        )
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),
             auth::middleware::auth_middleware,
@@ -525,8 +542,20 @@ async fn main() {
     let rate_limiter = crate::middleware::create_rate_limiter();
     let auth_rate_limiter = crate::middleware::create_auth_rate_limiter();
 
-    let app = Router::new()
-        .merge(public_routes)
+    // Image Studio 前端静态文件服务（公开访问，前端自己控制认证逻辑）
+    let image_studio_dir =
+        std::env::var("IMAGE_STUDIO_DIST_DIR").unwrap_or_else(|_| "dist-image-studio".to_string());
+
+    // 将 Image Studio 静态文件添加到公开路由
+    public_routes = public_routes.nest(
+        "/image-studio",
+        Router::new().fallback(axum::routing::get_service(
+            tower_http::services::ServeDir::new(&image_studio_dir)
+                .append_index_html_on_directories(true),
+        )),
+    );
+
+    let app = public_routes
         .layer(axum::middleware::from_fn_with_state(
             auth_rate_limiter.clone(),
             crate::middleware::rate_limit_middleware,

@@ -26,6 +26,9 @@ pub enum AppError {
     #[error("请求错误: {0}")]
     BadRequest(String),
 
+    #[error("积分不足: {0}")]
+    PaymentRequired(String),
+
     #[error("冲突: {0}")]
     Conflict(String),
 
@@ -92,6 +95,15 @@ impl IntoResponse for AppError {
                 msg.clone(),
                 "info",
                 "BAD_REQUEST",
+                false,
+            ),
+
+            // 积分不足
+            AppError::PaymentRequired(msg) => (
+                StatusCode::PAYMENT_REQUIRED,
+                msg.clone(),
+                "warning",
+                "INSUFFICIENT_CREDITS",
                 false,
             ),
 

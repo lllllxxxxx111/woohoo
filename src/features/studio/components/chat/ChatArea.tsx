@@ -25,6 +25,8 @@ import { useMessageActions } from './hooks/useMessageActions';
 import { ChatInputArea } from './ChatInputArea';
 import { AgentSidePanel } from './AgentSidePanel';
 import { ProjectCreateModal } from './ProjectCreateModal';
+import { CollaborationStatus } from './CollaborationStatus';
+import { CollaborationAlert } from './CollaborationAlert';
 import styles from './ChatArea.module.css';
 
 const AgentDetailModal = lazy(() => import('./AgentDetailModal'));
@@ -49,6 +51,9 @@ export const ChatArea: React.FC = () => {
     isServerWorkspaceReady,
     setActiveProject,
     setSettingsOpen,
+    activeCollaborationSession,
+    activeCollaborationAssignments,
+    collaborationLoopCheckResult,
   } = useAppStore(
     useShallow((state) => ({
       projects: state.projects,
@@ -62,6 +67,9 @@ export const ChatArea: React.FC = () => {
       isServerWorkspaceReady: state.isServerWorkspaceReady,
       setActiveProject: state.setActiveProject,
       setSettingsOpen: state.setSettingsOpen,
+      activeCollaborationSession: state.activeCollaborationSession,
+      activeCollaborationAssignments: state.activeCollaborationAssignments,
+      collaborationLoopCheckResult: state.collaborationLoopCheckResult,
     })),
   );
 
@@ -292,6 +300,15 @@ export const ChatArea: React.FC = () => {
           </div>
         </div>
 
+        {/* 协同状态展示 */}
+        {activeCollaborationSession && (
+          <CollaborationStatus
+            session={activeCollaborationSession}
+            assignments={activeCollaborationAssignments}
+          />
+        )}
+        <CollaborationAlert loopCheckResult={collaborationLoopCheckResult} />
+
         {/* 消息列表 */}
         <div
           className={styles.messageList}
@@ -403,33 +420,33 @@ export const ChatArea: React.FC = () => {
             );
             return isAiResponding && !hasStreamingMessage;
           })() && (
-            <div className={`${styles.messageWrapper} ${styles.ai}`}>
-              <Avatar size={34} style={{ backgroundColor: 'var(--color-fill-1)' }}>
-                <Bot size={18} />
-              </Avatar>
-              <div className={styles.messageBody}>
-                <div className={`${styles.messageContent} ${styles.thinkingBubble}`}>
-                  <LoaderCircle size={14} className={styles.spinner} style={{ marginRight: 8 }} />
-                  <span style={{ fontSize: '13px' }}>正在为您构建深度回复...</span>
-                  <button
-                    className={styles.cancelThinkingBtn}
-                    onClick={() => {
-                      void messageActions.handleCancelPendingTasks();
-                    }}
-                    title={
-                      messageActions.pendingCancelableTaskIds.length > 0
-                        ? '停止等待'
-                        : '当前无可取消任务'
-                    }
-                    type="button"
-                    disabled={messageActions.pendingCancelableTaskIds.length === 0}
-                  >
-                    <Square size={12} />
-                  </button>
+              <div className={`${styles.messageWrapper} ${styles.ai}`}>
+                <Avatar size={34} style={{ backgroundColor: 'var(--color-fill-1)' }}>
+                  <Bot size={18} />
+                </Avatar>
+                <div className={styles.messageBody}>
+                  <div className={`${styles.messageContent} ${styles.thinkingBubble}`}>
+                    <LoaderCircle size={14} className={styles.spinner} style={{ marginRight: 8 }} />
+                    <span style={{ fontSize: '13px' }}>正在为您构建深度回复...</span>
+                    <button
+                      className={styles.cancelThinkingBtn}
+                      onClick={() => {
+                        void messageActions.handleCancelPendingTasks();
+                      }}
+                      title={
+                        messageActions.pendingCancelableTaskIds.length > 0
+                          ? '停止等待'
+                          : '当前无可取消任务'
+                      }
+                      type="button"
+                      disabled={messageActions.pendingCancelableTaskIds.length === 0}
+                    >
+                      <Square size={12} />
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
+            )}
 
           <div ref={messageGroupsState.bottomRef}></div>
         </div>
