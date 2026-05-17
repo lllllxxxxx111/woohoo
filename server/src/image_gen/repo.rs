@@ -15,6 +15,7 @@ fn now_iso() -> String {
 pub async fn create_generation(
     pool: &SqlitePool,
     user_id: &str,
+    project_id: &str,
     prompt: &str,
     model: &str,
     size: &str,
@@ -24,11 +25,12 @@ pub async fn create_generation(
     let now = now_iso();
 
     sqlx::query(
-        "INSERT INTO image_generations (id, user_id, prompt, model, size, n, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)",
+        "INSERT INTO image_generations (id, user_id, project_id, prompt, model, size, n, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
     )
     .bind(&id)
     .bind(user_id)
+    .bind(project_id)
     .bind(prompt)
     .bind(model)
     .bind(size)
@@ -93,18 +95,21 @@ pub async fn set_completed(
     generation_id: &str,
     result_urls: &[String],
     result_b64_json: &[String],
+    asset_ids: &[String],
     revised_prompt: Option<&str>,
     cost_credits: f64,
 ) -> Result<()> {
     let now = now_iso();
     let urls_json = serde_json::to_string(result_urls)?;
     let b64_json = serde_json::to_string(result_b64_json)?;
+    let asset_ids_json = serde_json::to_string(asset_ids)?;
 
     sqlx::query(
         "UPDATE image_generations
          SET status = 'completed',
              result_urls = ?,
              result_b64_json = ?,
+             asset_ids = ?,
              revised_prompt = ?,
              cost_credits = ?,
              completed_at = ?
@@ -112,6 +117,7 @@ pub async fn set_completed(
     )
     .bind(&urls_json)
     .bind(&b64_json)
+    .bind(&asset_ids_json)
     .bind(revised_prompt)
     .bind(cost_credits)
     .bind(&now)
@@ -143,6 +149,32 @@ pub async fn set_failed(pool: &SqlitePool, generation_id: &str, error_message: &
 /**
  * 查询用户的图片生成历史
  */
+pub async fn list_interrupted_generations(pool: &SqlitePool) -> Result<Vec<ImageGeneration>> {
+    let gens = sqlx::query_as::<_, ImageGeneration>(
+        "SELECT * FROM image_generations WHERE status IN ('pending', 'processing')",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(gens)
+}
+
+pub async fn fail_interrupted_generations(pool: &SqlitePool) -> Result<u64> {
+    let now = now_iso();
+    let result = sqlx::query(
+        "UPDATE image_generations
+         SET status = 'failed',
+             error_message = '服务重启或任务中断，图片生成未完成，未扣除积分',
+             completed_at = ?
+         WHERE status IN ('pending', 'processing')",
+    )
+    .bind(&now)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
 pub async fn list_user_generations(
     pool: &SqlitePool,
     user_id: &str,

@@ -16,9 +16,10 @@ use crate::{
 
 use super::{
     config::{
-        Agent, AgentContact, AiEndpoint, AiEndpointView, AssignProjectAgentReq, CreateAgentReq,
-        CreateEndpointReq, CreateProjectAgentReq, ProjectRoleCounts, ProjectWorkflowSummary,
-        UpdateAgentReq, UpdateEndpointReq,
+        Agent, AgentContact, AiEndpoint, AiEndpointCapability, AiEndpointCapabilityView,
+        AiEndpointView, AssignProjectAgentReq, CreateAgentReq, CreateEndpointReq,
+        CreateProjectAgentReq, ProjectRoleCounts, ProjectWorkflowSummary, UpdateAgentReq,
+        UpdateEndpointReq, UpsertEndpointCapabilityReq,
     },
     handlers::{
         default_pass_rate, ensure_agent_access, ensure_project_access,
@@ -76,7 +77,7 @@ pub async fn list_endpoints(
     .fetch_all(&state.db)
     .await?;
 
-    Ok(Json(endpoints.into_iter().map(Into::into).collect()))
+    Ok(Json(build_endpoint_views(&state.db, endpoints).await?))
 }
 
 pub async fn create_endpoint(
@@ -105,7 +106,7 @@ pub async fn create_endpoint(
     .fetch_one(&state.db)
     .await?;
 
-    Ok((StatusCode::CREATED, Json(endpoint.into())))
+    Ok((StatusCode::CREATED, Json(build_endpoint_view(&state.db, endpoint).await?)))
 }
 
 pub async fn update_endpoint(
@@ -154,7 +155,7 @@ pub async fn update_endpoint(
     .await?
     .ok_or_else(|| AppError::NotFound("AI 端点不存在".into()))?;
 
-    Ok(Json(endpoint.into()))
+    Ok(Json(build_endpoint_view(&state.db, endpoint).await?))
 }
 
 pub async fn delete_endpoint(
@@ -169,6 +170,164 @@ pub async fn delete_endpoint(
         .await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn upsert_endpoint_capability(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Path(id): Path<String>,
+    Json(req): Json<UpsertEndpointCapabilityReq>,
+) -> AppResult<Json<AiEndpointCapabilityView>> {
+    let capability = normalize_capability(&req.capability)?;
+    ensure_endpoint_owner(&state.db, &id, &user_id.0).await?;
+
+    let capability_id = Uuid::new_v4().to_string();
+    let record = sqlx::query_as::<_, AiEndpointCapability>(
+        "INSERT INTO ai_endpoint_capabilities (
+             id, endpoint_id, capability, model, path_override, request_adapter, response_adapter,
+             supports_stream, supports_tools, supports_files, enabled, priority, config_json
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(endpoint_id, capability) DO UPDATE SET
+             model = excluded.model,
+             path_override = excluded.path_override,
+             request_adapter = excluded.request_adapter,
+             response_adapter = excluded.response_adapter,
+             supports_stream = excluded.supports_stream,
+             supports_tools = excluded.supports_tools,
+             supports_files = excluded.supports_files,
+             enabled = excluded.enabled,
+             priority = excluded.priority,
+             config_json = excluded.config_json,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+         RETURNING *",
+    )
+    .bind(&capability_id)
+    .bind(&id)
+    .bind(&capability)
+    .bind(normalize_optional(req.model).as_deref())
+    .bind(normalize_optional(req.path_override).as_deref())
+    .bind(
+        normalize_optional(req.request_adapter)
+            .unwrap_or_else(|| "openai_compatible".to_string()),
+    )
+    .bind(
+        normalize_optional(req.response_adapter)
+            .unwrap_or_else(|| "openai_compatible".to_string()),
+    )
+    .bind(req.supports_stream.unwrap_or(false))
+    .bind(req.supports_tools.unwrap_or(false))
+    .bind(req.supports_files.unwrap_or(false))
+    .bind(req.enabled.unwrap_or(true))
+    .bind(req.priority.unwrap_or(100))
+    .bind(normalize_optional(req.config_json).as_deref())
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(record.into()))
+}
+
+pub async fn list_endpoint_capabilities(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Vec<AiEndpointCapabilityView>>> {
+    ensure_endpoint_owner(&state.db, &id, &user_id.0).await?;
+
+    let capabilities = load_capabilities_for_endpoint(&state.db, &id).await?;
+    Ok(Json(capabilities.into_iter().map(Into::into).collect()))
+}
+
+async fn ensure_endpoint_owner(pool: &SqlitePool, endpoint_id: &str, user_id: &str) -> AppResult<()> {
+    let exists = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(1) FROM ai_endpoints WHERE id = ? AND user_id = ?",
+    )
+    .bind(endpoint_id)
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?;
+
+    if exists == 0 {
+        return Err(AppError::NotFound("AI 端点不存在".into()));
+    }
+
+    Ok(())
+}
+
+fn normalize_capability(value: &str) -> AppResult<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "chat" | "agent_plan" | "image_generation" | "video_generation" | "tts" | "stt"
+        | "embedding" | "moderation" => Ok(normalized),
+        _ => Err(AppError::Validation("不支持的 API 能力类型".into())),
+    }
+}
+
+async fn build_endpoint_view(
+    pool: &SqlitePool,
+    endpoint: AiEndpoint,
+) -> AppResult<AiEndpointView> {
+    let capabilities = load_capabilities_for_endpoint(pool, &endpoint.id)
+        .await?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let mut view = AiEndpointView::from(endpoint);
+    view.capabilities = capabilities;
+    Ok(view)
+}
+
+async fn build_endpoint_views(
+    pool: &SqlitePool,
+    endpoints: Vec<AiEndpoint>,
+) -> AppResult<Vec<AiEndpointView>> {
+    let endpoint_ids: Vec<String> = endpoints.iter().map(|endpoint| endpoint.id.clone()).collect();
+    let mut grouped: HashMap<String, Vec<AiEndpointCapabilityView>> = HashMap::new();
+
+    if !endpoint_ids.is_empty() {
+        let placeholders = generate_safe_sql_placeholders(endpoint_ids.len());
+        let sql = format!(
+            "SELECT * FROM ai_endpoint_capabilities
+             WHERE endpoint_id IN ({})
+             ORDER BY capability ASC, priority ASC, created_at DESC",
+            placeholders
+        );
+        let mut query = sqlx::query_as::<_, AiEndpointCapability>(&sql);
+        for endpoint_id in &endpoint_ids {
+            query = query.bind(endpoint_id);
+        }
+        let capabilities = query.fetch_all(pool).await?;
+        for capability in capabilities {
+            grouped
+                .entry(capability.endpoint_id.clone())
+                .or_default()
+                .push(capability.into());
+        }
+    }
+
+    Ok(endpoints
+        .into_iter()
+        .map(|endpoint| {
+            let capabilities = grouped.remove(&endpoint.id).unwrap_or_default();
+            let mut view = AiEndpointView::from(endpoint);
+            view.capabilities = capabilities;
+            view
+        })
+        .collect())
+}
+
+async fn load_capabilities_for_endpoint(
+    pool: &SqlitePool,
+    endpoint_id: &str,
+) -> AppResult<Vec<AiEndpointCapability>> {
+    Ok(sqlx::query_as::<_, AiEndpointCapability>(
+        "SELECT * FROM ai_endpoint_capabilities
+         WHERE endpoint_id = ?
+         ORDER BY capability ASC, priority ASC, created_at DESC",
+    )
+    .bind(endpoint_id)
+    .fetch_all(pool)
+    .await?)
 }
 
 pub async fn list_agents(

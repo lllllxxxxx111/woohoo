@@ -32,7 +32,7 @@ type ServerAiEndpoint = Awaited<ReturnType<typeof listServerAiEndpoints>>[number
 type EndpointManagementProps = {
   currentSettings: AiSettings;
   currentEndpointId?: string | null;
-  onApplySettings?: (settings: AiSettings) => void;
+  onApplySettings?: (settings: AiSettings, endpointId?: string | null) => void;
 };
 
 /** 规范化基础 URL，去除首尾空格和末尾斜杠 */
@@ -129,6 +129,7 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
     form.resetFields();
     form.setFieldsValue({
       ...AI_PROVIDER_PRESETS['openai'],
+      provider: 'openai',
       forceStreamFallback: true,
     });
     setVisible(true);
@@ -396,7 +397,7 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
       }
 
       if (canRunConnectivityTest && connectivityVerified !== false) {
-        onApplySettings?.(appliedSettings);
+        onApplySettings?.(appliedSettings, savedEndpointId);
       }
 
       if (!canRunConnectivityTest) {

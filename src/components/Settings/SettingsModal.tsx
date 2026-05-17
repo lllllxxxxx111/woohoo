@@ -64,6 +64,7 @@ export const SettingsModal: React.FC = () => {
     aiSettings,
     serverAiEndpointId,
     updateAiSettings,
+    setServerAiEndpointId,
     isAuthenticated,
     setIsAuthenticated,
   } = useAppStore(
@@ -79,6 +80,7 @@ export const SettingsModal: React.FC = () => {
       aiSettings: state.aiSettings,
       serverAiEndpointId: state.serverAiEndpointId,
       updateAiSettings: state.updateAiSettings,
+      setServerAiEndpointId: state.setServerAiEndpointId,
       isAuthenticated: state.isAuthenticated,
       setIsAuthenticated: state.setIsAuthenticated,
     })),
@@ -383,10 +385,13 @@ export const SettingsModal: React.FC = () => {
                 <EndpointManagement
                   currentSettings={draftAiSettings}
                   currentEndpointId={serverAiEndpointId}
-                  onApplySettings={(settings) => {
+                  onApplySettings={(settings, endpointId) => {
                     const normalizedSettings = normalizeAiSettingsPayload(settings);
                     setDraftAiSettings(normalizedSettings);
                     updateAiSettings(normalizedSettings);
+                    if (endpointId) {
+                      setServerAiEndpointId(endpointId);
+                    }
                   }}
                 />
 

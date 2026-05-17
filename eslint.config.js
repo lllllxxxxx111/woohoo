@@ -11,18 +11,18 @@ import eslintConfigPrettier from 'eslint-config-prettier';
 export default [
   /** 全局忽略目录 */
   {
-    ignores: ['dist/**', 'dist-image-studio/**', 'node_modules/**', 'server/**', '*.js', '*.cjs'],
+    ignores: ['dist/**', 'node_modules/**', 'server/**', '*.js', '*.cjs'],
   },
 
   /** 基础推荐规则 + TypeScript 配置 */
   {
     ...js.configs.recommended,
-    files: ['src/**/*.{ts,tsx}', 'src-image-studio/**/*.{ts,tsx}'],
+    files: ['src/**/*.{ts,tsx}'],
   },
 
   /** TypeScript 专用规则配置 */
   {
-    files: ['src/**/*.{ts,tsx}', 'src-image-studio/**/*.{ts,tsx}'],
+    files: ['src/**/*.{ts,tsx}'],
     languageOptions: {
       parser: tsParser,
       parserOptions: {

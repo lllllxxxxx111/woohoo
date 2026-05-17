@@ -15,6 +15,9 @@ import {
   MoreVertical,
   Download,
   Trash2,
+  ImageOff,
+  Loader2,
+  ZoomIn,
 } from 'lucide-react';
 import { useAppStore } from '../../../../store';
 import { useShallow } from 'zustand/react/shallow';
@@ -23,6 +26,7 @@ import { Asset } from '../../../../types';
 import { useAppActions } from '../../../../context/useAppActions';
 import { useToast } from '../../../../context/useToast';
 import { getServerAssetBlob } from '../../../../lib/serverApi';
+import { isProtectedAssetUrl, useAssetPreviewUrl } from '../../../../hooks/useAssetPreviewUrl';
 import styles from './AssetLibrary.module.css';
 
 interface UploadingFile {
@@ -35,52 +39,78 @@ interface UploadingFile {
 type FilterType = 'all' | 'image' | 'video' | 'audio' | 'document';
 type ViewMode = 'grid' | 'list';
 
-function shouldLoadProtectedAsset(assetId: string, assetUrl: string) {
-  return assetUrl.includes(`/api/assets/${assetId}/file`) || assetUrl.includes('/uploads/');
+type PreviewImage = {
+  src: string;
+  name: string;
+};
+
+function isFavoriteAsset(asset: Asset): boolean {
+  return asset.metadata?.favorite === true;
 }
 
-const AssetPreviewImage: React.FC<{ asset: Asset }> = ({ asset }) => {
-  const [previewUrl, setPreviewUrl] = useState(asset.url);
+function getAssetRating(asset: Asset): number {
+  const rating = Number(asset.metadata?.rating ?? 0);
+  if (!Number.isFinite(rating)) {
+    return 0;
+  }
 
-  useEffect(() => {
-    if (!shouldLoadProtectedAsset(asset.id, asset.url)) {
-      setPreviewUrl(asset.url);
-      return;
-    }
+  return Math.min(5, Math.max(0, Math.round(rating)));
+}
 
-    let cancelled = false;
-    let objectUrl: string | null = null;
+function normalizeAssetMetadata(metadata: Asset['metadata']): Record<string, unknown> {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    return {};
+  }
 
-    void getServerAssetBlob(asset.id)
-      .then((blob) => {
-        if (cancelled) {
-          return;
-        }
-        objectUrl = window.URL.createObjectURL(blob);
-        setPreviewUrl(objectUrl);
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setPreviewUrl(asset.url);
-        }
-      });
+  return metadata;
+}
 
-    return () => {
-      cancelled = true;
-      if (objectUrl) {
-        window.URL.revokeObjectURL(objectUrl);
-      }
-    };
-  }, [asset.id, asset.url]);
+const AssetPreviewImage: React.FC<{
+  asset: Asset;
+  onPreview: (preview: PreviewImage) => void;
+}> = ({ asset, onPreview }) => {
+  const { previewUrl, status, error } = useAssetPreviewUrl(asset);
 
-  return <img src={previewUrl} alt={asset.name} loading="lazy" />;
+  if (status === 'ready' && previewUrl) {
+    return (
+      <button
+        type="button"
+        className={styles.previewButton}
+        onClick={(event) => {
+          event.stopPropagation();
+          onPreview({ src: previewUrl, name: asset.name });
+        }}
+        title="放大预览"
+      >
+        <img src={previewUrl} alt={asset.name} loading="lazy" />
+        <span className={styles.zoomHint}>
+          <ZoomIn size={16} />
+        </span>
+      </button>
+    );
+  }
+
+  if (status === 'error') {
+    return (
+      <div className={styles.previewState} title={error ?? '资产文件无法预览'}>
+        <ImageOff size={24} />
+        <span>无法预览</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className={styles.previewState} aria-label={`${asset.name} 正在加载预览`}>
+      <Loader2 size={22} className={styles.previewSpinner} />
+    </div>
+  );
 };
 
 export const AssetLibrary: React.FC = () => {
   const { activeAssets, activeState } = useAppStore(
     useShallow((state) => ({ activeAssets: state.activeAssets, activeState: state.activeState })),
   );
-  const { uploadAssets, deleteAsset } = useAppActions();
+  const { uploadAssets, deleteAsset, updateAsset } = useAppActions();
   const { showToast } = useToast();
 
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
@@ -92,8 +122,10 @@ export const AssetLibrary: React.FC = () => {
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [showFilterDropdown, setShowFilterDropdown] = useState(false);
   const [selectedAsset, setSelectedAsset] = useState<string | null>(null);
+  const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const metadataUpdateQueuesRef = useRef(new Map<string, Promise<Asset>>());
 
   const getAssetIcon = (type: Asset['type']) => {
     switch (type) {
@@ -243,6 +275,52 @@ export const AssetLibrary: React.FC = () => {
     setSelectedAsset(assetId === selectedAsset ? null : assetId);
   };
 
+  const updateAssetMetadata = (
+    asset: Asset,
+    nextMetadata: Record<string, unknown>,
+    event?: React.MouseEvent,
+  ) => {
+    event?.stopPropagation();
+
+    const existingOperation = metadataUpdateQueuesRef.current.get(asset.id) ?? Promise.resolve(asset);
+    let nextOperation: Promise<Asset>;
+
+    nextOperation = existingOperation
+      .catch(() => asset)
+      .then((latestAsset) =>
+        updateAsset(asset.id, {
+          metadata: {
+            ...normalizeAssetMetadata(latestAsset.metadata),
+            ...nextMetadata,
+          },
+        }),
+      )
+      .catch((error) => {
+        showToast({
+          type: 'error',
+          title: '更新资产标记失败',
+          message: error instanceof Error ? error.message : '请稍后重试',
+        });
+        return asset;
+      })
+      .finally(() => {
+        if (metadataUpdateQueuesRef.current.get(asset.id) === nextOperation) {
+          metadataUpdateQueuesRef.current.delete(asset.id);
+        }
+      });
+
+    metadataUpdateQueuesRef.current.set(asset.id, nextOperation);
+  };
+
+  const handleFavoriteToggle = (asset: Asset, event: React.MouseEvent) => {
+    updateAssetMetadata(asset, { favorite: !isFavoriteAsset(asset) }, event);
+  };
+
+  const handleRatingChange = (asset: Asset, rating: number, event: React.MouseEvent) => {
+    const currentRating = getAssetRating(asset);
+    updateAssetMetadata(asset, { rating: currentRating === rating ? 0 : rating }, event);
+  };
+
   const handleAssetDownload = async (asset: Asset, event: React.MouseEvent) => {
     event.stopPropagation();
 
@@ -252,7 +330,7 @@ export const AssetLibrary: React.FC = () => {
       link.target = '_blank';
       link.rel = 'noreferrer';
 
-      if (shouldLoadProtectedAsset(asset.id, asset.url)) {
+      if (isProtectedAssetUrl(asset.id, asset.url)) {
         const blob = await getServerAssetBlob(asset.id);
         const objectUrl = window.URL.createObjectURL(blob);
         link.href = objectUrl;
@@ -380,63 +458,105 @@ export const AssetLibrary: React.FC = () => {
         </div>
       ) : (
         <div className={viewMode === 'grid' ? styles.gridLayout : styles.listLayout}>
-          {filteredAssets.map((asset, index) => (
-            <div
-              key={asset.id}
-              className={`${viewMode === 'grid' ? styles.assetCard : styles.assetListItem} ${selectedAsset === asset.id ? styles.selected : ''}`}
-              style={{ animationDelay: `${index * 0.08}s` }}
-              onClick={() => handleAssetClick(asset.id)}
-            >
-              <div className={styles.assetPreview}>
-                {asset.type === 'image' ? (
-                  <AssetPreviewImage asset={asset} />
-                ) : (
-                  <div className={styles.iconPreview}>{getAssetIcon(asset.type)}</div>
-                )}
-                {selectedAsset === asset.id && (
-                  <div className={styles.assetOverlay}>
+          {filteredAssets.map((asset, index) => {
+            const favorite = isFavoriteAsset(asset);
+            const rating = getAssetRating(asset);
+
+            return (
+              <div
+                key={asset.id}
+                className={`${viewMode === 'grid' ? styles.assetCard : styles.assetListItem} ${selectedAsset === asset.id ? styles.selected : ''}`}
+                style={{ animationDelay: `${index * 0.08}s` }}
+                onClick={() => handleAssetClick(asset.id)}
+              >
+                <div className={styles.assetPreview}>
+                  {asset.type === 'image' ? (
+                    <AssetPreviewImage asset={asset} onPreview={setPreviewImage} />
+                  ) : (
+                    <div className={styles.iconPreview}>{getAssetIcon(asset.type)}</div>
+                  )}
+                  {selectedAsset === asset.id && (
+                    <div className={styles.assetOverlay}>
+                      <button
+                        className={styles.actionBtn}
+                        title="下载"
+                        onClick={(event) => void handleAssetDownload(asset, event)}
+                      >
+                        <Download size={16} />
+                      </button>
+                      <button
+                        className={`${styles.actionBtn} ${favorite ? styles.favoriteActive : ''}`}
+                        title={favorite ? '取消收藏' : '收藏'}
+                        onClick={(event) => handleFavoriteToggle(asset, event)}
+                      >
+                        <Star size={16} fill={favorite ? 'currentColor' : 'none'} />
+                      </button>
+                      <button
+                        className={`${styles.actionBtn} ${styles.danger}`}
+                        title="删除"
+                        onClick={(event) => void handleAssetDelete(asset, event)}
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  )}
+                </div>
+                <div className={styles.assetInfo}>
+                  <div className={styles.assetNameRow}>
+                    <span className={styles.assetName} title={asset.name}>
+                      {asset.name}
+                    </span>
                     <button
-                      className={styles.actionBtn}
-                      title="下载"
-                      onClick={(event) => void handleAssetDownload(asset, event)}
+                      className={`${styles.favoriteButton} ${favorite ? styles.favoriteButtonActive : ''}`}
+                      title={favorite ? '取消收藏' : '收藏'}
+                      aria-label={favorite ? '取消收藏' : '收藏'}
+                      aria-pressed={favorite}
+                      onClick={(event) => handleFavoriteToggle(asset, event)}
                     >
-                      <Download size={16} />
+                      <Star size={15} fill={favorite ? 'currentColor' : 'none'} />
                     </button>
                     <button
-                      className={styles.actionBtn}
-                      title="收藏"
+                      className={styles.moreBtn}
                       onClick={(event) => event.stopPropagation()}
                     >
-                      <Star size={16} />
-                    </button>
-                    <button
-                      className={`${styles.actionBtn} ${styles.danger}`}
-                      title="删除"
-                      onClick={(event) => void handleAssetDelete(asset, event)}
-                    >
-                      <Trash2 size={16} />
+                      <MoreVertical size={16} />
                     </button>
                   </div>
-                )}
-              </div>
-              <div className={styles.assetInfo}>
-                <div className={styles.assetNameRow}>
-                  <span className={styles.assetName} title={asset.name}>
-                    {asset.name}
-                  </span>
-                  <button className={styles.moreBtn} onClick={(event) => event.stopPropagation()}>
-                    <MoreVertical size={16} />
-                  </button>
+                  <div className={styles.assetMetaRow}>
+                    <span className={styles.assetType}>{getFilterLabel(asset.type)}</span>
+                    {favorite && (
+                      <span className={styles.favoriteBadge}>
+                        <Star size={12} fill="currentColor" />
+                        收藏
+                      </span>
+                    )}
+                    <span className={styles.assetDate}>
+                      {new Date(asset.createdAt).toLocaleDateString('zh-CN')}
+                    </span>
+                  </div>
+                  <div
+                    className={styles.ratingRow}
+                    onClick={(event) => event.stopPropagation()}
+                    aria-label={`${asset.name} 星级评分`}
+                  >
+                    {[1, 2, 3, 4, 5].map((value) => (
+                      <button
+                        key={value}
+                        type="button"
+                        className={`${styles.ratingButton} ${rating >= value ? styles.ratingActive : ''}`}
+                        title={`${value} 星`}
+                        aria-label={`${value} 星`}
+                        aria-pressed={rating >= value}
+                        onClick={(event) => handleRatingChange(asset, value, event)}
+                      >
+                        <Star size={13} fill={rating >= value ? 'currentColor' : 'none'} />
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div className={styles.assetMetaRow}>
-                  <span className={styles.assetType}>{getFilterLabel(asset.type)}</span>
-                  <span className={styles.assetDate}>
-                    {new Date(asset.createdAt).toLocaleDateString('zh-CN')}
-                  </span>
-                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -499,6 +619,42 @@ export const AssetLibrary: React.FC = () => {
           </div>
         </div>
       )}
+
+      {previewImage && (
+        <AssetPreviewDialog preview={previewImage} onClose={() => setPreviewImage(null)} />
+      )}
+    </div>
+  );
+};
+
+const AssetPreviewDialog: React.FC<{
+  preview: PreviewImage;
+  onClose: () => void;
+}> = ({ preview, onClose }) => {
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className={styles.previewOverlay} role="dialog" aria-modal="true" onClick={onClose}>
+      <div className={styles.previewDialog} onClick={(event) => event.stopPropagation()}>
+        <div className={styles.previewHeader}>
+          <strong>{preview.name}</strong>
+          <button type="button" onClick={onClose} title="关闭预览">
+            <X size={18} />
+          </button>
+        </div>
+        <div className={styles.previewCanvas}>
+          <img src={preview.src} alt={preview.name} />
+        </div>
+      </div>
     </div>
   );
 };

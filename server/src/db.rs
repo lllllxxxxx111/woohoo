@@ -138,6 +138,14 @@ async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<String>, sqlx::E
             "013_image_studio",
             include_str!("../migrations/013_image_studio.sql"),
         ),
+        (
+            "014_image_generation_assets",
+            include_str!("../migrations/014_image_generation_assets.sql"),
+        ),
+        (
+            "015_ai_endpoint_capabilities",
+            include_str!("../migrations/015_ai_endpoint_capabilities.sql"),
+        ),
     ] {
         if run_sql_migration(pool, version, migration_sql).await? {
             applied_versions.push(version.to_string());
@@ -160,6 +168,9 @@ async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<String>, sqlx::E
         applied_versions.push(version);
     }
     if let Some(version) = run_updated_at_column_backfill_migration(pool).await? {
+        applied_versions.push(version);
+    }
+    if let Some(version) = run_image_generation_assets_backfill_migration(pool).await? {
         applied_versions.push(version);
     }
 
@@ -275,6 +286,39 @@ async fn run_updated_at_column_backfill_migration(
 
     tracing::info!(version = VERSION, "执行通用 updated_at 缺列兼容回填");
     backfill_generic_updated_at_columns(pool).await?;
+    record_schema_migration(pool, VERSION, "rust").await?;
+    Ok(Some(VERSION.to_string()))
+}
+
+async fn run_image_generation_assets_backfill_migration(
+    pool: &SqlitePool,
+) -> Result<Option<String>, sqlx::Error> {
+    const VERSION: &str = "014_image_generation_assets_backfills";
+
+    if has_schema_migration(pool, VERSION).await? {
+        return Ok(None);
+    }
+
+    let mut columns = list_table_columns(pool, "image_generations").await?;
+    if !columns.is_empty() {
+        if !columns.contains("project_id") {
+            sqlx::query("ALTER TABLE image_generations ADD COLUMN project_id TEXT")
+                .execute(pool)
+                .await?;
+            columns.insert("project_id".to_string());
+        }
+        if !columns.contains("asset_ids") {
+            sqlx::query("ALTER TABLE image_generations ADD COLUMN asset_ids TEXT")
+                .execute(pool)
+                .await?;
+        }
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_image_gen_project ON image_generations(project_id, created_at DESC)",
+        )
+        .execute(pool)
+        .await?;
+    }
+
     record_schema_migration(pool, VERSION, "rust").await?;
     Ok(Some(VERSION.to_string()))
 }

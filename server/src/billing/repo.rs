@@ -163,6 +163,83 @@ pub async fn refund(
 /**
  * 充值积分
  */
+pub async fn refund_outstanding_for_ref(
+    pool: &SqlitePool,
+    user_id: &str,
+    ref_type: &str,
+    ref_id: &str,
+    reason: &str,
+) -> Result<f64> {
+    let mut tx = pool.begin().await?;
+    ensure_user_credits_tx(&mut tx, user_id).await?;
+
+    let spent: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(amount), 0)
+         FROM credit_transactions
+         WHERE user_id = ? AND kind = 'spent' AND ref_type = ? AND ref_id = ?",
+    )
+    .bind(user_id)
+    .bind(ref_type)
+    .bind(ref_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let refunded: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(amount), 0)
+         FROM credit_transactions
+         WHERE user_id = ? AND kind = 'refund' AND ref_type = ? AND ref_id = ?",
+    )
+    .bind(user_id)
+    .bind(ref_type)
+    .bind(ref_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let amount = (spent - refunded).max(0.0);
+    if amount <= f64::EPSILON {
+        tx.commit().await?;
+        return Ok(0.0);
+    }
+
+    let new_balance: f64 =
+        sqlx::query_scalar("SELECT balance + ? FROM user_credits WHERE user_id = ?")
+            .bind(amount)
+            .bind(user_id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+    let now = now_iso();
+
+    sqlx::query(
+        "UPDATE user_credits SET balance = ?, total_earned = total_earned + ?, updated_at = ? WHERE user_id = ?",
+    )
+    .bind(new_balance)
+    .bind(amount)
+    .bind(&now)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    let txn_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO credit_transactions (id, user_id, amount, balance_after, kind, reason, ref_type, ref_id, created_at)
+         VALUES (?, ?, ?, ?, 'refund', ?, ?, ?, ?)",
+    )
+    .bind(&txn_id)
+    .bind(user_id)
+    .bind(amount)
+    .bind(new_balance)
+    .bind(reason)
+    .bind(ref_type)
+    .bind(ref_id)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(amount)
+}
+
 pub async fn top_up(
     pool: &SqlitePool,
     user_id: &str,

@@ -1,14 +1,9 @@
-import React, { Suspense, lazy } from 'react';
+import React from 'react';
 import { Settings } from 'lucide-react';
 import styles from './SettingsMenu.module.css';
 import { useAppStore } from '../../../../store';
 import { useShallow } from 'zustand/react/shallow';
-
-const SettingsModal = lazy(() =>
-  import('../../../../components/Settings/SettingsModal').then((module) => ({
-    default: module.SettingsModal,
-  })),
-);
+import { SettingsModal } from '../../../../components/Settings/SettingsModal';
 
 export const SettingsMenu: React.FC = () => {
   const { isSidebarCollapsed, isSettingsOpen, setSettingsOpen } = useAppStore(
@@ -25,7 +20,7 @@ export const SettingsMenu: React.FC = () => {
         <button className={styles.triggerBtn} onClick={() => setSettingsOpen(true)}>
           <Settings size={20} />
         </button>
-        <Suspense fallback={null}>{isSettingsOpen ? <SettingsModal /> : null}</Suspense>
+        {isSettingsOpen ? <SettingsModal /> : null}
       </div>
     );
   }
@@ -39,7 +34,7 @@ export const SettingsMenu: React.FC = () => {
         </div>
         <Settings size={18} />
       </button>
-      <Suspense fallback={null}>{isSettingsOpen ? <SettingsModal /> : null}</Suspense>
+      {isSettingsOpen ? <SettingsModal /> : null}
     </div>
   );
 };

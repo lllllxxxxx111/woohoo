@@ -5,6 +5,7 @@ import {
   deleteServerMessage,
   rewindServerConversation,
   updateServerConversation,
+  updateServerAsset,
   updateServerMessage,
   uploadServerAsset,
   upsertServerScript,
@@ -685,6 +686,38 @@ export function useChatWorkspaceActions({
     [assets, setAssets, setProjects, setStoryboards],
   );
 
+  const updateAsset = useCallback(
+    async (
+      assetId: string,
+      input: Partial<Pick<Asset, 'name' | 'type' | 'url' | 'metadata'>>,
+    ) => {
+      const targetAsset = assets.find((asset) => asset.id === assetId);
+      if (!targetAsset) {
+        throw new Error('资产不存在');
+      }
+
+      const nextAsset = await updateServerAsset(assetId, input);
+
+      setAssets((prev) => prev.map((asset) => (asset.id === assetId ? nextAsset : asset)));
+      setStoryboards((prev) =>
+        prev.map((storyboard) =>
+          storyboard.projectId !== nextAsset.projectId
+            ? storyboard
+            : {
+                ...storyboard,
+                lines: storyboard.lines.map((line) => ({
+                  ...line,
+                  assets: line.assets.map((asset) => (asset.id === assetId ? nextAsset : asset)),
+                })),
+              },
+        ),
+      );
+
+      return nextAsset;
+    },
+    [assets, setAssets, setStoryboards],
+  );
+
   const saveScript = useCallback(
     async (projectId: string, content: string, title?: string) => {
       const existingScript = scripts.find((script) => script.projectId === projectId);
@@ -852,6 +885,7 @@ export function useChatWorkspaceActions({
     removeMessageLocally,
     deleteMessageInChat,
     uploadAssets,
+    updateAsset,
     deleteAsset,
     saveScript,
     saveStoryboard,

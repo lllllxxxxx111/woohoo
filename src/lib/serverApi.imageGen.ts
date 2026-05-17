@@ -2,6 +2,7 @@ export type ImageGenerationStatus = 'pending' | 'processing' | 'completed' | 'fa
 
 export type ImageGeneration = {
   id: string;
+  projectId?: string | null;
   prompt: string;
   model: string;
   size: string;
@@ -10,6 +11,7 @@ export type ImageGeneration = {
   errorMessage?: string | null;
   urls: string[];
   b64Data: string[];
+  assetIds: string[];
   revisedPrompt?: string | null;
   costCredits: number;
   createdAt: string;
@@ -17,6 +19,8 @@ export type ImageGeneration = {
 };
 
 export type CreateImageGenerationInput = {
+  projectId: string;
+  endpointId?: string | null;
   prompt: string;
   model: string;
   size: string;
@@ -56,7 +60,11 @@ function withTimeout(ms: number) {
   };
 }
 
-export function createImageGenApi(requestApi: RequestApi) {
+type ImageGenApiDeps = {
+  invalidateWorkspaceCache?: () => void;
+};
+
+export function createImageGenApi(requestApi: RequestApi, deps: ImageGenApiDeps = {}) {
   return {
     listGenerations() {
       return requestApi<ImageGeneration[]>('/api/image-gen/generations');
@@ -69,11 +77,13 @@ export function createImageGenApi(requestApi: RequestApi) {
     async createGeneration(input: CreateImageGenerationInput) {
       const timeout = withTimeout(120_000);
       try {
-        return await requestApi<ImageGeneration>('/api/image-gen/generations', {
+        const generation = await requestApi<ImageGeneration>('/api/image-gen/generations', {
           method: 'POST',
           body: JSON.stringify(input),
           signal: timeout.signal,
         });
+        deps.invalidateWorkspaceCache?.();
+        return generation;
       } finally {
         timeout.clear();
       }

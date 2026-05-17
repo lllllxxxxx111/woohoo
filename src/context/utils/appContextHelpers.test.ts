@@ -152,12 +152,12 @@ describe('sanitizeActiveState', () => {
     const result = sanitizeActiveState([], {
       projectId: 'proj-1',
       chatSessionId: 'chat-1',
-      currentTab: 'chat',
+      currentTab: 'imageGeneration',
     });
     expect(result).toEqual({
       projectId: null,
       chatSessionId: null,
-      currentTab: 'chat',
+      currentTab: 'imageGeneration',
     });
   });
 
@@ -166,9 +166,10 @@ describe('sanitizeActiveState', () => {
     const result = sanitizeActiveState([project], {
       projectId: 'invalid',
       chatSessionId: null,
-      currentTab: 'chat',
+      currentTab: 'imageGeneration',
     });
     expect(result.projectId).toBe('proj-1');
+    expect(result.currentTab).toBe('imageGeneration');
   });
 
   it('应在聊天会话 ID 无效时回退到第一个会话', () => {

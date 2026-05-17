@@ -27,6 +27,11 @@ export type {
   UserCredits,
 } from './serverApi.imageGen';
 export type {
+  ServerAiEndpoint,
+  ServerAiEndpointCapability,
+  UpsertEndpointCapabilityInput,
+} from './serverApi.endpoints';
+export type {
   NotificationChannelType,
   OpsNotificationChannel,
   OpsNotificationEvent,
@@ -113,9 +118,9 @@ type ServerAsset = {
   name: string;
   type: Asset['type'];
   url: string;
-  metadata?: Record<string, unknown> | null;
-  createdAt: string;
-  updatedAt?: string;
+  metadata?: Record<string, unknown> | string | null;
+  createdAt: string | number;
+  updatedAt?: string | number;
 };
 
 type ServerScript = {
@@ -344,6 +349,8 @@ const SERVER_PORT_SEARCH_LIMIT =
   Number.parseInt(import.meta.env.VITE_SERVER_PORT_SEARCH_LIMIT || '12', 10) || 12;
 const DEFAULT_SERVER_REQUEST_TIMEOUT_MS =
   Number.parseInt(import.meta.env.VITE_SERVER_REQUEST_TIMEOUT_MS || '10000', 10) || 10000;
+const SERVER_BASE_URL_PROBE_TTL_MS =
+  Number.parseInt(import.meta.env.VITE_SERVER_BASE_URL_PROBE_TTL_MS || '30000', 10) || 30000;
 const REQUEST_ID_HEADER = 'x-request-id';
 const CACHE_KEYS = {
   aiEndpoints: 'ai-endpoints',
@@ -362,6 +369,7 @@ let resolvedServerBaseUrl: string | null = null;
 let pendingServerBaseUrlPromise: Promise<string> | null = null;
 const pendingCacheRequests = new Map<string, Promise<unknown>>();
 const responseCache = new Map<string, { expiresAt: number; value: unknown }>();
+const serverBaseUrlProbeCache = new Map<string, number>();
 
 function clearAllApiCaches() {
   responseCache.clear();
@@ -417,6 +425,7 @@ function persistServerBaseUrl(baseUrl: string) {
 
 function clearStoredServerBaseUrl() {
   resolvedServerBaseUrl = null;
+  serverBaseUrlProbeCache.clear();
 
   if (typeof window === 'undefined') {
     return;
@@ -473,6 +482,15 @@ function getLoopbackFallbackBaseUrls(baseUrl: string) {
   }
 }
 
+function hasRecentServerBaseUrlProbe(baseUrl: string) {
+  const checkedAt = serverBaseUrlProbeCache.get(normalizeServerBaseUrl(baseUrl));
+  return Boolean(checkedAt && Date.now() - checkedAt < SERVER_BASE_URL_PROBE_TTL_MS);
+}
+
+function markServerBaseUrlReachable(baseUrl: string) {
+  serverBaseUrlProbeCache.set(normalizeServerBaseUrl(baseUrl), Date.now());
+}
+
 async function probeServerBaseUrl(baseUrl: string) {
   const controller = new AbortController();
   const timeoutId =
@@ -495,18 +513,26 @@ async function probeServerBaseUrl(baseUrl: string) {
     const parsed = rawText ? tryParseJson(rawText) : null;
 
     if (typeof parsed === 'string') {
-      return parsed.trim() === 'OK';
+      const ok = parsed.trim() === 'OK';
+      if (ok) {
+        markServerBaseUrlReachable(baseUrl);
+      }
+      return ok;
     }
 
-    return Boolean(
+    const ok = Boolean(
       parsed &&
-      typeof parsed === 'object' &&
-      'service' in parsed &&
-      parsed.service === 'woohoo-server' &&
-      'status' in parsed &&
-      typeof parsed.status === 'string' &&
-      parsed.status.toLowerCase() === 'ok',
+        typeof parsed === 'object' &&
+        'service' in parsed &&
+        parsed.service === 'woohoo-server' &&
+        'status' in parsed &&
+        typeof parsed.status === 'string' &&
+        parsed.status.toLowerCase() === 'ok',
     );
+    if (ok) {
+      markServerBaseUrlReachable(baseUrl);
+    }
+    return ok;
   } catch {
     return false;
   } finally {
@@ -532,6 +558,10 @@ export async function getServerBaseUrl(forceRefresh = false) {
   if (!forceRefresh) {
     const storedBaseUrl = loadStoredServerBaseUrl();
     if (storedBaseUrl) {
+      if (hasRecentServerBaseUrlProbe(storedBaseUrl)) {
+        return storedBaseUrl;
+      }
+
       if (await probeServerBaseUrl(storedBaseUrl)) {
         persistServerBaseUrl(storedBaseUrl);
         return storedBaseUrl;
@@ -547,6 +577,10 @@ export async function getServerBaseUrl(forceRefresh = false) {
 
     if (envBaseUrl) {
       const normalizedEnvBaseUrl = normalizeServerBaseUrl(envBaseUrl);
+      if (hasRecentServerBaseUrlProbe(normalizedEnvBaseUrl)) {
+        return normalizedEnvBaseUrl;
+      }
+
       if (await probeServerBaseUrl(normalizedEnvBaseUrl)) {
         persistServerBaseUrl(normalizedEnvBaseUrl);
         return normalizedEnvBaseUrl;
@@ -704,7 +738,11 @@ export function clearStoredSession() {
 
 // Demo session generator removed - enforcing real authentication
 
-function parseTimestamp(value: string | undefined) {
+function parseTimestamp(value: string | number | undefined) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : Date.now();
+  }
+
   const timestamp = value ? Date.parse(value) : Number.NaN;
   return Number.isFinite(timestamp) ? timestamp : Date.now();
 }
@@ -720,6 +758,31 @@ function parseMeta(value: string | null | undefined) {
     return {
       rawMeta: value,
     } satisfies Message['meta'];
+  }
+}
+
+function parseAssetMetadata(
+  value: Record<string, unknown> | string | null | undefined,
+): Record<string, unknown> | null {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    return value;
+  }
+
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
   }
 }
 
@@ -860,14 +923,16 @@ function mapAsset(asset: ServerAsset): Asset {
     url = `${resolvedServerBaseUrl}${url}`;
   }
 
+  const metadata = parseAssetMetadata(asset.metadata);
+
   return {
     id: asset.id,
     projectId: asset.projectId,
     name: asset.name,
     type: asset.type,
     url,
-    metadata: asset.metadata ?? null,
-    versionLabel: deriveAssetVersionLabel(asset.metadata ?? null),
+    metadata,
+    versionLabel: deriveAssetVersionLabel(metadata),
     createdAt: parseTimestamp(asset.createdAt),
     updatedAt: asset.updatedAt ? parseTimestamp(asset.updatedAt) : undefined,
   };
@@ -1032,11 +1097,14 @@ export async function fetchServer(
   const baseUrl = await getServerBaseUrl(forceRefresh);
 
   try {
-    return await executeFetch(`${baseUrl}${path}`);
+    const response = await executeFetch(`${baseUrl}${path}`);
+    markServerBaseUrlReachable(baseUrl);
+    return response;
   } catch (error) {
     for (const fallbackBaseUrl of getLoopbackFallbackBaseUrls(baseUrl)) {
       try {
         const fallbackResponse = await executeFetch(`${fallbackBaseUrl}${path}`);
+        markServerBaseUrlReachable(fallbackBaseUrl);
         persistServerBaseUrl(fallbackBaseUrl);
         return fallbackResponse;
       } catch {
@@ -1053,7 +1121,9 @@ export async function fetchServer(
       throw error;
     }
 
-    return executeFetch(`${refreshedBaseUrl}${path}`);
+    const response = await executeFetch(`${refreshedBaseUrl}${path}`);
+    markServerBaseUrlReachable(refreshedBaseUrl);
+    return response;
   }
 }
 
@@ -1164,6 +1234,16 @@ export async function bootstrapWorkspace(forceRefresh = false) {
   return readCachedApi(CACHE_KEYS.workspaceBootstrap, CACHE_TTLS.workspaceBootstrap, () =>
     requestApi<WorkspaceBootstrapResponse>('/api/workspace/bootstrap'),
   );
+}
+
+export function applyWorkspaceBootstrap(workspace: WorkspaceBootstrapResponse) {
+  return {
+    projects: workspace.projects,
+    assets: workspace.assets,
+    scripts: workspace.scripts,
+    storyboards: workspace.storyboards,
+    agents: workspace.agents,
+  };
 }
 
 export async function createServerProject(name: string) {
@@ -1310,6 +1390,24 @@ export async function uploadServerAsset(projectId: string, file: File) {
   const asset = await requestApi<ServerAsset>(`/api/projects/${projectId}/assets/upload`, {
     method: 'POST',
     body: formData,
+  });
+
+  invalidateApiCache(CACHE_KEYS.workspaceBootstrap);
+  return mapAsset(asset);
+}
+
+export async function updateServerAsset(
+  assetId: string,
+  input: Partial<Pick<Asset, 'name' | 'type' | 'url' | 'metadata'>>,
+) {
+  const asset = await requestApi<ServerAsset>(`/api/assets/${assetId}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      name: input.name,
+      type: input.type,
+      url: input.url,
+      metadata: input.metadata,
+    }),
   });
 
   invalidateApiCache(CACHE_KEYS.workspaceBootstrap);
@@ -1650,6 +1748,8 @@ export const listServerAiEndpoints = endpointApi.listServerAiEndpoints;
 export const createServerAiEndpoint = endpointApi.createServerAiEndpoint;
 export const updateServerAiEndpoint = endpointApi.updateServerAiEndpoint;
 export const deleteServerAiEndpoint = endpointApi.deleteServerAiEndpoint;
+export const listServerAiEndpointCapabilities = endpointApi.listServerAiEndpointCapabilities;
+export const upsertServerAiEndpointCapability = endpointApi.upsertServerAiEndpointCapability;
 
 const notificationApi = createNotificationApi({
   requestApi,
@@ -1712,7 +1812,9 @@ export const checkCollaborationLoop = collaborationApi.loopCheck;
 export const admitCollaboration = collaborationApi.admit;
 export const haltCollaboration = collaborationApi.halt;
 
-const imageGenApi = createImageGenApi(requestApi);
+const imageGenApi = createImageGenApi(requestApi, {
+  invalidateWorkspaceCache: () => invalidateApiCache(CACHE_KEYS.workspaceBootstrap),
+});
 
 export const listImageGenerations = imageGenApi.listGenerations;
 export const getImageGeneration = imageGenApi.getGeneration;

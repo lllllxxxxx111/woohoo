@@ -105,6 +105,8 @@ async fn main() {
         }
     }
 
+    reconcile_interrupted_image_generations(&pool).await;
+
     let state = AppState {
         db: pool,
         config: config.clone(),
@@ -374,6 +376,11 @@ async fn main() {
                 .delete(ai::catalog_handlers::delete_endpoint),
         )
         .route(
+            "/api/ai/endpoints/{id}/capabilities",
+            get(ai::catalog_handlers::list_endpoint_capabilities)
+                .put(ai::catalog_handlers::upsert_endpoint_capability),
+        )
+        .route(
             "/api/ai/endpoints/{id}/test",
             post(ai::handlers::test_endpoint_with_saved_key),
         )
@@ -527,7 +534,7 @@ async fn main() {
             "/api/billing/transactions",
             get(billing::handlers::list_credit_transactions),
         )
-        .layer(axum_middleware::from_fn_with_state(
+        .route_layer(axum_middleware::from_fn_with_state(
             state.clone(),
             auth::middleware::auth_middleware,
         ));
@@ -541,19 +548,6 @@ async fn main() {
      */
     let rate_limiter = crate::middleware::create_rate_limiter();
     let auth_rate_limiter = crate::middleware::create_auth_rate_limiter();
-
-    // Image Studio 前端静态文件服务（公开访问，前端自己控制认证逻辑）
-    let image_studio_dir =
-        std::env::var("IMAGE_STUDIO_DIST_DIR").unwrap_or_else(|_| "dist-image-studio".to_string());
-
-    // 将 Image Studio 静态文件添加到公开路由
-    public_routes = public_routes.nest(
-        "/image-studio",
-        Router::new().fallback(axum::routing::get_service(
-            tower_http::services::ServeDir::new(&image_studio_dir)
-                .append_index_html_on_directories(true),
-        )),
-    );
 
     let app = public_routes
         .layer(axum::middleware::from_fn_with_state(
@@ -574,12 +568,65 @@ async fn main() {
 
     // 启动服务
     tracing::info!("🚀 Server listening on {}", bound_addr);
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }
 
 fn load_env_files() {
     for path in ["server/.env.local", "server/.env", ".env.local", ".env"] {
         let _ = dotenvy::from_filename(path);
+    }
+}
+
+async fn reconcile_interrupted_image_generations(pool: &SqlitePool) {
+    let interrupted = match image_gen::repo::list_interrupted_generations(pool).await {
+        Ok(generations) => generations,
+        Err(error) => {
+            tracing::warn!("Failed to list interrupted image generation tasks: {}", error);
+            return;
+        }
+    };
+
+    for generation in &interrupted {
+        match billing::repo::refund_outstanding_for_ref(
+            pool,
+            &generation.user_id,
+            "image_generation",
+            &generation.id,
+            "image_generation_interrupted",
+        )
+        .await
+        {
+            Ok(amount) if amount > 0.0 => {
+                tracing::info!(
+                    generation_id = %generation.id,
+                    amount,
+                    "Refunded interrupted image generation charge"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    generation_id = %generation.id,
+                    error = %error,
+                    "Failed to refund interrupted image generation charge"
+                );
+            }
+        }
+    }
+
+    match image_gen::repo::fail_interrupted_generations(pool).await {
+        Ok(count) if count > 0 => {
+            tracing::info!("Marked {} interrupted image generation tasks as failed", count);
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!("Failed to reconcile interrupted image generation tasks: {}", error);
+        }
     }
 }
 

@@ -16,6 +16,77 @@ import type {
 import type { AiTask } from '../lib/serverApi';
 
 type ExecutionMode = 'task' | 'sync' | 'direct';
+const ACTIVE_STATE_STORAGE_KEY = 'woohoo-active-state-v2';
+const DEFAULT_ACTIVE_STATE: ActiveState = { projectId: null, chatSessionId: null, currentTab: 'chat' };
+
+function isWorkspaceTab(value: unknown): value is ActiveState['currentTab'] {
+  return (
+    value === 'chat' ||
+    value === 'pipeline' ||
+    value === 'imageGeneration' ||
+    value === 'assets' ||
+    value === 'automation' ||
+    value === 'skills' ||
+    value === 'preview'
+  );
+}
+
+function normalizeActiveState(value: Partial<ActiveState> | null | undefined): ActiveState {
+  return {
+    projectId: typeof value?.projectId === 'string' ? value.projectId : null,
+    chatSessionId: typeof value?.chatSessionId === 'string' ? value.chatSessionId : null,
+    currentTab: isWorkspaceTab(value?.currentTab) ? value.currentTab : 'chat',
+  };
+}
+
+function readStoredActiveState(): ActiveState {
+  if (typeof window === 'undefined') {
+    return DEFAULT_ACTIVE_STATE;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(ACTIVE_STATE_STORAGE_KEY);
+    if (!raw) {
+      return DEFAULT_ACTIVE_STATE;
+    }
+
+    const parsed = JSON.parse(raw) as unknown;
+    const value =
+      parsed && typeof parsed === 'object' && 'value' in parsed
+        ? (parsed as { value?: Partial<ActiveState> }).value
+        : (parsed as Partial<ActiveState>);
+    return normalizeActiveState(value);
+  } catch {
+    return DEFAULT_ACTIVE_STATE;
+  }
+}
+
+function persistActiveState(activeState: ActiveState) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  let userId: string | null = null;
+  try {
+    const rawSession = window.localStorage.getItem('woohoo-server-session-v1');
+    if (rawSession) {
+      const session = JSON.parse(rawSession) as { userId?: unknown };
+      userId = typeof session.userId === 'string' ? session.userId : null;
+    }
+  } catch {
+    userId = null;
+  }
+
+  window.localStorage.setItem(
+    ACTIVE_STATE_STORAGE_KEY,
+    JSON.stringify({
+      userId,
+      value: activeState,
+    }),
+  );
+}
+
+const initialActiveState = readStoredActiveState();
 
 export type SendMessageResult = {
   mode: ExecutionMode;
@@ -83,6 +154,7 @@ export interface AppStoreState {
   setActiveChat: (projectId: string, chatId: string) => void;
   switchTab: (tab: ActiveState['currentTab']) => void;
   updateAiSettings: (settings: AiSettings) => void;
+  setServerAiEndpointId: (endpointId: string | null) => void;
   setAiTasks: (tasks: AiTask[]) => void;
   setSseConnected: (connected: boolean) => void;
   setSseError: (error: string | null) => void;
@@ -98,7 +170,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   assets: [],
   scripts: [],
   storyboards: [],
-  activeState: { projectId: null, chatSessionId: null, currentTab: 'chat' },
+  activeState: initialActiveState,
   activeAssets: [],
   activeScript: null,
   activeStoryboard: null,
@@ -140,39 +212,56 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   setActiveProject: (projectId) => {
     if (!projectId) {
       set((state) => ({
-        activeState: {
-          ...state.activeState,
-          projectId: null,
-          chatSessionId: null,
-          currentTab: 'chat',
-        },
+        activeState: (() => {
+          const nextState: ActiveState = {
+            ...state.activeState,
+            projectId: null,
+            chatSessionId: null,
+            currentTab: 'chat',
+          };
+          persistActiveState(nextState);
+          return nextState;
+        })(),
       }));
       return;
     }
 
     const targetProject = get().projects.find((project) => project.id === projectId);
     set((state) => ({
-      activeState: {
-        ...state.activeState,
-        projectId,
-        currentTab: 'chat',
-        chatSessionId: targetProject?.chatSessions[0]?.id ?? null,
-      },
+      activeState: (() => {
+        const nextState: ActiveState = {
+          ...state.activeState,
+          projectId,
+          currentTab: state.activeState.currentTab === 'preview' ? 'chat' : state.activeState.currentTab,
+          chatSessionId: targetProject?.chatSessions[0]?.id ?? null,
+        };
+        persistActiveState(nextState);
+        return nextState;
+      })(),
     }));
   },
   setActiveChat: (projectId, chatId) =>
     set((state) => ({
-      activeState: { ...state.activeState, projectId, chatSessionId: chatId, currentTab: 'chat' },
+      activeState: (() => {
+        const nextState: ActiveState = { ...state.activeState, projectId, chatSessionId: chatId, currentTab: 'chat' };
+        persistActiveState(nextState);
+        return nextState;
+      })(),
     })),
   switchTab: (tab) =>
     set((state) => ({
-      activeState: { ...state.activeState, currentTab: tab },
+      activeState: (() => {
+        const nextState: ActiveState = { ...state.activeState, currentTab: tab };
+        persistActiveState(nextState);
+        return nextState;
+      })(),
     })),
   updateAiSettings: (settings) =>
     set({
       aiSettings: normalizeAiSettingsPayload(settings),
       serverAiEndpointId: null,
     }),
+  setServerAiEndpointId: (serverAiEndpointId) => set({ serverAiEndpointId }),
   setAiTasks: (aiTasks) => set({ aiTasks }),
   setSseConnected: (isSseConnected) => set({ isSseConnected }),
   setSseError: (sseError) => set({ sseError }),

@@ -8,6 +8,7 @@ import {
   Database,
   Bot,
   Zap,
+  Image,
   LayoutDashboard,
   PanelLeftClose,
   PanelLeftOpen,
@@ -309,6 +310,13 @@ export const Sidebar: React.FC = () => {
           >
             <Database size={18} />
             <span>资产库</span>
+          </div>
+          <div
+            className={`${styles.menuItem} ${activeState.currentTab === 'imageGeneration' ? styles.activeTab : ''}`}
+            onClick={() => switchTab('imageGeneration')}
+          >
+            <Image size={18} />
+            <span>图片生成</span>
           </div>
           <div
             className={`${styles.menuItem} ${activeState.currentTab === 'automation' ? styles.activeTab : ''}`}

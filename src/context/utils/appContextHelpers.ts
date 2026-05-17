@@ -167,7 +167,7 @@ export function getChatSession(
 
 export function sanitizeActiveState(projects: Project[], state: ActiveState): ActiveState {
   if (!projects.length) {
-    return { projectId: null, chatSessionId: null, currentTab: 'chat' };
+    return { projectId: null, chatSessionId: null, currentTab: state.currentTab };
   }
 
   const project = state.projectId
@@ -178,7 +178,7 @@ export function sanitizeActiveState(projects: Project[], state: ActiveState): Ac
     return {
       projectId: projects[0].id,
       chatSessionId: projects[0].chatSessions[0]?.id ?? null,
-      currentTab: 'chat',
+      currentTab: state.currentTab,
     };
   }
 

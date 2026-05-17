@@ -2,7 +2,7 @@ use crate::error::{AppError, AppResult};
 use axum::{
     extract::Request,
     extract::State,
-    http::{header::HeaderName, HeaderValue},
+    http::{header::HeaderName, HeaderValue, Method},
     middleware::Next,
     response::Response,
 };
@@ -175,17 +175,21 @@ fn extract_client_ip(request: &Request) -> String {
     }
 
     if let Some(addr) = request.extensions().get::<SocketAddr>() {
-        return addr.to_string();
+        return addr.ip().to_string();
     }
 
     if let Some(connect_info) = request
         .extensions()
         .get::<axum::extract::ConnectInfo<SocketAddr>>()
     {
-        return connect_info.0.to_string();
+        return connect_info.0.ip().to_string();
     }
 
     "unknown".to_string()
+}
+
+fn should_skip_rate_limit(request: &Request) -> bool {
+    request.method() == Method::OPTIONS || request.uri().path() == "/health"
 }
 
 /**
@@ -199,6 +203,10 @@ pub async fn rate_limit_middleware(
     request: Request,
     next: Next,
 ) -> AppResult<Response> {
+    if should_skip_rate_limit(&request) {
+        return Ok(next.run(request).await);
+    }
+
     let client_ip = extract_client_ip(&request);
 
     // 检查是否允许请求

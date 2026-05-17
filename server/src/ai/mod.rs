@@ -1,4 +1,5 @@
 pub mod catalog_handlers;
+pub mod capabilities;
 pub mod client;
 pub mod config;
 pub mod handlers;

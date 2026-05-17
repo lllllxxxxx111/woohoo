@@ -5,9 +5,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::error::Error as StdError;
 use std::sync::{Arc, Mutex};
 
 const STREAM_FALLBACK_TRIGGER_THRESHOLD: u32 = 3;
+const IMAGE_GENERATION_REQUEST_TIMEOUT_SECS: u64 = 600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamFallbackMode {
@@ -24,12 +26,79 @@ impl Default for StreamFallbackMode {
 
 /// 图片生成请求参数
 #[derive(Debug, Serialize)]
-struct ImageGenerateRequest {
+struct ResponsesImageGenerateRequest {
     model: String,
-    prompt: String,
-    n: u32,
+    input: String,
+    tools: Vec<ResponsesImageTool>,
+    tool_choice: ResponsesToolChoice,
+}
+
+#[derive(Debug, Serialize)]
+struct ResponsesImageTool {
+    #[serde(rename = "type")]
+    tool_type: String,
     size: String,
-    response_format: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ResponsesToolChoice {
+    #[serde(rename = "type")]
+    tool_type: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatImageGenerateRequest {
+    model: String,
+    messages: Vec<ChatImageMessage>,
+    stream: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatImageMessage {
+    role: String,
+    content: String,
+}
+
+fn build_image_generation_url(base_url: &str) -> (String, ImageGenerationApiKind) {
+    let normalized = base_url.trim().trim_end_matches('/');
+    let normalized_lower = normalized.to_ascii_lowercase();
+
+    if normalized_lower.ends_with("/chat/completions") || normalized_lower.ends_with("/chat") {
+        return (normalized.to_string(), ImageGenerationApiKind::Chat);
+    }
+
+    let responses_base = strip_known_generation_path(normalized);
+    (
+        append_responses_path(responses_base),
+        ImageGenerationApiKind::Responses,
+    )
+}
+
+fn strip_known_generation_path(base_url: &str) -> &str {
+    let normalized_lower = base_url.to_ascii_lowercase();
+    for suffix in ["/images/generations", "/responses"] {
+        if normalized_lower.ends_with(suffix) {
+            return base_url[..base_url.len() - suffix.len()].trim_end_matches('/');
+        }
+    }
+    base_url
+}
+
+fn append_responses_path(base_url: &str) -> String {
+    let lower = base_url.to_ascii_lowercase();
+    if lower.ends_with("/responses") {
+        return base_url.to_string();
+    }
+    if lower.ends_with("/v1") || lower.ends_with("/v2") {
+        return format!("{}/responses", base_url);
+    }
+    if lower.contains("api.openai.com") && !lower.contains("/v1") && !lower.contains("/v2") {
+        return format!("{}/v1/responses", base_url);
+    }
+    if lower.contains("/v1/") || lower.contains("/v2/") {
+        return base_url.to_string();
+    }
+    format!("{}/v1/responses", base_url)
 }
 
 /// 图片生成响应
@@ -49,6 +118,12 @@ pub struct ImageDataItem {
     pub revised_prompt: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageGenerationApiKind {
+    Responses,
+    Chat,
+}
+
 impl AiClient {
     /**
      * 调用 OpenAI 兼容的图片生成 API（如 DALL-E 3）
@@ -62,44 +137,60 @@ impl AiClient {
         prompt: &str,
         size: &str,
         n: u32,
-        response_format: &str,
+        _response_format: &str,
     ) -> AppResult<ImageGenerateResponse> {
-        let normalized = base_url.trim().trim_end_matches('/');
-        let url = if normalized.ends_with("/v1") || normalized.ends_with("/v2") {
-            format!("{}/images/generations", normalized)
-        } else if normalized.contains("api.openai.com") {
-            let url_with_v1 = if !normalized.contains("/v1") {
-                format!("{}/v1", normalized)
-            } else {
-                normalized.to_string()
-            };
-            format!("{}/images/generations", url_with_v1)
-        } else {
-            format!("{}/v1/images/generations", normalized)
-        };
-
-        let req = ImageGenerateRequest {
-            model: model.to_string(),
-            prompt: prompt.to_string(),
-            n: n.min(4),
-            size: size.to_string(),
-            response_format: response_format.to_string(),
-        };
+        let (url, api_kind) = build_image_generation_url(base_url);
 
         let mut request = self
             .http
             .post(&url)
-            .header("Content-Type", "application/json");
+            .timeout(std::time::Duration::from_secs(
+                IMAGE_GENERATION_REQUEST_TIMEOUT_SECS,
+            ))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .header("Accept-Encoding", "identity");
 
         if !api_key.trim().is_empty() {
             request = request.header("Authorization", format!("Bearer {}", api_key.trim()));
         }
 
+        let request = match api_kind {
+            ImageGenerationApiKind::Responses => request.json(&ResponsesImageGenerateRequest {
+                model: model.to_string(),
+                input: prompt.to_string(),
+                tools: vec![ResponsesImageTool {
+                    tool_type: "image_generation".to_string(),
+                    size: size.to_string(),
+                }],
+                tool_choice: ResponsesToolChoice {
+                    tool_type: "image_generation".to_string(),
+                },
+            }),
+            ImageGenerationApiKind::Chat => request.json(&ChatImageGenerateRequest {
+                model: model.to_string(),
+                messages: vec![ChatImageMessage {
+                    role: "user".to_string(),
+                    content: format!(
+                        "请根据以下提示生成 {} 张 {} 图片，并只返回图片 base64 数据：{}",
+                        n.min(4),
+                        size,
+                        prompt
+                    ),
+                }],
+                stream: false,
+            }),
+        };
+
         let resp = request
-            .json(&req)
             .send()
             .await
-            .map_err(|e| AppError::Internal(format!("图片生成 API 调用失败: {}", e)))?;
+            .map_err(|e| {
+                AppError::Internal(format!(
+                    "图片生成 API 调用失败: {}",
+                    summarize_reqwest_error(&e)
+                ))
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -110,10 +201,164 @@ impl AiClient {
             )));
         }
 
-        resp.json::<ImageGenerateResponse>()
+        let body = resp
+            .text()
             .await
-            .map_err(|e| AppError::Internal(format!("图片生成响应解析失败: {}", e)))
+            .map_err(|e| AppError::Internal(format!("图片生成响应读取失败: {}", e)))?;
+
+        parse_image_generate_response(&body)
     }
+}
+
+fn parse_image_generate_response(body: &str) -> AppResult<ImageGenerateResponse> {
+    let value: Value = serde_json::from_str(body)
+        .map_err(|e| AppError::Internal(format!("图片生成响应解析失败: {}", e)))?;
+    let mut data = Vec::new();
+
+    collect_image_data_items(&value, &mut data);
+
+    if data.is_empty() {
+        return Err(AppError::Internal(
+            "图片生成响应未包含可保存的 base64 或 URL 图片数据".into(),
+        ));
+    }
+
+    Ok(ImageGenerateResponse {
+        created: value
+            .get("created")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+        data,
+    })
+}
+
+fn collect_image_data_items(value: &Value, data: &mut Vec<ImageDataItem>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(base64) = map
+                .get("b64_json")
+                .or_else(|| map.get("b64"))
+                .or_else(|| map.get("base64"))
+                .or_else(|| map.get("image_base64"))
+                .or_else(|| map.get("result"))
+                .and_then(Value::as_str)
+                .and_then(normalize_base64_image_text)
+            {
+                data.push(ImageDataItem {
+                    b64_json: Some(base64),
+                    url: None,
+                    revised_prompt: map
+                        .get("revised_prompt")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                });
+                return;
+            }
+
+            if let Some(url) = map.get("url").and_then(Value::as_str).filter(|url| {
+                url.starts_with("http://") || url.starts_with("https://") || url.starts_with("/")
+            }) {
+                data.push(ImageDataItem {
+                    b64_json: None,
+                    url: Some(url.to_string()),
+                    revised_prompt: map
+                        .get("revised_prompt")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                });
+                return;
+            }
+
+            for key in ["data", "output", "content", "message", "choices"] {
+                if let Some(child) = map.get(key) {
+                    collect_image_data_items(child, data);
+                }
+            }
+
+            if let Some(text) = map
+                .get("text")
+                .or_else(|| map.get("content"))
+                .and_then(Value::as_str)
+                .and_then(normalize_base64_image_text)
+            {
+                data.push(ImageDataItem {
+                    b64_json: Some(text),
+                    url: None,
+                    revised_prompt: None,
+                });
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_image_data_items(item, data);
+            }
+        }
+        Value::String(text) => {
+            if let Ok(nested) = serde_json::from_str::<Value>(text) {
+                collect_image_data_items(&nested, data);
+                return;
+            }
+
+            if let Some(base64) = normalize_base64_image_text(text) {
+                data.push(ImageDataItem {
+                    b64_json: Some(base64),
+                    url: None,
+                    revised_prompt: None,
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalize_base64_image_text(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let candidate = extract_data_url_base64(trimmed).unwrap_or(trimmed);
+    let without_prefix = candidate
+        .strip_prefix("data:image/png;base64,")
+        .or_else(|| candidate.strip_prefix("data:image/jpeg;base64,"))
+        .or_else(|| candidate.strip_prefix("data:image/jpg;base64,"))
+        .or_else(|| candidate.strip_prefix("data:image/webp;base64,"))
+        .unwrap_or(candidate)
+        .trim();
+
+    let compact: String = without_prefix
+        .chars()
+        .filter(|char| !char.is_ascii_whitespace())
+        .collect();
+
+    if compact.len() < 64 {
+        return None;
+    }
+
+    if compact
+        .bytes()
+        .all(|byte| matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' | b'='))
+    {
+        Some(compact)
+    } else {
+        None
+    }
+}
+
+fn extract_data_url_base64(value: &str) -> Option<&str> {
+    let marker_index = value.find("data:image/")?;
+    let base64_marker = ";base64,";
+    let after_marker = &value[marker_index..];
+    let base64_start = after_marker.find(base64_marker)? + base64_marker.len();
+    let candidate = &after_marker[base64_start..];
+    let end = candidate
+        .find(|char: char| {
+            char.is_ascii_whitespace()
+                || matches!(char, '"' | '\'' | ')' | ']' | '}' | '<' | '>')
+        })
+        .unwrap_or(candidate.len());
+
+    Some(&candidate[..end])
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -690,6 +935,33 @@ fn summarize_response_body(body: &str) -> String {
     }
 }
 
+fn summarize_reqwest_error(error: &reqwest::Error) -> String {
+    let category = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_request() {
+        "request"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else if error.is_redirect() {
+        "redirect"
+    } else {
+        "unknown"
+    };
+
+    let mut message = format!("[{}] {}", category, error);
+    let mut current = error.source();
+    while let Some(source) = current {
+        message.push_str("; caused by: ");
+        message.push_str(&source.to_string());
+        current = source.source();
+    }
+    message
+}
+
 /**
  * 生成内容预览，用于错误信息中显示已接收的部分内容
  */
@@ -1049,10 +1321,43 @@ fn classify_stream_error(error: &reqwest::Error) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_stream_fallback_cache_key, extract_api_error_message, extract_completion_text,
-        should_retry_with_stream,
+        build_image_generation_url, build_stream_fallback_cache_key, extract_api_error_message,
+        extract_completion_text, should_retry_with_stream, ImageGenerationApiKind,
     };
     use serde_json::json;
+
+    #[test]
+    fn image_generation_url_uses_responses_for_openai_root() {
+        let (url, kind) = build_image_generation_url("https://api.openai.com");
+
+        assert_eq!(kind, ImageGenerationApiKind::Responses);
+        assert_eq!(url, "https://api.openai.com/v1/responses");
+    }
+
+    #[test]
+    fn image_generation_url_uses_responses_for_openai_v1_root() {
+        let (url, kind) = build_image_generation_url("https://api.openai.com/v1");
+
+        assert_eq!(kind, ImageGenerationApiKind::Responses);
+        assert_eq!(url, "https://api.openai.com/v1/responses");
+    }
+
+    #[test]
+    fn image_generation_url_rewrites_legacy_images_path_to_responses() {
+        let (url, kind) =
+            build_image_generation_url("https://api.openai.com/v1/images/generations");
+
+        assert_eq!(kind, ImageGenerationApiKind::Responses);
+        assert_eq!(url, "https://api.openai.com/v1/responses");
+    }
+
+    #[test]
+    fn image_generation_url_keeps_chat_gateway_path() {
+        let (url, kind) = build_image_generation_url("https://gateway.example.com/v1/chat/completions");
+
+        assert_eq!(kind, ImageGenerationApiKind::Chat);
+        assert_eq!(url, "https://gateway.example.com/v1/chat/completions");
+    }
 
     #[test]
     fn extracts_message_content_from_nested_text_object() {

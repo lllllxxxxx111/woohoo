@@ -230,7 +230,14 @@ export interface Storyboard {
 export type ActiveState = {
   projectId: string | null;
   chatSessionId: string | null;
-  currentTab: 'chat' | 'pipeline' | 'assets' | 'automation' | 'skills' | 'preview';
+  currentTab:
+    | 'chat'
+    | 'pipeline'
+    | 'imageGeneration'
+    | 'assets'
+    | 'automation'
+    | 'skills'
+    | 'preview';
 };
 
 export interface AgentProjectHistory {

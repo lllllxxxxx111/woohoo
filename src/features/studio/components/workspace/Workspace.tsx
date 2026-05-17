@@ -3,6 +3,7 @@ import { Layout, Menu, Dropdown, Button, Tooltip, Space, Typography } from '@arc
 import {
   MessageSquare,
   Clapperboard,
+  Image,
   Folders,
   MonitorPlay,
   Download,
@@ -28,6 +29,7 @@ import { AssetLibrary } from './AssetLibrary';
 import { PipelinePreview } from './PipelinePreview';
 import { AutomationArea } from './AutomationArea';
 import { SkillsArea } from './SkillsArea';
+import { ImageGenerationPanel } from '../../../../components/ImageGeneration/ImageGenerationPanel';
 import styles from './Workspace.module.css';
 
 const { Header, Content } = Layout;
@@ -60,6 +62,8 @@ export const Workspace: React.FC = () => {
         return <MessageSquare size={16} />;
       case 'pipeline':
         return <Clapperboard size={16} />;
+      case 'imageGeneration':
+        return <Image size={16} />;
       case 'assets':
         return <Folders size={16} />;
       case 'automation':
@@ -82,6 +86,8 @@ export const Workspace: React.FC = () => {
         return '创意对话';
       case 'pipeline':
         return '制作流程';
+      case 'imageGeneration':
+        return '图片生成';
       case 'assets':
         return '素材库';
       case 'automation':
@@ -128,6 +134,8 @@ export const Workspace: React.FC = () => {
         return <ChatArea />;
       case 'pipeline':
         return <PipelineArea />;
+      case 'imageGeneration':
+        return <ImageGenerationPanel />;
       case 'assets':
         return <AssetLibrary />;
       case 'preview':
@@ -142,7 +150,14 @@ export const Workspace: React.FC = () => {
   };
 
   /** 工作区标签页列表，类型约束为 ActiveState['currentTab'] 联合类型 */
-  const tabs: ActiveState['currentTab'][] = ['chat', 'pipeline', 'assets', 'automation', 'skills'];
+  const tabs: ActiveState['currentTab'][] = [
+    'chat',
+    'pipeline',
+    'imageGeneration',
+    'assets',
+    'automation',
+    'skills',
+  ];
 
   return (
     <Layout className={styles.workspace}>
