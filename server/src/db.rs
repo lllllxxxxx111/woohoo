@@ -146,6 +146,10 @@ async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<String>, sqlx::E
             "015_ai_endpoint_capabilities",
             include_str!("../migrations/015_ai_endpoint_capabilities.sql"),
         ),
+        (
+            "016_collaboration_pipeline_run_id",
+            include_str!("../migrations/016_collaboration_pipeline_run_id.sql"),
+        ),
     ] {
         if run_sql_migration(pool, version, migration_sql).await? {
             applied_versions.push(version.to_string());
@@ -1912,6 +1916,12 @@ mod tests {
                 "009_ops_schema_conflict_backfills".to_string(),
                 "010_agent_scope_backfills".to_string(),
                 "011_updated_at_column_backfills".to_string(),
+                "012_collaboration".to_string(),
+                "013_image_studio".to_string(),
+                "014_image_generation_assets".to_string(),
+                "014_image_generation_assets_backfills".to_string(),
+                "015_ai_endpoint_capabilities".to_string(),
+                "016_collaboration_pipeline_run_id".to_string(),
             ]
         );
 

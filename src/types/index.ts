@@ -345,6 +345,7 @@ export interface CollaborationSession {
   state: CollaborationSessionState;
   orchestratorAgentId?: string;
   admissionDecisionJson?: string;
+  pipelineRunId?: string;
   loopStatusJson?: string;
   replyQueueJson?: string;
   roundCount: number;

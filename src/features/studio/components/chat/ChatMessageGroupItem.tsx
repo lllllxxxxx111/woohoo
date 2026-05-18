@@ -349,6 +349,10 @@ const MessageItem = React.memo<MessageItemProps>(
     const taskStatusLabel = getTaskStatusLabel(meta?.taskStatus);
     const runtimeStatusLabel = getRuntimeStatusLabel(meta?.agentStatus);
     const outputKindLabel = formatOutputKind(meta?.outputKind);
+    const visibleLastError =
+      meta?.lastError && !(message.status === 'error' && message.content.includes(meta.lastError))
+        ? meta.lastError
+        : null;
     const assistantActions = (
       Array.isArray(meta?.assistantActions) ? meta.assistantActions : []
     ) as NonNullable<MessageMeta['assistantActions']>;
@@ -369,7 +373,7 @@ const MessageItem = React.memo<MessageItemProps>(
       meta?.attemptIndex ||
       meta?.isRedo ||
       runtimeStatusLabel ||
-      meta?.lastError ||
+      visibleLastError ||
       outputKindLabel ||
       assistantActions.length,
     );
@@ -1180,12 +1184,12 @@ const MessageItem = React.memo<MessageItemProps>(
                     {typeof meta?.activeTasks === 'number' ? ` · 执行中 ${meta.activeTasks}` : ''}
                   </div>
                 )}
-                {meta?.lastError && (
+                {visibleLastError && (
                   <div
                     className={styles.executionHint}
                     style={{ color: 'var(--color-danger-light-4)' }}
                   >
-                    上次失败：{meta.lastError}
+                    上次失败：{visibleLastError}
                   </div>
                 )}
                 {assistantActions.length > 0 && (

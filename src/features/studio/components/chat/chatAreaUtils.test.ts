@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import type { Asset, MessageAttachment, ResourceRef } from '../../../../types';
+import type { Asset, Message, MessageAttachment, ResourceRef } from '../../../../types';
 import {
   buildAssetMentionValue,
+  detectCollaborationReadiness,
   extractMessageResourceRefs,
   extractMessageAttachments,
   scoreAssetSearch,
@@ -51,6 +52,67 @@ function makeAttachment(overrides: Partial<MessageAttachment> = {}): MessageAtta
     ...overrides,
   };
 }
+
+function makeMessage(overrides: Partial<Message> = {}): Message {
+  return {
+    id: 'msg-1',
+    role: 'user',
+    content: '测试消息',
+    timestamp: 1700000000000,
+    status: 'done',
+    type: 'text',
+    ...overrides,
+  };
+}
+
+// ==================== detectCollaborationReadiness ====================
+
+describe('detectCollaborationReadiness', () => {
+  it('应在非项目对话中拒绝启动协同', () => {
+    const result = detectCollaborationReadiness(
+      [
+        makeMessage({ role: 'user', content: '做一个悬疑短剧' }),
+        makeMessage({ id: 'msg-ai', role: 'ai', content: '可以，我先给你方案。' }),
+      ],
+      false,
+    );
+
+    expect(result.ready).toBe(false);
+  });
+
+  it('应在基础创意信息收敛后标记为可启动协同', () => {
+    const result = detectCollaborationReadiness(
+      [
+        makeMessage({
+          role: 'user',
+          content: '做一个面向年轻女性的三集悬疑短剧，节奏快，主题是职场反转。',
+        }),
+        makeMessage({
+          id: 'msg-ai',
+          role: 'ai',
+          content: '已确认目标受众、主题、节奏和集数，可以开始制作大纲。',
+        }),
+      ],
+      true,
+    );
+
+    expect(result.ready).toBe(true);
+    expect(result.entryMessageId).toBe('msg-ai');
+    expect(result.signals.length).toBeGreaterThan(0);
+  });
+
+  it('应在信息不足时继续等待补充', () => {
+    const result = detectCollaborationReadiness(
+      [
+        makeMessage({ role: 'user', content: '帮我想个点子' }),
+        makeMessage({ id: 'msg-ai', role: 'ai', content: '可以，想做什么方向？' }),
+      ],
+      true,
+    );
+
+    expect(result.ready).toBe(false);
+  });
+});
 
 // ==================== buildAssetMentionValue ====================
 

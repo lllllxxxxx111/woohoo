@@ -182,15 +182,12 @@ impl AiClient {
             }),
         };
 
-        let resp = request
-            .send()
-            .await
-            .map_err(|e| {
-                AppError::Internal(format!(
-                    "图片生成 API 调用失败: {}",
-                    summarize_reqwest_error(&e)
-                ))
-            })?;
+        let resp = request.send().await.map_err(|e| {
+            AppError::Internal(format!(
+                "图片生成 API 调用失败: {}",
+                summarize_reqwest_error(&e)
+            ))
+        })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -353,8 +350,7 @@ fn extract_data_url_base64(value: &str) -> Option<&str> {
     let candidate = &after_marker[base64_start..];
     let end = candidate
         .find(|char: char| {
-            char.is_ascii_whitespace()
-                || matches!(char, '"' | '\'' | ')' | ']' | '}' | '<' | '>')
+            char.is_ascii_whitespace() || matches!(char, '"' | '\'' | ')' | ']' | '}' | '<' | '>')
         })
         .unwrap_or(candidate.len());
 
@@ -1353,7 +1349,8 @@ mod tests {
 
     #[test]
     fn image_generation_url_keeps_chat_gateway_path() {
-        let (url, kind) = build_image_generation_url("https://gateway.example.com/v1/chat/completions");
+        let (url, kind) =
+            build_image_generation_url("https://gateway.example.com/v1/chat/completions");
 
         assert_eq!(kind, ImageGenerationApiKind::Chat);
         assert_eq!(url, "https://gateway.example.com/v1/chat/completions");

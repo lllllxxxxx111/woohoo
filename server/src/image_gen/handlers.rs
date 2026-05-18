@@ -30,7 +30,9 @@ pub async fn create_generation(
         return Err(AppError::BadRequest("projectId 不能为空".to_string()));
     }
     if !(1..=4).contains(&req.n) {
-        return Err(AppError::BadRequest("生成数量必须在 1 到 4 之间".to_string()));
+        return Err(AppError::BadRequest(
+            "生成数量必须在 1 到 4 之间".to_string(),
+        ));
     }
     if !matches!(req.size.as_str(), "1024x1024" | "1024x1536" | "1536x1024") {
         return Err(AppError::BadRequest("暂不支持该图片尺寸".to_string()));
@@ -597,14 +599,10 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, AppError> {
 
             output.push((((buffer[0] as u32) << 2) | ((buffer[1] as u32) >> 4)) as u8);
             if buffer[2] != 64 {
-                output.push(
-                    ((((buffer[1] as u32) & 0x0f) << 4) | ((buffer[2] as u32) >> 2)) as u8,
-                );
+                output.push(((((buffer[1] as u32) & 0x0f) << 4) | ((buffer[2] as u32) >> 2)) as u8);
             }
             if buffer[3] != 64 {
-                output.push(
-                    ((((buffer[2] as u32) & 0x03) << 6) | (buffer[3] as u32)) as u8,
-                );
+                output.push(((((buffer[2] as u32) & 0x03) << 6) | (buffer[3] as u32)) as u8);
             }
 
             buffer_len = 0;

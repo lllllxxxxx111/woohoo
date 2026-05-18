@@ -34,10 +34,10 @@ import {
   createEmptyWorkflowSummary,
   createLocalChat,
   createLocalProject,
-  endpointMatchesAiSettings,
   getChatSession,
   isUnauthorizedError,
   sanitizeActiveState,
+  selectAiEndpointForSettings,
 } from './utils/appContextHelpers';
 import {
   hydrateTheme,
@@ -311,10 +311,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           return;
         }
 
-        const matched = endpoints.find(
-          (endpoint) =>
-            endpoint.hasApiKey && endpointMatchesAiSettings(endpoint, recoverableAiSettings),
-        );
+        const matched = selectAiEndpointForSettings(endpoints, recoverableAiSettings);
         if (matched) {
           setServerAiEndpointId(matched.id);
         }

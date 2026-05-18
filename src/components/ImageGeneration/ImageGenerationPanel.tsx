@@ -32,8 +32,9 @@ import {
   type ImageGeneration,
 } from '../../lib/serverApi';
 import { isProtectedAssetUrl, useAssetPreviewUrl } from '../../hooks/useAssetPreviewUrl';
-import { useBillingCredits } from '../../hooks/useBillingCredits';
+import { notifyBillingCreditsChanged } from '../../hooks/useBillingCredits';
 import { useToast } from '../../context/useToast';
+import { useAppActions } from '../../context/useAppActions';
 import styles from './ImageGenerationPanel.module.css';
 
 type ImageSize = '1024x1024' | '1024x1536' | '1536x1024';
@@ -315,6 +316,7 @@ export const ImageGenerationPanel: React.FC = () => {
     serverAiEndpointId,
     projects,
     switchTab,
+    setActiveProject,
     setSettingsOpen,
   } = useAppStore(
     useShallow((state) => ({
@@ -324,13 +326,12 @@ export const ImageGenerationPanel: React.FC = () => {
       serverAiEndpointId: state.serverAiEndpointId,
       projects: state.projects,
       switchTab: state.switchTab,
+      setActiveProject: state.setActiveProject,
       setSettingsOpen: state.setSettingsOpen,
     })),
   );
   const { showToast } = useToast();
-  const { credits, loading: creditsLoading, error: creditsError, reload: reloadCredits } =
-    useBillingCredits();
-
+  const { createProject, suggestProjectName } = useAppActions();
   const [prompt, setPrompt] = useState('');
   const [model, setModel] = useState(DEFAULT_IMAGE_MODEL);
   const [endpointId, setEndpointId] = useState('');
@@ -346,7 +347,27 @@ export const ImageGenerationPanel: React.FC = () => {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null);
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const missingAssetRefreshKeyRef = useRef('');
+  const projectPickerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!projectPickerOpen) {
+      return undefined;
+    }
+
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        projectPickerRef.current &&
+        !projectPickerRef.current.contains(event.target as Node)
+      ) {
+        setProjectPickerOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [projectPickerOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -498,12 +519,12 @@ export const ImageGenerationPanel: React.FC = () => {
               : state.allAgentContacts,
         };
       });
-      await reloadCredits();
+      notifyBillingCreditsChanged();
       return workspace;
     } finally {
       setIsRefreshing(false);
     }
-  }, [reloadCredits]);
+  }, []);
 
   useEffect(() => {
     if (!missingCompletedAssetKey || isRefreshing) {
@@ -724,6 +745,7 @@ export const ImageGenerationPanel: React.FC = () => {
       if (options.clearPrompt) {
         setPrompt('');
       }
+      notifyBillingCreditsChanged();
       showToast({
         type: 'success',
         title: '任务已开始',
@@ -743,7 +765,7 @@ export const ImageGenerationPanel: React.FC = () => {
             : turn,
         ),
       );
-      void reloadCredits().catch(() => undefined);
+      notifyBillingCreditsChanged();
       showToast({
         type: 'error',
         title: '生成失败',
@@ -754,6 +776,36 @@ export const ImageGenerationPanel: React.FC = () => {
 
   const handleGenerate = () => {
     void runGeneration(trimmedPrompt, buildCurrentParams(), { clearPrompt: true });
+  };
+
+  const handleSelectProject = (projectId: string) => {
+    setActiveProject(projectId);
+    setProjectPickerOpen(false);
+    const projectName = projects.find((project) => project.id === projectId)?.name || '当前项目';
+    showToast({
+      type: 'success',
+      title: '已设置当前项目',
+      message: `后续图片会保存到「${projectName}」。`,
+    });
+  };
+
+  const handleCreateProjectForGeneration = async () => {
+    try {
+      const project = await createProject(suggestProjectName());
+      setActiveProject(project.id);
+      setProjectPickerOpen(false);
+      showToast({
+        type: 'success',
+        title: '项目已创建',
+        message: `后续图片会保存到「${project.name}」。`,
+      });
+    } catch (error) {
+      showToast({
+        type: 'error',
+        title: '创建项目失败',
+        message: error instanceof Error ? error.message : '无法创建项目',
+      });
+    }
   };
 
   const handleRetryTurn = (turn: ImageGenerationTurn) => {
@@ -819,15 +871,49 @@ export const ImageGenerationPanel: React.FC = () => {
           </div>
         </div>
         <div className={styles.topBarMeta}>
-          <span className={styles.creditPill}>
-            全局余额
-            <strong>{creditsLoading ? '读取中' : `${credits?.balance ?? 0} 积分`}</strong>
-          </span>
+          <div className={styles.projectPicker} ref={projectPickerRef}>
+            <button
+              type="button"
+              className={`${styles.projectSelectButton} ${!activeProject ? styles.projectSelectMissing : ''}`}
+              onClick={() => setProjectPickerOpen((prev) => !prev)}
+            >
+              <span>{activeProject ? '当前项目' : '设置当前项目'}</span>
+              <strong>{activeProject?.name || '未选择'}</strong>
+              <ChevronDown size={14} />
+            </button>
+            {projectPickerOpen && (
+              <div className={styles.projectPickerMenu}>
+                {projects.length === 0 ? (
+                  <div className={styles.projectPickerEmpty}>还没有项目，先新建后再生成图片。</div>
+                ) : (
+                  projects.map((project) => (
+                    <button
+                      key={project.id}
+                      type="button"
+                      className={project.id === activeState.projectId ? styles.activeProjectItem : undefined}
+                      onClick={() => handleSelectProject(project.id)}
+                    >
+                      <span>{project.name}</span>
+                      <small>{project.assetsCount} 个资产</small>
+                    </button>
+                  ))
+                )}
+                <button
+                  type="button"
+                  className={styles.createProjectButton}
+                  onClick={() => void handleCreateProjectForGeneration()}
+                >
+                  <Plus size={14} />
+                  新建项目
+                </button>
+              </div>
+            )}
+          </div>
           <button
             className={styles.iconButton}
             onClick={() => void refreshWorkspace()}
             disabled={isRefreshing}
-            title="刷新资产和积分"
+            title="刷新资产和状态"
           >
             <RefreshCw size={16} className={isRefreshing ? styles.spin : undefined} />
           </button>
@@ -868,14 +954,16 @@ export const ImageGenerationPanel: React.FC = () => {
         endpointsError={endpointsError}
         hasImageEndpoint={hasImageEndpoint}
         modelOptions={modelOptions}
-        creditsLoading={creditsLoading}
-        creditsError={creditsError}
         estimatedCost={estimatedCost}
         isGenerating={isGenerating}
+        hasProject={hasProject}
+        projectCount={projects.length}
         canGenerate={hasProject && Boolean(trimmedPrompt) && Boolean(selectedEndpoint) && !isGenerating}
         parameterSheetOpen={parameterSheetOpen}
         onParameterSheetOpenChange={setParameterSheetOpen}
         onGenerate={handleGenerate}
+        onOpenProjectPicker={() => setProjectPickerOpen(true)}
+        onCreateProject={() => void handleCreateProjectForGeneration()}
         onOpenSettings={() => setSettingsOpen(true)}
       />
 
@@ -1151,7 +1239,9 @@ const GenerationResultCard: React.FC<{
           图片已写入资产库，正在刷新预览。
         </div>
       )}
-      {turn.revisedPrompt && <p className={styles.revisedPrompt}>优化提示词：{turn.revisedPrompt}</p>}
+      {turn.revisedPrompt && (
+        <p className={styles.revisedPrompt}>模型改写提示词：{turn.revisedPrompt}</p>
+      )}
       <div className={styles.resultActions}>
         <button type="button" onClick={onRetry}>
           <RotateCcw size={15} />
@@ -1289,14 +1379,16 @@ type PromptComposerProps = {
   endpointsError: string | null;
   hasImageEndpoint: boolean;
   modelOptions: string[];
-  creditsLoading: boolean;
-  creditsError: string | null;
   estimatedCost: number;
   isGenerating: boolean;
+  hasProject: boolean;
+  projectCount: number;
   canGenerate: boolean;
   parameterSheetOpen: boolean;
   onParameterSheetOpenChange: (open: boolean) => void;
   onGenerate: () => void;
+  onOpenProjectPicker: () => void;
+  onCreateProject: () => void;
   onOpenSettings: () => void;
 };
 
@@ -1316,14 +1408,16 @@ const PromptComposer: React.FC<PromptComposerProps> = ({
   endpointsError,
   hasImageEndpoint,
   modelOptions,
-  creditsLoading,
-  creditsError,
   estimatedCost,
   isGenerating,
+  hasProject,
+  projectCount,
   canGenerate,
   parameterSheetOpen,
   onParameterSheetOpenChange,
   onGenerate,
+  onOpenProjectPicker,
+  onCreateProject,
   onOpenSettings,
 }) => {
   const currentSize = getSizeOption(size);
@@ -1374,10 +1468,10 @@ const PromptComposer: React.FC<PromptComposerProps> = ({
             className={styles.generateButton}
             disabled={!canGenerate}
             onClick={onGenerate}
-            title="生成图片"
+            title={hasProject ? '生成图片' : '请先选择或新建项目'}
           >
             {isGenerating ? <Loader2 size={18} className={styles.spin} /> : <Send size={18} />}
-            <span>{isGenerating ? '生成中' : '生成'}</span>
+            <span>{isGenerating ? '生成中' : hasProject ? '生成' : '先选项目'}</span>
           </button>
         </div>
 
@@ -1420,7 +1514,7 @@ const PromptComposer: React.FC<PromptComposerProps> = ({
               <ChevronDown size={14} />
             </button>
             <span className={styles.costChip}>
-              {creditsLoading ? '积分读取中' : `${estimatedCost} 积分`}
+              {estimatedCost} 积分
             </span>
             <button
               type="button"
@@ -1443,10 +1537,23 @@ const PromptComposer: React.FC<PromptComposerProps> = ({
           </div>
         </div>
 
-        {(endpointsError || creditsError) && (
+        {!hasProject && (
           <div className={styles.composerWarning}>
             <AlertTriangle size={15} />
-            <span>{endpointsError || creditsError}</span>
+            <span>图片必须保存到明确项目，先选择或新建项目后再生成。</span>
+            <button
+              type="button"
+              onClick={projectCount > 0 ? onOpenProjectPicker : onCreateProject}
+            >
+              {projectCount > 0 ? '设置项目' : '新建项目'}
+            </button>
+          </div>
+        )}
+
+        {endpointsError && (
+          <div className={styles.composerWarning}>
+            <AlertTriangle size={15} />
+            <span>{endpointsError}</span>
           </div>
         )}
       </div>

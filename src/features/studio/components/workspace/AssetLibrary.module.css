@@ -141,7 +141,13 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: 6px;
   transition: all 0.2s ease;
+}
+
+.viewBtn span {
+  font-size: 0.82rem;
+  font-weight: 700;
 }
 
 .viewBtn:hover {
@@ -149,10 +155,49 @@
   background-color: var(--bg-tertiary);
 }
 
+.viewBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .viewBtn.active {
   background-color: var(--bg-accent);
   color: white;
   box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+}
+
+.groupToggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+}
+
+.groupToggle button {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  background: transparent;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.groupToggle button:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+.groupToggle .activeGroupBtn {
+  color: #fff;
+  background: var(--bg-accent);
 }
 
 .actions {
@@ -185,6 +230,12 @@
   border-color: var(--bg-accent);
   transform: translateY(-2px);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.toolBtn.activeToolBtn {
+  color: var(--bg-accent);
+  background-color: var(--bg-accent-light);
+  border-color: var(--bg-accent);
 }
 
 .toolBtn:active {
@@ -273,24 +324,48 @@
   transform: translateY(0);
 }
 
-.gridLayout {
+.assetSections {
+  flex: 1;
   padding: 24px;
+  overflow-y: auto;
+}
+
+.assetSection + .assetSection {
+  margin-top: 24px;
+}
+
+.assetSectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.assetSectionHeader h3 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 0.98rem;
+  font-weight: 700;
+}
+
+.assetSectionHeader span {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.gridLayout {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 220px));
   align-content: start;
   justify-content: start;
   gap: 18px;
-  overflow-y: auto;
-  flex: 1;
 }
 
 .listLayout {
-  padding: 24px;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  overflow-y: auto;
-  flex: 1;
 }
 
 .assetCard {
@@ -325,6 +400,11 @@
   transform: translateY(-10px) scale(1.02);
   border-color: var(--bg-accent);
   box-shadow: 0 20px 40px rgba(102, 126, 234, 0.25);
+  z-index: 4;
+}
+
+.assetCard:hover .assetPreview {
+  transform: scale(1.035);
 }
 
 .assetCard:hover .previewButton img {
@@ -387,6 +467,7 @@
   overflow: hidden;
   position: relative;
   border-radius: var(--radius-md);
+  transition: transform 0.24s ease;
 }
 
 .assetPreview::before {
@@ -735,6 +816,24 @@
   font-size: 0.75rem;
   font-weight: 700;
   line-height: 1;
+}
+
+.projectBadge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  max-width: 100%;
+  padding: 3px 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  background: var(--bg-primary-soft);
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ratingRow {

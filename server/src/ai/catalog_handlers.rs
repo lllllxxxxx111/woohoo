@@ -106,7 +106,10 @@ pub async fn create_endpoint(
     .fetch_one(&state.db)
     .await?;
 
-    Ok((StatusCode::CREATED, Json(build_endpoint_view(&state.db, endpoint).await?)))
+    Ok((
+        StatusCode::CREATED,
+        Json(build_endpoint_view(&state.db, endpoint).await?),
+    ))
 }
 
 pub async fn update_endpoint(
@@ -208,12 +211,10 @@ pub async fn upsert_endpoint_capability(
     .bind(normalize_optional(req.model).as_deref())
     .bind(normalize_optional(req.path_override).as_deref())
     .bind(
-        normalize_optional(req.request_adapter)
-            .unwrap_or_else(|| "openai_compatible".to_string()),
+        normalize_optional(req.request_adapter).unwrap_or_else(|| "openai_compatible".to_string()),
     )
     .bind(
-        normalize_optional(req.response_adapter)
-            .unwrap_or_else(|| "openai_compatible".to_string()),
+        normalize_optional(req.response_adapter).unwrap_or_else(|| "openai_compatible".to_string()),
     )
     .bind(req.supports_stream.unwrap_or(false))
     .bind(req.supports_tools.unwrap_or(false))
@@ -238,7 +239,11 @@ pub async fn list_endpoint_capabilities(
     Ok(Json(capabilities.into_iter().map(Into::into).collect()))
 }
 
-async fn ensure_endpoint_owner(pool: &SqlitePool, endpoint_id: &str, user_id: &str) -> AppResult<()> {
+async fn ensure_endpoint_owner(
+    pool: &SqlitePool,
+    endpoint_id: &str,
+    user_id: &str,
+) -> AppResult<()> {
     let exists = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(1) FROM ai_endpoints WHERE id = ? AND user_id = ?",
     )
@@ -263,10 +268,7 @@ fn normalize_capability(value: &str) -> AppResult<String> {
     }
 }
 
-async fn build_endpoint_view(
-    pool: &SqlitePool,
-    endpoint: AiEndpoint,
-) -> AppResult<AiEndpointView> {
+async fn build_endpoint_view(pool: &SqlitePool, endpoint: AiEndpoint) -> AppResult<AiEndpointView> {
     let capabilities = load_capabilities_for_endpoint(pool, &endpoint.id)
         .await?
         .into_iter()
@@ -281,7 +283,10 @@ async fn build_endpoint_views(
     pool: &SqlitePool,
     endpoints: Vec<AiEndpoint>,
 ) -> AppResult<Vec<AiEndpointView>> {
-    let endpoint_ids: Vec<String> = endpoints.iter().map(|endpoint| endpoint.id.clone()).collect();
+    let endpoint_ids: Vec<String> = endpoints
+        .iter()
+        .map(|endpoint| endpoint.id.clone())
+        .collect();
     let mut grouped: HashMap<String, Vec<AiEndpointCapabilityView>> = HashMap::new();
 
     if !endpoint_ids.is_empty() {

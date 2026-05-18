@@ -586,7 +586,10 @@ async fn reconcile_interrupted_image_generations(pool: &SqlitePool) {
     let interrupted = match image_gen::repo::list_interrupted_generations(pool).await {
         Ok(generations) => generations,
         Err(error) => {
-            tracing::warn!("Failed to list interrupted image generation tasks: {}", error);
+            tracing::warn!(
+                "Failed to list interrupted image generation tasks: {}",
+                error
+            );
             return;
         }
     };
@@ -621,11 +624,17 @@ async fn reconcile_interrupted_image_generations(pool: &SqlitePool) {
 
     match image_gen::repo::fail_interrupted_generations(pool).await {
         Ok(count) if count > 0 => {
-            tracing::info!("Marked {} interrupted image generation tasks as failed", count);
+            tracing::info!(
+                "Marked {} interrupted image generation tasks as failed",
+                count
+            );
         }
         Ok(_) => {}
         Err(error) => {
-            tracing::warn!("Failed to reconcile interrupted image generation tasks: {}", error);
+            tracing::warn!(
+                "Failed to reconcile interrupted image generation tasks: {}",
+                error
+            );
         }
     }
 }

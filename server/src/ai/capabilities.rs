@@ -66,10 +66,10 @@ async fn resolve_capability(
     requested_model: Option<&str>,
     fallback_model: Option<&str>,
 ) -> AppResult<ResolvedAiCapability> {
-    let row = if let Some(endpoint_id) = endpoint_id.map(str::trim).filter(|value| !value.is_empty())
-    {
-        let row = sqlx::query_as::<_, EndpointCapabilityRow>(
-            "SELECT
+    let row =
+        if let Some(endpoint_id) = endpoint_id.map(str::trim).filter(|value| !value.is_empty()) {
+            let row = sqlx::query_as::<_, EndpointCapabilityRow>(
+                "SELECT
                 e.id AS endpoint_id,
                 e.user_id,
                 e.name,
@@ -103,18 +103,18 @@ async fn resolve_capability(
                AND e.user_id = ?
                AND e.is_active = 1
              LIMIT 1",
-        )
-        .bind(capability)
-        .bind(endpoint_id)
-        .bind(user_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| AppError::NotFound("指定的 API 通道不存在或未启用".into()))?;
+            )
+            .bind(capability)
+            .bind(endpoint_id)
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("指定的 API 通道不存在或未启用".into()))?;
 
-        row
-    } else {
-        sqlx::query_as::<_, EndpointCapabilityRow>(
-            "SELECT
+            row
+        } else {
+            sqlx::query_as::<_, EndpointCapabilityRow>(
+                "SELECT
                 e.id AS endpoint_id,
                 e.user_id,
                 e.name,
@@ -147,15 +147,13 @@ async fn resolve_capability(
                AND c.enabled = 1
              ORDER BY c.priority ASC, c.created_at ASC
              LIMIT 1",
-        )
-        .bind(user_id)
-        .bind(capability)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| {
-            AppError::Validation("请先在设置里为 API 通道启用图片生成能力".into())
-        })?
-    };
+            )
+            .bind(user_id)
+            .bind(capability)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::Validation("请先在设置里为 API 通道启用图片生成能力".into()))?
+        };
 
     let endpoint = AiEndpoint {
         id: row.endpoint_id.clone(),

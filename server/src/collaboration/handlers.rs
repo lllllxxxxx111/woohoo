@@ -4,7 +4,12 @@ use axum::{
 };
 use serde_json::json;
 
+use crate::auth::middleware::UserId;
 use crate::error::AppError;
+use crate::pipeline::{
+    handlers::create_pipeline_run_for_user,
+    model::{CreatePipelineRunReq, CreatePipelineStepReq},
+};
 use crate::AppState;
 
 use super::dispatcher::{self, DispatchItem};
@@ -15,12 +20,12 @@ use super::repo;
 /// 创建协同会话
 pub async fn create_session(
     axum::extract::State(state): axum::extract::State<AppState>,
-    axum::extract::Extension(user_id): axum::extract::Extension<String>,
+    axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
     Json(req): Json<CreateSessionReq>,
 ) -> Result<Json<CollaborationSession>, AppError> {
     let session = repo::create_session(
         &state.db,
-        &user_id,
+        &user_id.0,
         &req.project_id,
         &req.conversation_id,
         req.entry_message_id.as_deref(),
@@ -121,7 +126,9 @@ pub async fn send_message(
                 .await
                 .map_err(|e| AppError::Internal(e.to_string()))?;
             let last = messages.last().cloned();
-            Ok(Json(last.ok_or_else(|| AppError::Internal("消息创建失败".to_string()))?))
+            Ok(Json(last.ok_or_else(|| {
+                AppError::Internal("消息创建失败".to_string())
+            })?))
         }
         "answer" => {
             dispatcher::Dispatcher::handle_answer(
@@ -139,7 +146,9 @@ pub async fn send_message(
                 .await
                 .map_err(|e| AppError::Internal(e.to_string()))?;
             let last = messages.last().cloned();
-            Ok(Json(last.ok_or_else(|| AppError::Internal("消息创建失败".to_string()))?))
+            Ok(Json(last.ok_or_else(|| {
+                AppError::Internal("消息创建失败".to_string())
+            })?))
         }
         _ => {
             let next_order = repo::get_next_queue_order(&state.db, &session_id)
@@ -209,10 +218,7 @@ pub async fn loop_check(
             "halt_session".to_string(),
             "协同会话已暂停：达到自动讨论轮数上限".to_string(),
         ),
-        _ => (
-            "unknown".to_string(),
-            "未知循环风险等级".to_string(),
-        ),
+        _ => ("unknown".to_string(), "未知循环风险等级".to_string()),
     };
 
     let signal_strings: Vec<String> = signals.iter().map(|s| s.as_str().to_string()).collect();
@@ -254,8 +260,17 @@ pub async fn admit(
         .await
         .map_err(|e| AppError::NotFound(format!("协同会话不存在: {}", e)))?;
 
-    let current_state = SessionState::try_from(session.state.as_str())
-        .map_err(|e| AppError::BadRequest(e))?;
+    let current_state =
+        SessionState::try_from(session.state.as_str()).map_err(|e| AppError::BadRequest(e))?;
+
+    if let Some(pipeline_run_id) = session.pipeline_run_id.as_deref() {
+        return Ok(Json(AdmitResponse {
+            admitted: true,
+            pipeline_run_id: Some(pipeline_run_id.to_string()),
+            reason: "协同会话已进入工作区执行，无需重复创建流程".to_string(),
+            blocking_issues: None,
+        }));
+    }
 
     if current_state != SessionState::ResolvingQuestions
         && current_state != SessionState::WorkspaceAdmission
@@ -294,9 +309,10 @@ pub async fn admit(
         }));
     }
 
-    let outline_ready = assignments
-        .iter()
-        .any(|a| a.task_type == "outline_design" && a.status == "ready");
+    let outline_ready = assignments.iter().any(|a| {
+        a.task_type == "outline_design"
+            && matches!(a.status.as_str(), "ready" | "assigned" | "done")
+    });
 
     if !outline_ready {
         return Ok(Json(AdmitResponse {
@@ -311,10 +327,38 @@ pub async fn admit(
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
+    let (_status, pipeline_run) = create_pipeline_run_for_user(
+        &state.db,
+        &session.user_id,
+        CreatePipelineRunReq {
+            project_id: session.project_id.clone(),
+            conversation_id: session.conversation_id.clone(),
+            pipeline_type: "outline".to_string(),
+            trigger_source: "automation".to_string(),
+            beta_enabled: true,
+            idempotency_key: Some(format!("collaboration:{}:outline", session_id)),
+            steps: build_collaboration_outline_steps(&assignments),
+        },
+        false,
+    )
+    .await?;
+
+    repo::update_session_pipeline_run_id(&state.db, &session_id, &pipeline_run.id)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let _ = repo::update_session_state(&state.db, &session_id, "workspace_execution")
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
     let _ = repo::update_admission_decision(
         &state.db,
         &session_id,
-        &json!({"admitted": true, "reason": "大纲智能体就绪，关键依赖链无阻塞"}).to_string(),
+        &json!({
+            "admitted": true,
+            "reason": "大纲智能体就绪，关键依赖链无阻塞",
+            "pipelineRunId": pipeline_run.id.clone()
+        })
+        .to_string(),
     )
     .await;
 
@@ -325,7 +369,22 @@ pub async fn admit(
         Some(
             &json!({
                 "admitted": true,
-                "sessionId": session_id
+                "sessionId": session_id,
+                "pipelineRunId": pipeline_run.id.clone()
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+
+    let _ = repo::create_event(
+        &state.db,
+        &session_id,
+        "collaboration_workspace_started",
+        Some(
+            &json!({
+                "sessionId": session_id,
+                "pipelineRunId": pipeline_run.id.clone()
             })
             .to_string(),
         ),
@@ -334,10 +393,57 @@ pub async fn admit(
 
     Ok(Json(AdmitResponse {
         admitted: true,
-        pipeline_run_id: None,
+        pipeline_run_id: Some(pipeline_run.id),
         reason: "大纲智能体状态为 ready，关键依赖链无阻塞，编导确认入场".to_string(),
         blocking_issues: None,
     }))
+}
+
+fn build_collaboration_outline_steps(
+    assignments: &[CollaborationAssignment],
+) -> Vec<CreatePipelineStepReq> {
+    let assignment_summary = assignments
+        .iter()
+        .map(|assignment| {
+            format!(
+                "- {}：{}（agent={}，status={}）",
+                assignment.task_type, assignment.goal, assignment.agent_id, assignment.status
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    vec![
+        CreatePipelineStepReq {
+            step_key: "collab_outline_design".to_string(),
+            step_name: "协同大纲生成".to_string(),
+            step_order: 1,
+            step_type: "design".to_string(),
+            depends_on: vec![],
+            review_policy: None,
+            max_retries: Some(2),
+            prompt_template: Some(format!(
+                "基于当前项目对话和协同任务卡，生成可进入制作的短剧/短视频大纲。需要包含：核心卖点、目标受众、人物与关系、集数或段落结构、关键转折、制作注意事项。\n\n协同任务卡：\n{}",
+                assignment_summary
+            )),
+        },
+        CreatePipelineStepReq {
+            step_key: "collab_outline_review".to_string(),
+            step_name: "协同大纲审核".to_string(),
+            step_order: 2,
+            step_type: "review".to_string(),
+            depends_on: vec!["collab_outline_design".to_string()],
+            review_policy: Some(json!({
+                "passScore": 0.72,
+                "checks": ["结构完整", "制作可执行", "风险可控", "目标受众明确"]
+            })),
+            max_retries: Some(2),
+            prompt_template: Some(
+                "审核协同大纲是否已经足够进入后续剧本/分镜制作。若失败，请给出可执行的修改建议。"
+                    .to_string(),
+            ),
+        },
+    ]
 }
 
 /// 暂停协同
@@ -350,8 +456,8 @@ pub async fn halt(
         .await
         .map_err(|e| AppError::NotFound(format!("协同会话不存在: {}", e)))?;
 
-    let current_state = SessionState::try_from(session.state.as_str())
-        .map_err(|e| AppError::BadRequest(e))?;
+    let current_state =
+        SessionState::try_from(session.state.as_str()).map_err(|e| AppError::BadRequest(e))?;
 
     if current_state == SessionState::Completed || current_state == SessionState::Halted {
         return Err(AppError::BadRequest(format!(

@@ -12,6 +12,8 @@ import {
   Grid,
   List,
   Star,
+  FolderOpen,
+  Layers,
   MoreVertical,
   Download,
   Trash2,
@@ -27,6 +29,15 @@ import { useAppActions } from '../../../../context/useAppActions';
 import { useToast } from '../../../../context/useToast';
 import { getServerAssetBlob } from '../../../../lib/serverApi';
 import { isProtectedAssetUrl, useAssetPreviewUrl } from '../../../../hooks/useAssetPreviewUrl';
+import {
+  ASSET_TYPE_LABELS,
+  consumePendingAssetLibraryViewRequest,
+  listenAssetLibraryViewRequests,
+  type AssetLibraryFilterType,
+  type AssetLibraryGroupMode,
+  type AssetLibraryScope,
+  type AssetLibraryViewRequest,
+} from '../../../../lib/assetLibraryView';
 import styles from './AssetLibrary.module.css';
 
 interface UploadingFile {
@@ -36,7 +47,8 @@ interface UploadingFile {
   size: number;
 }
 
-type FilterType = 'all' | 'image' | 'video' | 'audio' | 'document';
+type FilterType = AssetLibraryFilterType;
+type RatingFilter = 0 | 1 | 2 | 3 | 4 | 5;
 type ViewMode = 'grid' | 'list';
 
 type PreviewImage = {
@@ -107,8 +119,14 @@ const AssetPreviewImage: React.FC<{
 };
 
 export const AssetLibrary: React.FC = () => {
-  const { activeAssets, activeState } = useAppStore(
-    useShallow((state) => ({ activeAssets: state.activeAssets, activeState: state.activeState })),
+  const { activeAssets, activeState, assets, projects, setActiveProject } = useAppStore(
+    useShallow((state) => ({
+      activeAssets: state.activeAssets,
+      activeState: state.activeState,
+      assets: state.assets,
+      projects: state.projects,
+      setActiveProject: state.setActiveProject,
+    })),
   );
   const { uploadAssets, deleteAsset, updateAsset } = useAppActions();
   const { showToast } = useToast();
@@ -119,13 +137,61 @@ export const AssetLibrary: React.FC = () => {
   const [uploadingFiles, setUploadingFiles] = useState<UploadingFile[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<FilterType>('all');
+  const [libraryScope, setLibraryScope] = useState<AssetLibraryScope>(
+    activeState.projectId ? 'current' : 'all',
+  );
+  const [groupMode, setGroupMode] = useState<AssetLibraryGroupMode>('none');
+  const [favoriteOnly, setFavoriteOnly] = useState(false);
+  const [ratingFilter, setRatingFilter] = useState<RatingFilter>(0);
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [showFilterDropdown, setShowFilterDropdown] = useState(false);
+  const [showRatingDropdown, setShowRatingDropdown] = useState(false);
   const [selectedAsset, setSelectedAsset] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const metadataUpdateQueuesRef = useRef(new Map<string, Promise<Asset>>());
+
+  const projectNameById = useMemo(() => {
+    const nextMap = new Map<string, string>();
+    for (const project of projects) {
+      nextMap.set(project.id, project.name);
+    }
+    return nextMap;
+  }, [projects]);
+
+  const applyViewRequest = useCallback(
+    (request: AssetLibraryViewRequest | null) => {
+      if (!request) {
+        return;
+      }
+
+      if (request.projectId) {
+        setActiveProject(request.projectId);
+      }
+      if (request.scope) {
+        setLibraryScope(request.scope);
+      }
+      if (request.filterType) {
+        setFilterType(request.filterType);
+      }
+      if (request.groupMode) {
+        setGroupMode(request.groupMode);
+      }
+    },
+    [setActiveProject],
+  );
+
+  useEffect(() => {
+    applyViewRequest(consumePendingAssetLibraryViewRequest());
+    return listenAssetLibraryViewRequests(applyViewRequest);
+  }, [applyViewRequest]);
+
+  useEffect(() => {
+    if (!activeState.projectId && libraryScope === 'current') {
+      setLibraryScope('all');
+    }
+  }, [activeState.projectId, libraryScope]);
 
   const getAssetIcon = (type: Asset['type']) => {
     switch (type) {
@@ -140,14 +206,87 @@ export const AssetLibrary: React.FC = () => {
     }
   };
 
+  const scopedAssets = useMemo(() => {
+    if (libraryScope === 'current' && activeState.projectId) {
+      return activeAssets;
+    }
+    return assets;
+  }, [activeAssets, activeState.projectId, assets, libraryScope]);
+
+  const activeProjectName = activeState.projectId
+    ? projectNameById.get(activeState.projectId) || '当前项目'
+    : '未选择项目';
+
   const filteredAssets = useMemo(() => {
-    return activeAssets.filter((asset) => {
+    const normalizedSearch = searchQuery.trim().toLowerCase();
+    return scopedAssets.filter((asset) => {
       const matchesType = filterType === 'all' || asset.type === filterType;
+      const matchesFavorite = !favoriteOnly || isFavoriteAsset(asset);
+      const matchesRating = ratingFilter === 0 || getAssetRating(asset) >= ratingFilter;
+      const projectName = projectNameById.get(asset.projectId) || '';
       const matchesSearch =
-        searchQuery === '' || asset.name.toLowerCase().includes(searchQuery.toLowerCase());
-      return matchesType && matchesSearch;
+        normalizedSearch === '' ||
+        asset.name.toLowerCase().includes(normalizedSearch) ||
+        projectName.toLowerCase().includes(normalizedSearch);
+      return matchesType && matchesFavorite && matchesRating && matchesSearch;
     });
-  }, [activeAssets, filterType, searchQuery]);
+  }, [favoriteOnly, filterType, projectNameById, ratingFilter, scopedAssets, searchQuery]);
+
+  const groupedAssetSections = useMemo(() => {
+    if (groupMode === 'none') {
+      return [
+        {
+          key: 'flat',
+          title: libraryScope === 'current' ? activeProjectName : '全部资产',
+          subtitle: `${filteredAssets.length} 个资产`,
+          assets: filteredAssets,
+        },
+      ];
+    }
+
+    if (groupMode === 'project') {
+      const projectOrder = new Map(projects.map((project, index) => [project.id, index]));
+      const grouped = new Map<string, Asset[]>();
+      for (const asset of filteredAssets) {
+        const groupAssets = grouped.get(asset.projectId) ?? [];
+        groupAssets.push(asset);
+        grouped.set(asset.projectId, groupAssets);
+      }
+
+      return Array.from(grouped.entries())
+        .sort(
+          ([leftProjectId], [rightProjectId]) =>
+            (projectOrder.get(leftProjectId) ?? Number.MAX_SAFE_INTEGER) -
+            (projectOrder.get(rightProjectId) ?? Number.MAX_SAFE_INTEGER),
+        )
+        .map(([projectId, groupAssets]) => ({
+          key: projectId,
+          title: projectNameById.get(projectId) || '未命名项目',
+          subtitle: `${groupAssets.length} 个资产`,
+          assets: groupAssets,
+        }));
+    }
+
+    return (['image', 'video', 'audio', 'document'] as Asset['type'][])
+      .map((type) => {
+        const groupAssets = filteredAssets.filter((asset) => asset.type === type);
+        return {
+          key: type,
+          title: ASSET_TYPE_LABELS[type],
+          subtitle: `${groupAssets.length} 个资产`,
+          assets: groupAssets,
+        };
+      })
+      .filter((section) => section.assets.length > 0);
+  }, [activeProjectName, filteredAssets, groupMode, libraryScope, projectNameById, projects]);
+
+  const hasActiveAssetFilters =
+    searchQuery.trim() !== '' ||
+    filterType !== 'all' ||
+    favoriteOnly ||
+    ratingFilter > 0 ||
+    libraryScope !== 'current' ||
+    groupMode !== 'none';
 
   const handleCloseUploadModal = () => {
     if (isUploading) {
@@ -370,14 +509,112 @@ export const AssetLibrary: React.FC = () => {
   };
 
   const getFilterLabel = (type: FilterType) => {
-    const labels: Record<FilterType, string> = {
-      all: '全部',
-      image: '图片',
-      video: '视频',
-      audio: '音频',
-      document: '文档',
-    };
-    return labels[type];
+    return ASSET_TYPE_LABELS[type];
+  };
+
+  const getRatingFilterLabel = (rating: RatingFilter) => {
+    return rating === 0 ? '星级' : `${rating} 星+`;
+  };
+
+  const renderAssetItem = (asset: Asset, index: number) => {
+    const favorite = isFavoriteAsset(asset);
+    const rating = getAssetRating(asset);
+    const projectName = projectNameById.get(asset.projectId);
+
+    return (
+      <div
+        key={asset.id}
+        className={`${viewMode === 'grid' ? styles.assetCard : styles.assetListItem} ${selectedAsset === asset.id ? styles.selected : ''}`}
+        style={{ animationDelay: `${Math.min(index, 12) * 0.04}s` }}
+        onClick={() => handleAssetClick(asset.id)}
+      >
+        <div className={styles.assetPreview}>
+          {asset.type === 'image' ? (
+            <AssetPreviewImage asset={asset} onPreview={setPreviewImage} />
+          ) : (
+            <div className={styles.iconPreview}>{getAssetIcon(asset.type)}</div>
+          )}
+          {selectedAsset === asset.id && (
+            <div className={styles.assetOverlay}>
+              <button
+                className={styles.actionBtn}
+                title="下载"
+                onClick={(event) => void handleAssetDownload(asset, event)}
+              >
+                <Download size={16} />
+              </button>
+              <button
+                className={`${styles.actionBtn} ${favorite ? styles.favoriteActive : ''}`}
+                title={favorite ? '取消收藏' : '收藏'}
+                onClick={(event) => handleFavoriteToggle(asset, event)}
+              >
+                <Star size={16} fill={favorite ? 'currentColor' : 'none'} />
+              </button>
+              <button
+                className={`${styles.actionBtn} ${styles.danger}`}
+                title="删除"
+                onClick={(event) => void handleAssetDelete(asset, event)}
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
+          )}
+        </div>
+        <div className={styles.assetInfo}>
+          <div className={styles.assetNameRow}>
+            <span className={styles.assetName} title={asset.name}>
+              {asset.name}
+            </span>
+            <button
+              className={`${styles.favoriteButton} ${favorite ? styles.favoriteButtonActive : ''}`}
+              title={favorite ? '取消收藏' : '收藏'}
+              aria-label={favorite ? '取消收藏' : '收藏'}
+              aria-pressed={favorite}
+              onClick={(event) => handleFavoriteToggle(asset, event)}
+            >
+              <Star size={15} fill={favorite ? 'currentColor' : 'none'} />
+            </button>
+            <button className={styles.moreBtn} onClick={(event) => event.stopPropagation()}>
+              <MoreVertical size={16} />
+            </button>
+          </div>
+          <div className={styles.assetMetaRow}>
+            <span className={styles.assetType}>{getFilterLabel(asset.type)}</span>
+            {libraryScope === 'all' && projectName && (
+              <span className={styles.projectBadge}>{projectName}</span>
+            )}
+            {favorite && (
+              <span className={styles.favoriteBadge}>
+                <Star size={12} fill="currentColor" />
+                收藏
+              </span>
+            )}
+            <span className={styles.assetDate}>
+              {new Date(asset.createdAt).toLocaleDateString('zh-CN')}
+            </span>
+          </div>
+          <div
+            className={styles.ratingRow}
+            onClick={(event) => event.stopPropagation()}
+            aria-label={`${asset.name} 星级评分`}
+          >
+            {[1, 2, 3, 4, 5].map((value) => (
+              <button
+                key={value}
+                type="button"
+                className={`${styles.ratingButton} ${rating >= value ? styles.ratingActive : ''}`}
+                title={`${value} 星`}
+                aria-label={`${value} 星`}
+                aria-pressed={rating >= value}
+                onClick={(event) => handleRatingChange(asset, value, event)}
+              >
+                <Star size={13} fill={rating >= value ? 'currentColor' : 'none'} />
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
   };
 
   return (
@@ -400,6 +637,26 @@ export const AssetLibrary: React.FC = () => {
 
         <div className={styles.viewToggle}>
           <button
+            className={`${styles.viewBtn} ${libraryScope === 'current' ? styles.active : ''}`}
+            onClick={() => setLibraryScope('current')}
+            title="只看当前项目"
+            disabled={!activeState.projectId}
+          >
+            <FolderOpen size={18} />
+            <span>当前</span>
+          </button>
+          <button
+            className={`${styles.viewBtn} ${libraryScope === 'all' ? styles.active : ''}`}
+            onClick={() => setLibraryScope('all')}
+            title="查看全部项目资产"
+          >
+            <Layers size={18} />
+            <span>全部</span>
+          </button>
+        </div>
+
+        <div className={styles.viewToggle}>
+          <button
             className={`${styles.viewBtn} ${viewMode === 'grid' ? styles.active : ''}`}
             onClick={() => setViewMode('grid')}
             title="网格视图"
@@ -415,11 +672,36 @@ export const AssetLibrary: React.FC = () => {
           </button>
         </div>
 
+        <div className={styles.groupToggle}>
+          {([
+            ['none', '平铺'],
+            ['project', '按项目'],
+            ['type', '按分类'],
+          ] as Array<[AssetLibraryGroupMode, string]>).map(([mode, label]) => (
+            <button
+              key={mode}
+              type="button"
+              className={groupMode === mode ? styles.activeGroupBtn : undefined}
+              onClick={() => {
+                setGroupMode(mode);
+                if (mode === 'project') {
+                  setLibraryScope('all');
+                }
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
         <div className={styles.actions}>
           <div className={styles.filterDropdown}>
             <button
               className={styles.toolBtn}
-              onClick={() => setShowFilterDropdown((prev) => !prev)}
+              onClick={() => {
+                setShowFilterDropdown((prev) => !prev);
+                setShowRatingDropdown(false);
+              }}
             >
               <Filter size={16} />
               {getFilterLabel(filterType)}
@@ -442,6 +724,50 @@ export const AssetLibrary: React.FC = () => {
               </div>
             )}
           </div>
+          <button
+            className={`${styles.toolBtn} ${favoriteOnly ? styles.activeToolBtn : ''}`}
+            onClick={() => {
+              setFavoriteOnly((prev) => !prev);
+              setShowFilterDropdown(false);
+              setShowRatingDropdown(false);
+            }}
+            title={favoriteOnly ? '显示全部资产' : '只看收藏'}
+            aria-label={favoriteOnly ? '取消只看收藏' : '只看收藏'}
+            aria-pressed={favoriteOnly}
+          >
+            <Star size={16} fill={favoriteOnly ? 'currentColor' : 'none'} />
+            收藏
+          </button>
+          <div className={styles.filterDropdown}>
+            <button
+              className={`${styles.toolBtn} ${ratingFilter > 0 ? styles.activeToolBtn : ''}`}
+              onClick={() => {
+                setShowRatingDropdown((prev) => !prev);
+                setShowFilterDropdown(false);
+              }}
+              aria-label="星级筛选"
+            >
+              <Star size={16} fill={ratingFilter > 0 ? 'currentColor' : 'none'} />
+              {getRatingFilterLabel(ratingFilter)}
+            </button>
+            {showRatingDropdown && (
+              <div className={styles.filterMenu}>
+                {([0, 1, 2, 3, 4, 5] as RatingFilter[]).map((rating) => (
+                  <button
+                    key={rating}
+                    className={`${styles.filterItem} ${ratingFilter === rating ? styles.active : ''}`}
+                    onClick={() => {
+                      setRatingFilter(rating);
+                      setShowRatingDropdown(false);
+                    }}
+                  >
+                    <Star size={16} fill={rating > 0 ? 'currentColor' : 'none'} />
+                    {rating === 0 ? '全部星级' : `${rating} 星及以上`}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <button className={styles.primaryBtn} onClick={() => setIsUploadModalOpen(true)}>
             <Upload size={16} /> 上传
           </button>
@@ -453,110 +779,28 @@ export const AssetLibrary: React.FC = () => {
           <div className={styles.emptyIcon}>
             <FoldersEmpty />
           </div>
-          <h3>当前项目暂无资产</h3>
-          <p>上传的图片、音频、视频或文档会直接保存到当前项目，并参与后续分镜与剧本流程。</p>
+          <h3>{hasActiveAssetFilters ? '没有符合条件的资产' : '当前项目暂无资产'}</h3>
+          <p>
+            {hasActiveAssetFilters
+              ? '调整搜索、类型、收藏或星级筛选后再试。'
+              : '上传的图片、音频、视频或文档会直接保存到当前项目，并参与后续分镜与剧本流程。'}
+          </p>
         </div>
       ) : (
-        <div className={viewMode === 'grid' ? styles.gridLayout : styles.listLayout}>
-          {filteredAssets.map((asset, index) => {
-            const favorite = isFavoriteAsset(asset);
-            const rating = getAssetRating(asset);
-
-            return (
-              <div
-                key={asset.id}
-                className={`${viewMode === 'grid' ? styles.assetCard : styles.assetListItem} ${selectedAsset === asset.id ? styles.selected : ''}`}
-                style={{ animationDelay: `${index * 0.08}s` }}
-                onClick={() => handleAssetClick(asset.id)}
-              >
-                <div className={styles.assetPreview}>
-                  {asset.type === 'image' ? (
-                    <AssetPreviewImage asset={asset} onPreview={setPreviewImage} />
-                  ) : (
-                    <div className={styles.iconPreview}>{getAssetIcon(asset.type)}</div>
-                  )}
-                  {selectedAsset === asset.id && (
-                    <div className={styles.assetOverlay}>
-                      <button
-                        className={styles.actionBtn}
-                        title="下载"
-                        onClick={(event) => void handleAssetDownload(asset, event)}
-                      >
-                        <Download size={16} />
-                      </button>
-                      <button
-                        className={`${styles.actionBtn} ${favorite ? styles.favoriteActive : ''}`}
-                        title={favorite ? '取消收藏' : '收藏'}
-                        onClick={(event) => handleFavoriteToggle(asset, event)}
-                      >
-                        <Star size={16} fill={favorite ? 'currentColor' : 'none'} />
-                      </button>
-                      <button
-                        className={`${styles.actionBtn} ${styles.danger}`}
-                        title="删除"
-                        onClick={(event) => void handleAssetDelete(asset, event)}
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </div>
-                  )}
+        <div className={styles.assetSections}>
+          {groupedAssetSections.map((section) => (
+            <section key={section.key} className={styles.assetSection}>
+              {groupMode !== 'none' && (
+                <div className={styles.assetSectionHeader}>
+                  <h3>{section.title}</h3>
+                  <span>{section.subtitle}</span>
                 </div>
-                <div className={styles.assetInfo}>
-                  <div className={styles.assetNameRow}>
-                    <span className={styles.assetName} title={asset.name}>
-                      {asset.name}
-                    </span>
-                    <button
-                      className={`${styles.favoriteButton} ${favorite ? styles.favoriteButtonActive : ''}`}
-                      title={favorite ? '取消收藏' : '收藏'}
-                      aria-label={favorite ? '取消收藏' : '收藏'}
-                      aria-pressed={favorite}
-                      onClick={(event) => handleFavoriteToggle(asset, event)}
-                    >
-                      <Star size={15} fill={favorite ? 'currentColor' : 'none'} />
-                    </button>
-                    <button
-                      className={styles.moreBtn}
-                      onClick={(event) => event.stopPropagation()}
-                    >
-                      <MoreVertical size={16} />
-                    </button>
-                  </div>
-                  <div className={styles.assetMetaRow}>
-                    <span className={styles.assetType}>{getFilterLabel(asset.type)}</span>
-                    {favorite && (
-                      <span className={styles.favoriteBadge}>
-                        <Star size={12} fill="currentColor" />
-                        收藏
-                      </span>
-                    )}
-                    <span className={styles.assetDate}>
-                      {new Date(asset.createdAt).toLocaleDateString('zh-CN')}
-                    </span>
-                  </div>
-                  <div
-                    className={styles.ratingRow}
-                    onClick={(event) => event.stopPropagation()}
-                    aria-label={`${asset.name} 星级评分`}
-                  >
-                    {[1, 2, 3, 4, 5].map((value) => (
-                      <button
-                        key={value}
-                        type="button"
-                        className={`${styles.ratingButton} ${rating >= value ? styles.ratingActive : ''}`}
-                        title={`${value} 星`}
-                        aria-label={`${value} 星`}
-                        aria-pressed={rating >= value}
-                        onClick={(event) => handleRatingChange(asset, value, event)}
-                      >
-                        <Star size={13} fill={rating >= value ? 'currentColor' : 'none'} />
-                      </button>
-                    ))}
-                  </div>
-                </div>
+              )}
+              <div className={viewMode === 'grid' ? styles.gridLayout : styles.listLayout}>
+                {section.assets.map((asset, index) => renderAssetItem(asset, index))}
               </div>
-            );
-          })}
+            </section>
+          ))}
         </div>
       )}
 

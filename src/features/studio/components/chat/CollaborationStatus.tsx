@@ -78,6 +78,11 @@ export const CollaborationStatus: React.FC<CollaborationStatusProps> = ({
         <span style={{ color: 'var(--color-text-3)', fontSize: 12 }}>
           第 {session.roundCount} 轮
         </span>
+        {session.pipelineRunId && (
+          <span style={{ color: 'var(--color-text-3)', fontSize: 12 }}>
+            流程 {session.pipelineRunId.slice(0, 8)}
+          </span>
+        )}
       </Space>
     </div>
   );

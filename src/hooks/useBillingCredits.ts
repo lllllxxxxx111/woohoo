@@ -2,6 +2,16 @@ import { useCallback, useEffect, useState } from 'react';
 import { getImageCredits, type UserCredits } from '../lib/serverApi';
 import { logger } from '../lib/logger';
 
+const BILLING_CREDITS_REFRESH_EVENT = 'woohoo:billing-credits-refresh';
+
+export function notifyBillingCreditsChanged() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.dispatchEvent(new Event(BILLING_CREDITS_REFRESH_EVENT));
+}
+
 export function useBillingCredits() {
   const [credits, setCredits] = useState<UserCredits | null>(null);
   const [loading, setLoading] = useState(false);
@@ -25,9 +35,20 @@ export function useBillingCredits() {
   }, []);
 
   useEffect(() => {
-    void reload().catch(() => {
-      // Error state is already exposed to the caller.
-    });
+    const reloadSafely = () => {
+      void reload().catch(() => {
+        // Error state is already exposed to the caller.
+      });
+    };
+
+    reloadSafely();
+
+    if (typeof window === 'undefined') {
+      return undefined;
+    }
+
+    window.addEventListener(BILLING_CREDITS_REFRESH_EVENT, reloadSafely);
+    return () => window.removeEventListener(BILLING_CREDITS_REFRESH_EVENT, reloadSafely);
   }, [reload]);
 
   return { credits, loading, error, reload };

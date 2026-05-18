@@ -110,6 +110,34 @@
   position: relative;
 }
 
+.collaborationStartBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-color);
+  background: color-mix(in srgb, #0f766e 12%, var(--bg-secondary) 88%);
+}
+
+.collaborationStartBar div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.collaborationStartBar strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.collaborationStartBar span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 /** 初始化加载占位：防止数据到达时布局跳动 */
 .initializingPlaceholder {
   display: flex;
@@ -1273,6 +1301,15 @@
 
 /* 超小屏幕适配（移动设备） */
 @media (max-width: 640px) {
+  .collaborationStartBar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .collaborationStartBar :global(.arco-btn) {
+    width: 100%;
+  }
+
   .emptyState h3,
   .emptyState :global(h6.arco-typography) {
     font-size: 1.15rem !important;

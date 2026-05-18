@@ -66,6 +66,12 @@ type ServerSession = {
   userId?: string;
 };
 
+export type StoredServerProfile = {
+  email?: string;
+  id?: string;
+  username?: string;
+};
+
 type ServerMeResponse = {
   id: string;
   username: string;
@@ -638,6 +644,19 @@ function loadStoredSession(): ServerSession | null {
 
 export function getStoredServerUserId() {
   return loadStoredSession()?.userId || null;
+}
+
+export function getStoredServerProfile(): StoredServerProfile | null {
+  const session = loadStoredSession();
+  if (!session) {
+    return null;
+  }
+
+  return {
+    email: session.email,
+    id: session.userId,
+    username: session.username,
+  };
 }
 
 function persistSession(session: ServerSession) {
