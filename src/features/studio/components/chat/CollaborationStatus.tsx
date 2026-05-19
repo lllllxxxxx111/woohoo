@@ -34,6 +34,12 @@ export const CollaborationStatus: React.FC<CollaborationStatusProps> = ({
   assignments,
 }) => {
   const display = STATE_DISPLAY[session.state] || { color: 'gray', label: session.state };
+  const progressPreviewLabel =
+    session.state === 'workspace_execution'
+      ? '正在生成大纲中'
+      : session.state === 'workspace_admission'
+        ? '正在进入工作区'
+        : null;
 
   const blockedCount = assignments.filter(
     (a) => a.status === 'blocked' || a.status === 'questioning',
@@ -68,6 +74,11 @@ export const CollaborationStatus: React.FC<CollaborationStatusProps> = ({
         {readyCount > 0 && (
           <Tag color="green" size="small">
             {readyCount} 个就绪
+          </Tag>
+        )}
+        {progressPreviewLabel && (
+          <Tag color="arcoblue" size="small">
+            {progressPreviewLabel}
           </Tag>
         )}
         {replyQueue.length > 0 && (

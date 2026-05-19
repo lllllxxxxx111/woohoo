@@ -24,6 +24,8 @@ use super::model::*;
 pub struct PipelineRunFilter {
     #[serde(alias = "projectId")]
     pub project_id: Option<String>,
+    #[serde(alias = "conversationId")]
+    pub conversation_id: Option<String>,
     pub status: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
@@ -183,10 +185,18 @@ pub async fn get_pipeline_run(
     .fetch_all(&state.db)
     .await?;
 
+    let outputs = sqlx::query_as::<_, PipelineStepOutput>(
+        "SELECT * FROM pipeline_step_outputs WHERE run_id = ? ORDER BY created_at DESC LIMIT 50",
+    )
+    .bind(&id)
+    .fetch_all(&state.db)
+    .await?;
+
     Ok(Json(PipelineRunSummary {
         run,
         steps,
         recent_events: events,
+        outputs,
     }))
 }
 
@@ -233,6 +243,10 @@ pub async fn list_pipeline_runs(
     if let Some(project_id) = &filter.project_id {
         conditions.push("project_id = ?".to_string());
         values.push(project_id.clone());
+    }
+    if let Some(conversation_id) = &filter.conversation_id {
+        conditions.push("conversation_id = ?".to_string());
+        values.push(conversation_id.clone());
     }
     if let Some(status) = &filter.status {
         conditions.push("status = ?".to_string());

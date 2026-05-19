@@ -85,6 +85,7 @@ export interface PipelineRunSummary {
   run: PipelineRun;
   steps: PipelineRunStep[];
   recentEvents: PipelineRunEvent[];
+  outputs: PipelineStepOutput[];
 }
 
 export interface PipelineRunEvent {
@@ -95,6 +96,22 @@ export interface PipelineRunEvent {
   payloadJson: string | null;
   source: string;
   createdAt: string;
+}
+
+export interface PipelineStepOutput {
+  id: string;
+  runId: string;
+  stepId: string;
+  taskId?: string | null;
+  outputType: string;
+  outputJson?: string | null;
+  rawContent?: string | null;
+  reviewDecision?: string | null;
+  reviewScore?: number | null;
+  reviewIssuesJson?: string | null;
+  retryHintsJson?: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface PipelinePromptOptimization {
@@ -133,6 +150,7 @@ export interface CreatePipelineRunInput {
 
 type ListPipelineRunsParams = {
   projectId?: string;
+  conversationId?: string;
   status?: string;
   limit?: number;
   offset?: number;
@@ -193,6 +211,7 @@ export function createUsageTaskPipelineApi(requestApi: RequestApi) {
   const listPipelineRuns = async (params?: ListPipelineRunsParams): Promise<PipelineRun[]> => {
     const query = new URLSearchParams();
     if (params?.projectId) query.set('project_id', params.projectId);
+    if (params?.conversationId) query.set('conversation_id', params.conversationId);
     if (params?.status) query.set('status', params.status);
     if (params?.limit) query.set('limit', String(params.limit));
     if (params?.offset) query.set('offset', String(params.offset));

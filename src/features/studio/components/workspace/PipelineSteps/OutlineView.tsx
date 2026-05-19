@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Play,
   RotateCw,
@@ -7,13 +7,18 @@ import {
   AlertCircle,
   XCircle,
   SkipForward,
+  Eye,
+  PencilLine,
 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 import styles from './PipelineSteps.module.css';
 import {
   createPipelineRun,
   getPipelineRun,
   getPipelineOptimizations,
+  getAiTask,
   listPipelineRuns,
   pausePipelineRun,
   resumePipelineRun,
@@ -87,15 +92,77 @@ const RUN_ERROR_LABELS: Record<string, { label: string; hint: string }> = {
 
 const EMPTY_PIPELINE_STEPS: PipelineRunSummary['steps'] = [];
 
+const extractOutlineTextCandidate = (value: unknown): string => {
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(extractOutlineTextCandidate).filter(Boolean).join('\n\n');
+  }
+
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    for (const key of ['outline', 'content', 'text', 'result', 'draft', 'body', 'summary']) {
+      const candidate = extractOutlineTextCandidate(record[key]);
+      if (candidate) {
+        return candidate;
+      }
+    }
+  }
+
+  return '';
+};
+
+const normalizeOutlineTaskResult = (result: string | null | undefined): string => {
+  const raw = result?.trim();
+  if (!raw) {
+    return '';
+  }
+
+  if ((raw.startsWith('{') && raw.endsWith('}')) || (raw.startsWith('[') && raw.endsWith(']'))) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      const parsedText = extractOutlineTextCandidate(parsed);
+      if (parsedText) {
+        return parsedText;
+      }
+    } catch {
+      // Plain markdown/text output is the common path.
+    }
+  }
+
+  return raw;
+};
+
+const OUTLINE_DESIGN_STEP_KEYS = new Set(['outline_design', 'collab_outline_design']);
+const OUTLINE_REVIEW_STEP_KEYS = new Set(['outline_review', 'collab_outline_review']);
+
+const isOutlineDesignStep = (stepKey: string | null | undefined) =>
+  typeof stepKey === 'string' && OUTLINE_DESIGN_STEP_KEYS.has(stepKey);
+
+const isOutlineReviewStep = (stepKey: string | null | undefined) =>
+  typeof stepKey === 'string' && OUTLINE_REVIEW_STEP_KEYS.has(stepKey);
+
+const getCompletedOutlineDesignTaskId = (run: PipelineRunSummary | null): string | null => {
+  const designStep = run?.steps.find(
+    (step) => isOutlineDesignStep(step.stepKey) && step.status === 'completed' && step.aiTaskId,
+  );
+  return designStep?.aiTaskId ?? null;
+};
+
 export const OutlineView: React.FC = () => {
   const [outlineDraft, setOutlineDraft] = useState('');
+  const [outlineViewMode, setOutlineViewMode] = useState<'preview' | 'edit'>('preview');
   const [currentRun, setCurrentRun] = useState<PipelineRunSummary | null>(null);
+  const [outlineSourceTaskId, setOutlineSourceTaskId] = useState<string | null>(null);
   const [promptOptimizations, setPromptOptimizations] = useState<PipelinePromptOptimization[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [manualReviewOwner, setManualReviewOwner] = useState('');
   const [manualReviewNote, setManualReviewNote] = useState('');
   const [selectedManualReviewStepId, setSelectedManualReviewStepId] = useState<string | null>(null);
+  const lastSyncedOutlineTaskIdRef = useRef<string | null>(null);
   const { showToast } = useToast();
   const { activeState, isServerWorkspaceReady, aiSettings, updateAiSettings, setSettingsOpen } =
     useAppStore(
@@ -115,6 +182,45 @@ export const OutlineView: React.FC = () => {
     ? Math.min(900, Math.max(retryBackoffSec, Math.round(aiSettings.pipelineRetryMaxBackoffSec)))
     : Math.max(90, retryBackoffSec);
   const currentRunStatus = currentRun?.run.status;
+  const currentRunStep = useMemo(
+    () =>
+      currentRun?.steps.find((step) => step.status === 'running') ??
+      currentRun?.steps.find((step) => step.status === 'retrying') ??
+      currentRun?.steps.find((step) => step.status === 'queued') ??
+      currentRun?.steps.find((step) => step.status === 'blocked') ??
+      null,
+    [currentRun],
+  );
+  const currentRunProgressLabel = useMemo(() => {
+    if (!currentRun) {
+      return '等待大纲流程';
+    }
+
+    switch (currentRun.run.status) {
+      case 'queued':
+        return '大纲流程排队中';
+      case 'paused':
+        return '大纲流程已暂停';
+      case 'completed':
+        return '大纲生成完成';
+      case 'failed':
+        return '大纲生成失败';
+      case 'cancelled':
+        return '大纲流程已取消';
+      case 'running':
+      default:
+        if (isOutlineReviewStep(currentRunStep?.stepKey)) {
+          return '正在审核大纲中';
+        }
+        if (isOutlineDesignStep(currentRunStep?.stepKey)) {
+          return '正在生成大纲中';
+        }
+        if (currentRunStep?.stepName) {
+          return `正在执行 ${currentRunStep.stepName}`;
+        }
+        return '大纲流程执行中';
+    }
+  }, [currentRun, currentRunStep]);
 
   const updateRetryPolicy = (nextBackoffSec: number, nextMaxBackoffSec: number) => {
     const normalizedBackoffSec = Math.min(300, Math.max(1, Math.round(nextBackoffSec || 4)));
@@ -292,10 +398,12 @@ export const OutlineView: React.FC = () => {
     try {
       const runs = await listPipelineRuns({
         projectId: activeState.projectId,
-        limit: 1,
+        conversationId: activeState.chatSessionId ?? undefined,
+        limit: 30,
       });
       if (runs.length === 0) {
         setCurrentRun(null);
+        setOutlineSourceTaskId(null);
         setPromptOptimizations([]);
         return;
       }
@@ -303,12 +411,27 @@ export const OutlineView: React.FC = () => {
         getPipelineRun(runs[0].id),
         getPipelineOptimizations(runs[0].id),
       ]);
+      let nextOutlineSourceTaskId = getCompletedOutlineDesignTaskId(detail);
+      if (!nextOutlineSourceTaskId) {
+        for (const run of runs.slice(1)) {
+          try {
+            const candidateDetail = await getPipelineRun(run.id);
+            nextOutlineSourceTaskId = getCompletedOutlineDesignTaskId(candidateDetail);
+            if (nextOutlineSourceTaskId) {
+              break;
+            }
+          } catch (candidateError) {
+            logger.error('Failed to load outline source run:', candidateError);
+          }
+        }
+      }
       setCurrentRun(detail);
+      setOutlineSourceTaskId(nextOutlineSourceTaskId);
       setPromptOptimizations(optimizations);
     } catch (error) {
       logger.error('Failed to load pipeline run:', error);
     }
-  }, [activeState.projectId]);
+  }, [activeState.chatSessionId, activeState.projectId]);
 
   useEffect(() => {
     if (isServerWorkspaceReady && activeState.projectId) {
@@ -325,6 +448,40 @@ export const OutlineView: React.FC = () => {
       return () => clearInterval(interval);
     }
   }, [isServerWorkspaceReady, activeState.projectId, currentRunStatus, loadLatestRun]);
+
+  useEffect(() => {
+    if (!outlineSourceTaskId || lastSyncedOutlineTaskIdRef.current === outlineSourceTaskId) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const syncGeneratedOutline = async () => {
+      try {
+        const task = await getAiTask(outlineSourceTaskId);
+        if (cancelled) {
+          return;
+        }
+
+        const nextOutline = normalizeOutlineTaskResult(task.result);
+        if (!nextOutline) {
+          return;
+        }
+
+        lastSyncedOutlineTaskIdRef.current = outlineSourceTaskId;
+        setOutlineDraft(nextOutline);
+        setOutlineViewMode('preview');
+      } catch (error) {
+        logger.error('Failed to sync generated outline from AI task:', error);
+      }
+    };
+
+    void syncGeneratedOutline();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [outlineSourceTaskId]);
 
   const handleRegenerate = () => {
     void createOutlinePipelineRun('full');
@@ -630,6 +787,24 @@ export const OutlineView: React.FC = () => {
       <div className={styles.mainArea}>
         <div className={styles.areaHeader}>
           <h3>大纲内容</h3>
+          <div className={styles.outlineModeSwitch} role="group" aria-label="大纲视图模式">
+            <button
+              type="button"
+              className={outlineViewMode === 'preview' ? styles.activeModeBtn : ''}
+              onClick={() => setOutlineViewMode('preview')}
+            >
+              <Eye size={14} />
+              预览
+            </button>
+            <button
+              type="button"
+              className={outlineViewMode === 'edit' ? styles.activeModeBtn : ''}
+              onClick={() => setOutlineViewMode('edit')}
+            >
+              <PencilLine size={14} />
+              编辑
+            </button>
+          </div>
           {currentRun && (
             <span className={styles.pipelineBadge} data-status={currentRun.run.status}>
               {currentRun.run.status === 'running' && '执行中'}
@@ -643,18 +818,48 @@ export const OutlineView: React.FC = () => {
         </div>
 
         {currentRun && (
-          <div className={styles.progressBar}>
-            <div className={styles.progressFill} style={{ width: `${progressPercent}%` }} />
-            <span className={styles.progressText}>{progressPercent}%</span>
+          <div className={styles.runPreview}>
+            <div className={styles.runPreviewHeader}>
+              <div>
+                <span className={styles.runPreviewTitle}>流程预览</span>
+                <strong>{currentRunProgressLabel}</strong>
+              </div>
+              <span className={styles.runPreviewId}>流程 {currentRun.run.id.slice(0, 8)}</span>
+            </div>
+            <div className={styles.runPreviewMeta}>
+              <span>当前步骤：{currentRunStep?.stepName || '等待调度'}</span>
+              <span>
+                已完成 {currentRun.run.completedSteps}/{currentRun.run.totalSteps} 步
+              </span>
+            </div>
+            <div className={styles.progressBar}>
+              <div className={styles.progressFill} style={{ width: `${progressPercent}%` }} />
+              <span className={styles.progressText}>{progressPercent}%</span>
+            </div>
           </div>
         )}
 
-        <textarea
-          className={styles.fullTextArea}
-          placeholder="暂无大纲内容..."
-          value={outlineDraft}
-          onChange={(event) => setOutlineDraft(event.target.value)}
-        />
+        {outlineViewMode === 'preview' ? (
+          <div className={styles.markdownPreview}>
+            {outlineDraft.trim() ? (
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{outlineDraft}</ReactMarkdown>
+            ) : (
+              <div className={styles.emptyMarkdownState}>
+                <span>暂无大纲内容</span>
+                <button type="button" onClick={() => setOutlineViewMode('edit')}>
+                  开始编辑
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <textarea
+            className={styles.fullTextArea}
+            placeholder="暂无大纲内容..."
+            value={outlineDraft}
+            onChange={(event) => setOutlineDraft(event.target.value)}
+          />
+        )}
 
         {/* 真实步骤列表 */}
         {currentRun && currentRun.steps.length > 0 && (
@@ -709,14 +914,19 @@ export const OutlineView: React.FC = () => {
                 <span
                   className={
                     styles[
-                      currentRun.run.status === 'completed' ? 'statusCompleted' : 'statusGenerating'
+                      currentRun.run.status === 'completed'
+                        ? 'statusCompleted'
+                        : currentRun.run.status === 'failed' ||
+                            currentRun.run.status === 'cancelled'
+                          ? 'statusFailed'
+                          : 'statusGenerating'
                     ]
                   }
                 >
-                  {STEP_STATUS_MAP[
-                    (currentRun.steps.find((s) => s.status === 'running')?.status ||
-                      currentRun.run.status) as StepStatus
-                  ]?.label || currentRun.run.status}
+                  {(currentRun.run.status === 'running' || currentRun.run.status === 'queued') && (
+                    <RotateCw size={14} className={styles.spinIcon} />
+                  )}
+                  {currentRunProgressLabel}
                 </span>
               ) : (
                 <span className={styles.statusGenerating}>
@@ -727,6 +937,10 @@ export const OutlineView: React.FC = () => {
           </div>
           {currentRun && (
             <>
+              <div className={styles.statusRow}>
+                <span className={styles.label}>当前步骤：</span>
+                <span>{currentRunStep?.stepName || '等待调度'}</span>
+              </div>
               <div className={styles.statusRow}>
                 <span className={styles.label}>进度：</span>
                 <span>
