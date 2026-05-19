@@ -1,6 +1,11 @@
 import type { SetStateAction } from 'react';
 import { getStoredServerUserId } from '../../lib/serverApi';
-import type { AiSettings } from '../../types';
+import type {
+  AiSettings,
+  CollaborationAssignment,
+  CollaborationSession,
+  LoopCheckResponse,
+} from '../../types';
 
 export type ThemeMode = 'dark' | 'light';
 
@@ -16,6 +21,7 @@ export const STORAGE_KEYS = {
   autoSave: 'woohoo-auto-save-v1',
   aiSettings: 'woohoo-ai-settings-v1',
   aiEndpointId: 'woohoo-ai-endpoint-v1',
+  collaborationSessions: 'woohoo-collaboration-sessions-v1',
 } as const;
 
 const USER_SCOPED_STORAGE_KEYS = new Set<string>([
@@ -29,6 +35,7 @@ const USER_SCOPED_STORAGE_KEYS = new Set<string>([
   STORAGE_KEYS.autoSave,
   STORAGE_KEYS.aiSettings,
   STORAGE_KEYS.aiEndpointId,
+  STORAGE_KEYS.collaborationSessions,
 ]);
 
 type ScopedStorageValue<T> = {
@@ -115,4 +122,16 @@ export function resolveStateUpdate<T>(updater: SetStateAction<T>, prev: T): T {
 
 export function hydrateTheme(value: unknown): ThemeMode {
   return value === 'light' ? 'light' : 'dark';
+}
+
+export type StoredCollaborationSnapshot = {
+  session: CollaborationSession;
+  assignments: CollaborationAssignment[];
+  loopCheckResult: LoopCheckResponse | null;
+};
+
+export type StoredCollaborationSnapshotMap = Record<string, StoredCollaborationSnapshot>;
+
+export function buildCollaborationStorageKey(projectId: string, conversationId: string) {
+  return `${projectId}:${conversationId}`;
 }

@@ -74,6 +74,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     serverAiEndpointId,
     isServerWorkspaceReady,
     pendingTaskCount,
+    activeCollaborationSession,
+    activeCollaborationAssignments,
+    collaborationLoopCheckResult,
   } = useAppStore(
     useShallow((state) => ({
       projects: state.projects,
@@ -90,6 +93,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       serverAiEndpointId: state.serverAiEndpointId,
       isServerWorkspaceReady: state.isServerWorkspaceReady,
       pendingTaskCount: state.pendingTaskCount,
+      activeCollaborationSession: state.activeCollaborationSession,
+      activeCollaborationAssignments: state.activeCollaborationAssignments,
+      collaborationLoopCheckResult: state.collaborationLoopCheckResult,
     })),
   );
 
@@ -279,6 +285,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     storyboards,
     allAgentContacts,
     activeState,
+    activeCollaborationSession,
+    activeCollaborationAssignments,
+    collaborationLoopCheckResult,
     theme,
     autoSaveEnabled,
     aiSettings,

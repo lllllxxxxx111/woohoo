@@ -13,6 +13,12 @@ import { useToast } from '../../../../context/useToast';
 import { useAppActions } from '../../../../context/useAppActions';
 import { AI_PROVIDER_PRESETS } from '../../../../lib/ai';
 import {
+  STORAGE_KEYS,
+  buildCollaborationStorageKey,
+  loadStorage,
+  type StoredCollaborationSnapshotMap,
+} from '../../../../context/utils/storageHelpers';
+import {
   admitCollaboration,
   checkCollaborationLoop,
   createCollaborationSession,
@@ -141,6 +147,48 @@ export const ChatArea: React.FC = () => {
     Boolean(activeProject && activeChat) &&
     isServerWorkspaceReady &&
     !hasActiveCollaborationForChat;
+
+  useEffect(() => {
+    if (!isServerWorkspaceReady || !activeState.projectId || !activeState.chatSessionId) {
+      return;
+    }
+
+    const snapshotMap = loadStorage<StoredCollaborationSnapshotMap>(
+      STORAGE_KEYS.collaborationSessions,
+      {},
+    );
+    const conversationKey = buildCollaborationStorageKey(
+      activeState.projectId,
+      activeState.chatSessionId,
+    );
+    const storedSnapshot = snapshotMap[conversationKey];
+    if (!storedSnapshot?.session) {
+      return;
+    }
+
+    if (
+      storedSnapshot.session.projectId !== activeState.projectId ||
+      storedSnapshot.session.conversationId !== activeState.chatSessionId
+    ) {
+      return;
+    }
+
+    if (activeCollaborationSession?.id === storedSnapshot.session.id) {
+      return;
+    }
+
+    setCollaborationSession(storedSnapshot.session);
+    setCollaborationAssignments(Array.isArray(storedSnapshot.assignments) ? storedSnapshot.assignments : []);
+    setCollaborationLoopCheckResult(storedSnapshot.loopCheckResult ?? null);
+  }, [
+    activeCollaborationSession?.id,
+    activeState.chatSessionId,
+    activeState.projectId,
+    isServerWorkspaceReady,
+    setCollaborationAssignments,
+    setCollaborationLoopCheckResult,
+    setCollaborationSession,
+  ]);
 
   const projectNameById = useMemo(
     () => new Map(projects.map((project) => [project.id, project.name])),
@@ -466,13 +514,15 @@ export const ChatArea: React.FC = () => {
         </div>
 
         {/* 协同状态展示 */}
-        {activeCollaborationSession && (
+        {hasActiveCollaborationForChat && activeCollaborationSession && (
           <CollaborationStatus
             session={activeCollaborationSession}
             assignments={activeCollaborationAssignments}
           />
         )}
-        <CollaborationAlert loopCheckResult={collaborationLoopCheckResult} />
+        <CollaborationAlert
+          loopCheckResult={hasActiveCollaborationForChat ? collaborationLoopCheckResult : null}
+        />
 
         {canOfferCollaborationStart && (
           <div className={styles.collaborationStartBar}>
