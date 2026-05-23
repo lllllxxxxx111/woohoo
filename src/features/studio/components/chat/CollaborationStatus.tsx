@@ -40,6 +40,7 @@ export const CollaborationStatus: React.FC<CollaborationStatusProps> = ({
       : session.state === 'workspace_admission'
         ? '正在进入工作区'
         : null;
+  const supervisionLabel = session.state === 'workspace_execution' ? '监管运行中' : null;
 
   const blockedCount = assignments.filter(
     (a) => a.status === 'blocked' || a.status === 'questioning',
@@ -79,6 +80,11 @@ export const CollaborationStatus: React.FC<CollaborationStatusProps> = ({
         {progressPreviewLabel && (
           <Tag color="arcoblue" size="small">
             {progressPreviewLabel}
+          </Tag>
+        )}
+        {supervisionLabel && (
+          <Tag color="blue" size="small">
+            {supervisionLabel}
           </Tag>
         )}
         {replyQueue.length > 0 && (

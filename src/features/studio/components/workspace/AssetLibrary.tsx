@@ -31,12 +31,9 @@ import { getServerAssetBlob } from '../../../../lib/serverApi';
 import { isProtectedAssetUrl, useAssetPreviewUrl } from '../../../../hooks/useAssetPreviewUrl';
 import {
   ASSET_TYPE_LABELS,
-  consumePendingAssetLibraryViewRequest,
-  listenAssetLibraryViewRequests,
   type AssetLibraryFilterType,
   type AssetLibraryGroupMode,
   type AssetLibraryScope,
-  type AssetLibraryViewRequest,
 } from '../../../../lib/assetLibraryView';
 import styles from './AssetLibrary.module.css';
 
@@ -119,13 +116,15 @@ const AssetPreviewImage: React.FC<{
 };
 
 export const AssetLibrary: React.FC = () => {
-  const { activeAssets, activeState, assets, projects, setActiveProject } = useAppStore(
+  const { activeAssets, activeState, assets, projects, assetLibraryView, setAssetLibraryView } =
+    useAppStore(
     useShallow((state) => ({
       activeAssets: state.activeAssets,
       activeState: state.activeState,
       assets: state.assets,
       projects: state.projects,
-      setActiveProject: state.setActiveProject,
+      assetLibraryView: state.assetLibraryView,
+      setAssetLibraryView: state.setAssetLibraryView,
     })),
   );
   const { uploadAssets, deleteAsset, updateAsset } = useAppActions();
@@ -136,11 +135,9 @@ export const AssetLibrary: React.FC = () => {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadingFiles, setUploadingFiles] = useState<UploadingFile[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
-  const [filterType, setFilterType] = useState<FilterType>('all');
-  const [libraryScope, setLibraryScope] = useState<AssetLibraryScope>(
-    activeState.projectId ? 'current' : 'all',
-  );
-  const [groupMode, setGroupMode] = useState<AssetLibraryGroupMode>('none');
+  const filterType = assetLibraryView.filterType;
+  const libraryScope = assetLibraryView.scope;
+  const groupMode = assetLibraryView.groupMode;
   const [favoriteOnly, setFavoriteOnly] = useState(false);
   const [ratingFilter, setRatingFilter] = useState<RatingFilter>(0);
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
@@ -160,38 +157,22 @@ export const AssetLibrary: React.FC = () => {
     return nextMap;
   }, [projects]);
 
-  const applyViewRequest = useCallback(
-    (request: AssetLibraryViewRequest | null) => {
-      if (!request) {
-        return;
-      }
-
-      if (request.projectId) {
-        setActiveProject(request.projectId);
-      }
-      if (request.scope) {
-        setLibraryScope(request.scope);
-      }
-      if (request.filterType) {
-        setFilterType(request.filterType);
-      }
-      if (request.groupMode) {
-        setGroupMode(request.groupMode);
-      }
-    },
-    [setActiveProject],
-  );
-
-  useEffect(() => {
-    applyViewRequest(consumePendingAssetLibraryViewRequest());
-    return listenAssetLibraryViewRequests(applyViewRequest);
-  }, [applyViewRequest]);
-
   useEffect(() => {
     if (!activeState.projectId && libraryScope === 'current') {
-      setLibraryScope('all');
+      setAssetLibraryView({ scope: 'all' });
     }
-  }, [activeState.projectId, libraryScope]);
+  }, [activeState.projectId, libraryScope, setAssetLibraryView]);
+
+  const updateLibraryView = useCallback(
+    (request: {
+      filterType?: FilterType;
+      groupMode?: AssetLibraryGroupMode;
+      scope?: AssetLibraryScope;
+    }) => {
+      setAssetLibraryView(request);
+    },
+    [setAssetLibraryView],
+  );
 
   const getAssetIcon = (type: Asset['type']) => {
     switch (type) {
@@ -638,7 +619,7 @@ export const AssetLibrary: React.FC = () => {
         <div className={styles.viewToggle}>
           <button
             className={`${styles.viewBtn} ${libraryScope === 'current' ? styles.active : ''}`}
-            onClick={() => setLibraryScope('current')}
+            onClick={() => updateLibraryView({ scope: 'current' })}
             title="只看当前项目"
             disabled={!activeState.projectId}
           >
@@ -647,7 +628,7 @@ export const AssetLibrary: React.FC = () => {
           </button>
           <button
             className={`${styles.viewBtn} ${libraryScope === 'all' ? styles.active : ''}`}
-            onClick={() => setLibraryScope('all')}
+            onClick={() => updateLibraryView({ scope: 'all' })}
             title="查看全部项目资产"
           >
             <Layers size={18} />
@@ -683,10 +664,10 @@ export const AssetLibrary: React.FC = () => {
               type="button"
               className={groupMode === mode ? styles.activeGroupBtn : undefined}
               onClick={() => {
-                setGroupMode(mode);
-                if (mode === 'project') {
-                  setLibraryScope('all');
-                }
+                updateLibraryView({
+                  groupMode: mode,
+                  scope: mode === 'project' ? 'all' : libraryScope,
+                });
               }}
             >
               {label}
@@ -713,7 +694,7 @@ export const AssetLibrary: React.FC = () => {
                     key={type}
                     className={`${styles.filterItem} ${filterType === type ? styles.active : ''}`}
                     onClick={() => {
-                      setFilterType(type);
+                      updateLibraryView({ filterType: type });
                       setShowFilterDropdown(false);
                     }}
                   >

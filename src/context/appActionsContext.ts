@@ -31,6 +31,7 @@ export type AppActions = {
   deleteAsset: (assetId: string) => Promise<void>;
   saveScript: (projectId: string, content: string, title?: string) => Promise<Script>;
   saveStoryboard: (projectId: string, lines: Storyboard['lines']) => Promise<Storyboard>;
+  refreshWorkspace: (reason?: string, maxAttempts?: number) => Promise<unknown>;
   suggestProjectName: (seedContent?: string) => string;
   sendAiMessage: (content: string, options?: SendAiMessageOptions) => Promise<SendMessageResult>;
 };

@@ -578,6 +578,13 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     await refreshWorkspaceWithRetries('task completion');
   }, [refreshWorkspaceWithRetries]);
 
+  const refreshWorkspace = useCallback(
+    async (reason = 'manual refresh', maxAttempts = 3) => {
+      return refreshWorkspaceWithRetries(reason, maxAttempts);
+    },
+    [refreshWorkspaceWithRetries],
+  );
+
   const markUnauthenticated = useCallback(() => {
     setIsAuthenticated(false);
   }, [setIsAuthenticated]);
@@ -651,6 +658,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       deleteAsset,
       saveScript,
       saveStoryboard,
+      refreshWorkspace,
       suggestProjectName,
       sendAiMessage,
     }),
@@ -669,6 +677,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       deleteAsset,
       saveScript,
       saveStoryboard,
+      refreshWorkspace,
       suggestProjectName,
       sendAiMessage,
     ],

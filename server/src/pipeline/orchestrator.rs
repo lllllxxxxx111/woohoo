@@ -8,6 +8,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use uuid::Uuid;
 
 use crate::{
+    asset::{self, generated_document::GeneratedMarkdownDocument},
     ai::{
         client::StreamFallbackMode,
         config::{AiChatReq, AiTaskStatus},
@@ -305,7 +306,7 @@ async fn handle_running_step(
             if normalize_step_type(step) == "review" {
                 handle_review_completion(&state.db, run, step, steps, task_id, task.result).await
             } else {
-                handle_design_completion(&state.db, run, step, task_id, task.result).await
+                handle_design_completion(state, run, step, task_id, task.result).await
             }
         }
         "failed" => handle_task_failure(&state.db, run, step, task.error).await,
@@ -353,25 +354,53 @@ fn map_task_status(status: AiTaskStatus) -> &'static str {
 }
 
 async fn handle_design_completion(
-    pool: &SqlitePool,
+    state: &AppState,
     run: &PipelineRunRow,
     step: &PipelineStepRow,
     task_id: &str,
     result: Option<String>,
 ) -> Result<bool> {
-    let content_preview = result
+    let raw_content = result.filter(|value| !value.trim().is_empty());
+    let persisted_asset = if let Some(content) = raw_content.as_deref() {
+        match persist_pipeline_document_asset(state, run, step, task_id, content).await {
+            Ok(asset) => Some(asset),
+            Err(error) => {
+                tracing::warn!(
+                    run_id = %run.id,
+                    step_id = %step.id,
+                    "failed to persist pipeline document asset: {}",
+                    error
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let output_json = persisted_asset.as_ref().map(|asset| {
+        json!({
+            "format": "markdown",
+            "assetId": asset.id,
+            "assetName": asset.name,
+            "assetType": asset.asset_type,
+            "assetUrl": asset.url,
+            "documentKind": classify_pipeline_document_kind(step),
+        })
+        .to_string()
+    });
+    let content_preview = raw_content
         .as_deref()
         .map(build_compact_preview)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "产出已写入步骤输出".to_string());
     let output_id = insert_step_output(
-        pool,
+        &state.db,
         &run.id,
         &step.id,
         Some(task_id),
         "design",
-        None,
-        result,
+        output_json.as_deref(),
+        raw_content,
         None,
         None,
         None,
@@ -379,9 +408,31 @@ async fn handle_design_completion(
     )
     .await?;
 
-    mark_step_completed(pool, &run.id, &step.id, Some(&output_id)).await?;
+    if let Some(asset) = persisted_asset.as_ref() {
+        append_pipeline_event(
+            &state.db,
+            &run.id,
+            Some(&step.id),
+            "pipeline_asset_created",
+            json!({
+                "outputId": output_id,
+                "assetId": asset.id,
+                "assetName": asset.name,
+                "assetType": asset.asset_type,
+                "assetUrl": asset.url,
+                "documentKind": classify_pipeline_document_kind(step),
+                "stepId": step.id,
+                "stepKey": step.step_key,
+                "stepName": step.step_name,
+            }),
+            "system",
+        )
+        .await?;
+    }
+
+    mark_step_completed(&state.db, &run.id, &step.id, Some(&output_id)).await?;
     append_assistant_step_summary(
-        pool,
+        &state.db,
         run,
         step,
         format!("设计步骤「{}」已完成：{}", step.step_name, content_preview),
@@ -389,6 +440,112 @@ async fn handle_design_completion(
     )
     .await?;
     Ok(true)
+}
+
+async fn persist_pipeline_document_asset(
+    state: &AppState,
+    run: &PipelineRunRow,
+    step: &PipelineStepRow,
+    task_id: &str,
+    content: &str,
+) -> Result<asset::model::Asset> {
+    let document_kind = classify_pipeline_document_kind(step);
+    let filename_stem = format!(
+        "pipeline-{}-{}-{}",
+        safe_filename_component(&run.id),
+        safe_filename_component(&step.id),
+        safe_filename_component(task_id)
+    );
+    let asset_name = build_pipeline_document_asset_name(step);
+    let metadata = json!({
+        "origin": "pipeline_output",
+        "format": "markdown",
+        "pipelineRunId": run.id,
+        "pipelineType": run.pipeline_type,
+        "conversationId": run.conversation_id,
+        "stepId": step.id,
+        "stepKey": step.step_key,
+        "stepName": step.step_name,
+        "stepType": normalize_step_type(step),
+        "taskId": task_id,
+        "documentKind": document_kind,
+        "sizeBytes": content.as_bytes().len(),
+        "generatedAt": now_iso(),
+    });
+
+    Ok(asset::generated_document::persist_markdown_document(
+        state,
+        GeneratedMarkdownDocument {
+            project_id: &run.project_id,
+            name: &asset_name,
+            filename_stem: &filename_stem,
+            content,
+            metadata,
+        },
+    )
+    .await?)
+}
+
+fn classify_pipeline_document_kind(step: &PipelineStepRow) -> &'static str {
+    let key = step.step_key.to_ascii_lowercase();
+    if key.contains("outline") {
+        "outline"
+    } else if key.contains("script") {
+        "script"
+    } else if key.contains("storyboard") {
+        "storyboard"
+    } else if key.contains("chapter") {
+        "chapter"
+    } else if key.contains("keyframe") {
+        "keyframe"
+    } else {
+        "pipeline_output"
+    }
+}
+
+fn build_pipeline_document_asset_name(step: &PipelineStepRow) -> String {
+    let title = step
+        .step_name
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let fallback = step
+        .step_key
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-");
+    let base = if title.trim().is_empty() {
+        fallback.trim()
+    } else {
+        title.trim()
+    };
+
+    if base.is_empty() {
+        "pipeline-output.md".to_string()
+    } else if base.ends_with(".md") {
+        base.to_string()
+    } else {
+        format!("{base}.md")
+    }
+}
+
+fn safe_filename_component(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() {
+        Uuid::new_v4().to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 async fn handle_review_completion(

@@ -9,6 +9,7 @@ import {
   SkipForward,
   Eye,
   PencilLine,
+  ArrowRight,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -26,9 +27,11 @@ import {
   retryPipelineStep,
   type PipelinePromptOptimization,
   type PipelineRunSummary,
+  type PipelineStepOutput,
   type PipelineStepStatus,
 } from '../../../../../lib/serverApi';
 import { logger } from '../../../../../lib/logger';
+import { useAppActions } from '../../../../../context/useAppActions';
 import { useAppStore } from '../../../../../store';
 import { useShallow } from 'zustand/react/shallow';
 import { useToast } from '../../../../../context/useToast';
@@ -91,6 +94,7 @@ const RUN_ERROR_LABELS: Record<string, { label: string; hint: string }> = {
 };
 
 const EMPTY_PIPELINE_STEPS: PipelineRunSummary['steps'] = [];
+const EMPTY_PIPELINE_OUTPUTS: PipelineRunSummary['outputs'] = [];
 
 const extractOutlineTextCandidate = (value: unknown): string => {
   if (typeof value === 'string') {
@@ -135,6 +139,129 @@ const normalizeOutlineTaskResult = (result: string | null | undefined): string =
   return raw;
 };
 
+const parseTextList = (value: string | null | undefined): string[] => {
+  if (!value) {
+    return [];
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map((item) =>
+          typeof item === 'string' ? item.trim() : item == null ? '' : String(item).trim(),
+        )
+        .filter(Boolean);
+    }
+    if (typeof parsed === 'string') {
+      const parsedText = parsed.trim();
+      return parsedText ? [parsedText] : [];
+    }
+  } catch {
+    // fall through to line splitting
+  }
+
+  return trimmed
+    .split(/\r?\n|[；;，,]/)
+    .map((item) => item.replace(/^[-*•]\s*/, '').trim())
+    .filter(Boolean);
+};
+
+const formatReviewScore = (score: number | null | undefined): string => {
+  if (typeof score !== 'number' || Number.isNaN(score)) {
+    return '未评分';
+  }
+
+  return score.toFixed(2);
+};
+
+const getReviewDecisionLabel = (decision: string | null | undefined): string => {
+  if (decision === 'pass') {
+    return '通过';
+  }
+  if (decision === 'fail') {
+    return '未通过';
+  }
+  return '待解析';
+};
+
+const summarizeReviewOutput = (output: PipelineStepOutput | null): string => {
+  if (!output) {
+    return '';
+  }
+
+  const summaryParts = [`审核${getReviewDecisionLabel(output.reviewDecision)}`];
+  if (typeof output.reviewScore === 'number' && !Number.isNaN(output.reviewScore)) {
+    summaryParts.push(`评分 ${formatReviewScore(output.reviewScore)}`);
+  }
+
+  const issueCount = parseTextList(output.reviewIssuesJson).length;
+  if (issueCount > 0) {
+    summaryParts.push(`问题 ${issueCount} 条`);
+  }
+
+  const hintCount = parseTextList(output.retryHintsJson).length;
+  if (hintCount > 0) {
+    summaryParts.push(`建议 ${hintCount} 条`);
+  }
+
+  return summaryParts.join(' · ');
+};
+
+const extractOutputPreview = (output: PipelineStepOutput | null): string => {
+  if (!output) {
+    return '';
+  }
+
+  if (output.outputType === 'review') {
+    return summarizeReviewOutput(output);
+  }
+
+  const source = output.rawContent ?? output.outputJson ?? '';
+  return normalizeOutlineTaskResult(source);
+};
+
+const parseJsonRecord = (value: string | null | undefined): Record<string, unknown> | null => {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+const extractPipelineOutputAssetIds = (outputs: PipelineStepOutput[]): string[] => {
+  return outputs
+    .map((output) => {
+      const payload = parseJsonRecord(output.outputJson);
+      if (typeof payload?.assetId === 'string' && payload.assetId.trim()) {
+        return payload.assetId.trim();
+      }
+      const nestedAsset = payload?.asset;
+      if (
+        nestedAsset &&
+        typeof nestedAsset === 'object' &&
+        !Array.isArray(nestedAsset) &&
+        typeof (nestedAsset as { id?: unknown }).id === 'string'
+      ) {
+        return ((nestedAsset as { id: string }).id || '').trim();
+      }
+      return '';
+    })
+    .filter(Boolean);
+};
+
 const OUTLINE_DESIGN_STEP_KEYS = new Set(['outline_design', 'collab_outline_design']);
 const OUTLINE_REVIEW_STEP_KEYS = new Set(['outline_review', 'collab_outline_review']);
 
@@ -151,7 +278,11 @@ const getCompletedOutlineDesignTaskId = (run: PipelineRunSummary | null): string
   return designStep?.aiTaskId ?? null;
 };
 
-export const OutlineView: React.FC = () => {
+type OutlineViewProps = {
+  onAdvanceToScript?: () => void;
+};
+
+export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) => {
   const [outlineDraft, setOutlineDraft] = useState('');
   const [outlineViewMode, setOutlineViewMode] = useState<'preview' | 'edit'>('preview');
   const [currentRun, setCurrentRun] = useState<PipelineRunSummary | null>(null);
@@ -163,7 +294,9 @@ export const OutlineView: React.FC = () => {
   const [manualReviewNote, setManualReviewNote] = useState('');
   const [selectedManualReviewStepId, setSelectedManualReviewStepId] = useState<string | null>(null);
   const lastSyncedOutlineTaskIdRef = useRef<string | null>(null);
+  const refreshedAssetIdsRef = useRef<Set<string>>(new Set());
   const { showToast } = useToast();
+  const { refreshWorkspace } = useAppActions();
   const { activeState, isServerWorkspaceReady, aiSettings, updateAiSettings, setSettingsOpen } =
     useAppStore(
       useShallow((state) => ({
@@ -182,6 +315,43 @@ export const OutlineView: React.FC = () => {
     ? Math.min(900, Math.max(retryBackoffSec, Math.round(aiSettings.pipelineRetryMaxBackoffSec)))
     : Math.max(90, retryBackoffSec);
   const currentRunStatus = currentRun?.run.status;
+  const currentRunOutputs = currentRun?.outputs ?? EMPTY_PIPELINE_OUTPUTS;
+  const pipelineOutputAssetIds = useMemo(
+    () => extractPipelineOutputAssetIds(currentRunOutputs),
+    [currentRunOutputs],
+  );
+  const latestReviewOutput = currentRunOutputs.find((output) => output.outputType === 'review') ?? null;
+  const latestReviewDecision = latestReviewOutput?.reviewDecision ?? null;
+  const latestReviewStep = latestReviewOutput
+    ? currentRun?.steps.find((step) => step.id === latestReviewOutput.stepId) ?? null
+    : null;
+  const latestReviewIssues = parseTextList(latestReviewOutput?.reviewIssuesJson);
+  const latestRetryHints = parseTextList(latestReviewOutput?.retryHintsJson);
+  const latestReviewSummaryEvent = currentRun
+    ? currentRun.recentEvents.find((event) => {
+        if (event.eventType !== 'assistant_step_summary') {
+          return false;
+        }
+        const payload = parseJsonRecord(event.payloadJson);
+        const stepType = typeof payload?.stepType === 'string' ? payload.stepType : '';
+        const stepKey = typeof payload?.stepKey === 'string' ? payload.stepKey : '';
+        return stepType === 'review' || isOutlineReviewStep(stepKey);
+      }) ?? null
+    : null;
+  const latestReviewSummaryPayload = parseJsonRecord(latestReviewSummaryEvent?.payloadJson);
+  const latestReviewSummaryText =
+    typeof latestReviewSummaryPayload?.summary === 'string'
+      ? latestReviewSummaryPayload.summary
+      : '';
+  const latestReviewNextAction =
+    typeof latestReviewSummaryPayload?.nextAction === 'string'
+      ? latestReviewSummaryPayload.nextAction
+      : '';
+  const latestReviewSummaryDecision = latestReviewSummaryText.includes('已通过')
+    ? 'pass'
+    : latestReviewSummaryText.includes('未通过')
+      ? 'fail'
+      : null;
   const currentRunStep = useMemo(
     () =>
       currentRun?.steps.find((step) => step.status === 'running') ??
@@ -202,6 +372,12 @@ export const OutlineView: React.FC = () => {
       case 'paused':
         return '大纲流程已暂停';
       case 'completed':
+        if (latestReviewDecision === 'pass') {
+          return '大纲审核通过，可进入下一步';
+        }
+        if (latestReviewDecision === 'fail') {
+          return '大纲审核未通过';
+        }
         return '大纲生成完成';
       case 'failed':
         return '大纲生成失败';
@@ -220,7 +396,7 @@ export const OutlineView: React.FC = () => {
         }
         return '大纲流程执行中';
     }
-  }, [currentRun, currentRunStep]);
+  }, [currentRun, currentRunStep, latestReviewDecision]);
 
   const updateRetryPolicy = (nextBackoffSec: number, nextMaxBackoffSec: number) => {
     const normalizedBackoffSec = Math.min(300, Math.max(1, Math.round(nextBackoffSec || 4)));
@@ -234,6 +410,20 @@ export const OutlineView: React.FC = () => {
       pipelineRetryMaxBackoffSec: normalizedMaxBackoffSec,
     });
   };
+
+  useEffect(() => {
+    const newAssetIds = pipelineOutputAssetIds.filter(
+      (assetId) => !refreshedAssetIdsRef.current.has(assetId),
+    );
+    if (newAssetIds.length === 0) {
+      return;
+    }
+
+    newAssetIds.forEach((assetId) => refreshedAssetIdsRef.current.add(assetId));
+    void refreshWorkspace('pipeline document asset sync', 2).catch((error) => {
+      logger.warn('Failed to refresh workspace after pipeline asset creation', error);
+    });
+  }, [pipelineOutputAssetIds, refreshWorkspace]);
 
   const buildOutlineDesignPrompt = (draftText: string) => {
     const normalizedDraft =
@@ -658,6 +848,7 @@ export const OutlineView: React.FC = () => {
       : 0
     : 0;
   const latestOptimization = promptOptimizations[0] ?? null;
+  const latestOutputPreview = extractOutputPreview(currentRunOutputs[0] ?? null);
   const manualReviewEvents = currentRun
     ? currentRun.recentEvents.filter((event) => {
         const payload = parseEventPayload(event.payloadJson);
@@ -900,6 +1091,120 @@ export const OutlineView: React.FC = () => {
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {currentRun && (
+          <div className={styles.panelBlock}>
+            <h4 className={styles.panelTitle}>审核结果与产出</h4>
+            {latestReviewOutput ? (
+              <div className={styles.outputCard}>
+                <div className={styles.outputHeader}>
+                  <div className={styles.outputTitleGroup}>
+                    <span className={styles.outputType} data-output-type="review">
+                      审核
+                    </span>
+                    <strong>{latestReviewStep?.stepName || '审核步骤'}</strong>
+                  </div>
+                  <span className={styles.outputTime}>{formatEventTime(latestReviewOutput.createdAt)}</span>
+                </div>
+
+                <div className={styles.reviewSummaryGrid}>
+                  <div className={styles.reviewSummaryItem}>
+                    <span className={styles.reviewSummaryLabel}>结论</span>
+                    <strong
+                      className={styles.reviewDecision}
+                      data-decision={latestReviewOutput.reviewDecision || 'pending'}
+                    >
+                      {getReviewDecisionLabel(latestReviewOutput.reviewDecision)}
+                    </strong>
+                  </div>
+                  <div className={styles.reviewSummaryItem}>
+                    <span className={styles.reviewSummaryLabel}>评分</span>
+                    <strong>{formatReviewScore(latestReviewOutput.reviewScore)}</strong>
+                  </div>
+                  <div className={styles.reviewSummaryItem}>
+                    <span className={styles.reviewSummaryLabel}>问题</span>
+                    <div className={styles.reviewBulletList}>
+                      {latestReviewIssues.length > 0 ? (
+                        latestReviewIssues.map((issue) => <span key={issue}>{issue}</span>)
+                      ) : (
+                        <span className={styles.reviewEmptyText}>未提取到明确问题</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className={styles.reviewSummaryItem}>
+                    <span className={styles.reviewSummaryLabel}>建议</span>
+                    <div className={styles.reviewBulletList}>
+                      {latestRetryHints.length > 0 ? (
+                        latestRetryHints.map((hint) => <span key={hint}>{hint}</span>)
+                      ) : (
+                        <span className={styles.reviewEmptyText}>暂无补充建议</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {(latestReviewOutput.rawContent || latestReviewOutput.outputJson) && (
+                  <details className={styles.outputDetails}>
+                    <summary>查看原始审核输出</summary>
+                    <pre className={styles.outputRawText}>
+                      {latestReviewOutput.rawContent || latestReviewOutput.outputJson}
+                    </pre>
+                  </details>
+                )}
+
+                {latestReviewDecision === 'pass' && onAdvanceToScript && (
+                  <div className={styles.outputActions}>
+                    <button className={styles.btnSmall} type="button" onClick={onAdvanceToScript}>
+                      <ArrowRight size={12} /> 进入剧本生成
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : latestReviewSummaryText ? (
+              <div className={styles.outputCard}>
+                <div className={styles.outputHeader}>
+                  <div className={styles.outputTitleGroup}>
+                    <span className={styles.outputType} data-output-type="review">
+                      审核
+                    </span>
+                    <strong>{latestReviewStep?.stepName || '审核步骤'}</strong>
+                  </div>
+                  <span className={styles.outputTime}>
+                    {latestReviewSummaryEvent ? formatEventTime(latestReviewSummaryEvent.createdAt) : ''}
+                  </span>
+                </div>
+                <div className={styles.outputPreview}>{latestReviewSummaryText}</div>
+                {latestReviewNextAction && (
+                  <div className={styles.reviewSummaryItem}>
+                    <span className={styles.reviewSummaryLabel}>下一步</span>
+                    <strong>{latestReviewNextAction}</strong>
+                  </div>
+                )}
+                {(latestReviewSummaryEvent?.payloadJson || latestReviewSummaryDecision) && (
+                  <details className={styles.outputDetails}>
+                    <summary>查看原始事件摘要</summary>
+                    <pre className={styles.outputRawText}>
+                      {latestReviewSummaryEvent?.payloadJson || latestReviewSummaryText}
+                    </pre>
+                  </details>
+                )}
+                {latestReviewSummaryDecision === 'pass' && onAdvanceToScript && (
+                  <div className={styles.outputActions}>
+                    <button className={styles.btnSmall} type="button" onClick={onAdvanceToScript}>
+                      <ArrowRight size={12} /> 进入剧本生成
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className={styles.infoText}>
+                {currentRunOutputs.length > 0
+                  ? latestOutputPreview || '当前产出已生成，但暂未提取到审核结论。'
+                  : '审核结果会在这里展示，包含结论、评分、问题和重试建议。'}
+              </div>
+            )}
           </div>
         )}
       </div>

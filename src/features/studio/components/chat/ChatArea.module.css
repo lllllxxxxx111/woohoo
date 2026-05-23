@@ -268,9 +268,9 @@
 }
 
 .user .messageBody {
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
 }
 
 .messageBodyInner {
@@ -280,8 +280,11 @@
 }
 
 .user .messageBodyInner {
-  flex: 1 1 auto;
+  order: 1;
+  flex: 0 1 auto;
   min-width: 100px;
+  max-width: 100%;
+  align-items: flex-end;
 }
 
 .messageContent {
@@ -384,7 +387,9 @@
 }
 
 .user .userMessageActions {
-  align-self: center;
+  order: 2;
+  align-self: flex-end;
+  margin-top: -2px;
 }
 
 .ai .userMessageActions,

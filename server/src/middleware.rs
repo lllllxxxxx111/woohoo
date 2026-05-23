@@ -189,7 +189,19 @@ fn extract_client_ip(request: &Request) -> String {
 }
 
 fn should_skip_rate_limit(request: &Request) -> bool {
-    request.method() == Method::OPTIONS || request.uri().path() == "/health"
+    request.method() == Method::OPTIONS
+        || request.uri().path() == "/health"
+        || (request.method() == Method::GET
+            && matches!(
+                request.uri().path(),
+                "/api/auth/me"
+                    | "/api/workspace/bootstrap"
+                    | "/api/ai/endpoints"
+                    | "/api/notifications/channels"
+                    | "/api/image-gen/generations"
+                    | "/api/billing/credits"
+                    | "/api/billing/transactions"
+            ))
 }
 
 /**

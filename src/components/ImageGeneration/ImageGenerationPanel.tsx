@@ -601,15 +601,19 @@ export const ImageGenerationPanel: React.FC = () => {
   }, [loadGenerationHistory]);
 
   useEffect(() => {
-    const runningGenerationIds = turns
-      .filter((turn) => turn.status === 'generating' && turn.generationId)
-      .map((turn) => turn.generationId as string);
+    const runningGenerationStatusById = new Map(
+      turns
+        .filter((turn) => turn.status === 'generating' && turn.generationId)
+        .map((turn) => [turn.generationId as string, turn.status] as const),
+    );
+    const runningGenerationIds = Array.from(runningGenerationStatusById.keys());
     if (runningGenerationIds.length === 0) {
       return undefined;
     }
 
     let cancelled = false;
     const poll = async () => {
+      let shouldRefreshWorkspace = false;
       await Promise.all(
         runningGenerationIds.map(async (generationId) => {
           try {
@@ -617,9 +621,13 @@ export const ImageGenerationPanel: React.FC = () => {
             if (cancelled) {
               return;
             }
+            const previousStatus = runningGenerationStatusById.get(generationId);
             mergeGenerationTurn(generation);
-            if (generation.status === 'completed' || generation.status === 'failed') {
-              await refreshWorkspace();
+            if (
+              previousStatus === 'generating' &&
+              (generation.status === 'completed' || generation.status === 'failed')
+            ) {
+              shouldRefreshWorkspace = true;
             }
           } catch (error) {
             if (!cancelled) {
@@ -628,6 +636,9 @@ export const ImageGenerationPanel: React.FC = () => {
           }
         }),
       );
+      if (shouldRefreshWorkspace && !cancelled) {
+        await refreshWorkspace();
+      }
     };
 
     const intervalId = window.setInterval(() => {

@@ -1,16 +1,10 @@
 import React from 'react';
 import { Layout, Menu, Dropdown, Button, Tooltip, Space, Typography } from '@arco-design/web-react';
 import {
-  MessageSquare,
-  Clapperboard,
-  Image,
-  Folders,
   MonitorPlay,
   Download,
   FileArchive,
   HelpCircle,
-  Zap,
-  Palette,
   Rocket,
   Bell,
   ArrowUpCircle,
@@ -20,7 +14,6 @@ import {
 } from 'lucide-react';
 import { useAppStore } from '../../../../store';
 import { useShallow } from 'zustand/react/shallow';
-import type { ActiveState } from '../../../../types';
 
 import { useToast } from '../../../../context/useToast';
 import { ChatArea } from '../chat/ChatArea';
@@ -34,6 +27,16 @@ import styles from './Workspace.module.css';
 
 const { Header, Content } = Layout;
 const { Text } = Typography;
+
+const TAB_LABELS = {
+  chat: '创意对话',
+  pipeline: '制作流程',
+  imageGeneration: '图片生成',
+  assets: '资产库',
+  automation: '自动化',
+  skills: '技能',
+  preview: '预览视图',
+} as const;
 
 export const Workspace: React.FC = () => {
   const { activeState, switchTab, projects, setHelpOpen, isSidebarCollapsed, setSidebarCollapsed } =
@@ -50,54 +53,7 @@ export const Workspace: React.FC = () => {
   const { showToast } = useToast();
 
   const activeProject = projects.find((p) => p.id === activeState.projectId);
-
-  /**
-   * 根据标签页名称返回对应的图标组件
-   * @param tab - 标签页标识
-   * @returns 图标JSX元素
-   */
-  const getTabIcon = (tab: ActiveState['currentTab']) => {
-    switch (tab) {
-      case 'chat':
-        return <MessageSquare size={16} />;
-      case 'pipeline':
-        return <Clapperboard size={16} />;
-      case 'imageGeneration':
-        return <Image size={16} />;
-      case 'assets':
-        return <Folders size={16} />;
-      case 'automation':
-        return <Zap size={16} />;
-      case 'skills':
-        return <Palette size={16} />;
-      default:
-        return <MessageSquare size={16} />;
-    }
-  };
-
-  /**
-   * 根据标签页名称返回对应的中文标签
-   * @param tab - 标签页标识
-   * @returns 标签文本
-   */
-  const getTabLabel = (tab: ActiveState['currentTab']) => {
-    switch (tab) {
-      case 'chat':
-        return '创意对话';
-      case 'pipeline':
-        return '制作流程';
-      case 'imageGeneration':
-        return '图片生成';
-      case 'assets':
-        return '素材库';
-      case 'automation':
-        return '自动化';
-      case 'skills':
-        return '技能';
-      default:
-        return '对话';
-    }
-  };
+  const activeViewLabel = TAB_LABELS[activeState.currentTab] ?? '工作区';
 
   const handleExportFull = () => {
     showToast({
@@ -149,16 +105,6 @@ export const Workspace: React.FC = () => {
     }
   };
 
-  /** 工作区标签页列表，类型约束为 ActiveState['currentTab'] 联合类型 */
-  const tabs: ActiveState['currentTab'][] = [
-    'chat',
-    'pipeline',
-    'imageGeneration',
-    'assets',
-    'automation',
-    'skills',
-  ];
-
   return (
     <Layout className={styles.workspace}>
       <Header className={styles.bentoHeader}>
@@ -191,25 +137,15 @@ export const Workspace: React.FC = () => {
                 type="secondary"
                 style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.02em' }}
               >
-                {activeProject ? 'Active Project' : 'Ready'}
+                {activeProject ? activeViewLabel : 'Ready'}
               </Text>
             </div>
           </div>
         </div>
 
-        <div className={styles.tabsContainer}>
-          {tabs.map((tab) => (
-            <Button
-              key={tab}
-              type={activeState.currentTab === tab ? 'primary' : 'secondary'}
-              shape="round"
-              icon={getTabIcon(tab)}
-              onClick={() => switchTab(tab)}
-              className={activeState.currentTab === tab ? styles.activeTabBtn : styles.tabBtn}
-            >
-              {getTabLabel(tab)}
-            </Button>
-          ))}
+        <div className={styles.viewContext}>
+          <span>当前视图</span>
+          <strong>{activeViewLabel}</strong>
         </div>
 
         <Space size={12} className={styles.actions}>

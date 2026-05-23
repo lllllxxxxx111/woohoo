@@ -11,8 +11,12 @@ export type AssetLibraryViewRequest = {
   scope?: AssetLibraryScope;
 };
 
-const ASSET_LIBRARY_VIEW_EVENT = 'woohoo:asset-library-view';
-const ASSET_LIBRARY_VIEW_STORAGE_KEY = 'woohoo-asset-library-view-request-v1';
+export type AssetLibraryViewState = {
+  filterType: AssetLibraryFilterType;
+  groupMode: AssetLibraryGroupMode;
+  projectId: string | null;
+  scope: AssetLibraryScope;
+};
 
 export const ASSET_TYPE_LABELS: Record<AssetLibraryFilterType, string> = {
   all: '全部',
@@ -22,54 +26,21 @@ export const ASSET_TYPE_LABELS: Record<AssetLibraryFilterType, string> = {
   document: '文档',
 };
 
-function normalizeRequest(input: AssetLibraryViewRequest): AssetLibraryViewRequest {
+export const DEFAULT_ASSET_LIBRARY_VIEW_STATE: AssetLibraryViewState = {
+  filterType: 'all',
+  groupMode: 'none',
+  projectId: null,
+  scope: 'current',
+};
+
+export function normalizeAssetLibraryViewRequest(
+  input: AssetLibraryViewRequest,
+  fallback: AssetLibraryViewState = DEFAULT_ASSET_LIBRARY_VIEW_STATE,
+): AssetLibraryViewState {
   return {
-    filterType: input.filterType ?? 'all',
-    groupMode: input.groupMode ?? 'none',
-    projectId: input.projectId ?? null,
-    scope: input.scope ?? 'current',
+    filterType: input.filterType ?? fallback.filterType,
+    groupMode: input.groupMode ?? fallback.groupMode,
+    projectId: input.projectId ?? fallback.projectId,
+    scope: input.scope ?? fallback.scope,
   };
-}
-
-export function requestAssetLibraryView(input: AssetLibraryViewRequest) {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
-  const detail = normalizeRequest(input);
-  window.sessionStorage.setItem(ASSET_LIBRARY_VIEW_STORAGE_KEY, JSON.stringify(detail));
-  window.dispatchEvent(new CustomEvent<AssetLibraryViewRequest>(ASSET_LIBRARY_VIEW_EVENT, { detail }));
-}
-
-export function consumePendingAssetLibraryViewRequest() {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-
-  const raw = window.sessionStorage.getItem(ASSET_LIBRARY_VIEW_STORAGE_KEY);
-  if (!raw) {
-    return null;
-  }
-
-  window.sessionStorage.removeItem(ASSET_LIBRARY_VIEW_STORAGE_KEY);
-  try {
-    const parsed = JSON.parse(raw) as AssetLibraryViewRequest;
-    return normalizeRequest(parsed);
-  } catch {
-    return null;
-  }
-}
-
-export function listenAssetLibraryViewRequests(
-  handler: (request: AssetLibraryViewRequest) => void,
-) {
-  if (typeof window === 'undefined') {
-    return () => undefined;
-  }
-
-  const listener = (event: Event) => {
-    handler((event as CustomEvent<AssetLibraryViewRequest>).detail);
-  };
-  window.addEventListener(ASSET_LIBRARY_VIEW_EVENT, listener);
-  return () => window.removeEventListener(ASSET_LIBRARY_VIEW_EVENT, listener);
 }

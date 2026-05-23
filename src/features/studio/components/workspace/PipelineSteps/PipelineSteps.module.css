@@ -485,6 +485,159 @@
   color: #ef4444;
 }
 
+.outputCard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background-color: var(--bg-primary);
+}
+
+.outputHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.outputTitleGroup {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.outputType {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background-color: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.outputType[data-output-type='review'] {
+  color: #f59e0b;
+}
+
+.outputType[data-output-type='design'] {
+  color: #10b981;
+}
+
+.outputType[data-output-type='system'] {
+  color: #60a5fa;
+}
+
+.outputTime {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.outputPreview {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.reviewSummaryGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+
+.reviewSummaryItem {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.reviewSummaryLabel {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.reviewDecision {
+  font-size: 14px;
+}
+
+.reviewDecision[data-decision='pass'] {
+  color: #10b981;
+}
+
+.reviewDecision[data-decision='fail'] {
+  color: #ef4444;
+}
+
+.reviewDecision[data-decision='pending'] {
+  color: #f59e0b;
+}
+
+.reviewBulletList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.reviewBulletList span {
+  position: relative;
+  padding-left: 12px;
+}
+
+.reviewBulletList span::before {
+  content: '•';
+  position: absolute;
+  left: 0;
+  color: var(--text-muted);
+}
+
+.reviewEmptyText {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.outputDetails {
+  border-top: 1px solid var(--border-color);
+  padding-top: 8px;
+}
+
+.outputDetails summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.outputRawText {
+  margin: 8px 0 0;
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.outputActions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .btnSmall {
   border: none;
   border-radius: var(--radius-sm);
@@ -575,6 +728,26 @@
   font-size: 12px;
   color: var(--text-primary);
   line-height: 1.4;
+}
+
+@media (max-width: 760px) {
+  .outputHeader {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .reviewSummaryGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .outputActions {
+    justify-content: stretch;
+  }
+
+  .outputActions .btnSmall {
+    width: 100%;
+    justify-content: center;
+  }
 }
 
 .agentInfo {

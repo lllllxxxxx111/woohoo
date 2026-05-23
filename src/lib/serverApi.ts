@@ -45,6 +45,7 @@ export type {
   PipelineRunEvent,
   PipelineRunStatus,
   PipelineRunStep,
+  PipelineStepOutput,
   PipelineStepStatus,
   PipelineRunSummary,
   PipelinePromptOptimization,
@@ -357,6 +358,8 @@ const DEFAULT_SERVER_REQUEST_TIMEOUT_MS =
   Number.parseInt(import.meta.env.VITE_SERVER_REQUEST_TIMEOUT_MS || '10000', 10) || 10000;
 const SERVER_BASE_URL_PROBE_TTL_MS =
   Number.parseInt(import.meta.env.VITE_SERVER_BASE_URL_PROBE_TTL_MS || '30000', 10) || 30000;
+const SERVER_BASE_URL_FAILURE_BACKOFF_MS =
+  Number.parseInt(import.meta.env.VITE_SERVER_BASE_URL_FAILURE_BACKOFF_MS || '8000', 10) || 8000;
 const REQUEST_ID_HEADER = 'x-request-id';
 const CACHE_KEYS = {
   aiEndpoints: 'ai-endpoints',
@@ -373,11 +376,29 @@ let pendingSessionPromise: Promise<ServerSession> | null = null;
 let cachedSession: ServerSession | null = null;
 let resolvedServerBaseUrl: string | null = null;
 let pendingServerBaseUrlPromise: Promise<string> | null = null;
-const pendingCacheRequests = new Map<string, Promise<unknown>>();
-const responseCache = new Map<string, { expiresAt: number; value: unknown }>();
+type PendingCacheRequest = {
+  promise: Promise<unknown>;
+  generation: number;
+  version: number;
+};
+
+type CachedResponse = {
+  expiresAt: number;
+  value: unknown;
+  generation: number;
+  version: number;
+};
+
+const pendingCacheRequests = new Map<string, PendingCacheRequest>();
+const responseCache = new Map<string, CachedResponse>();
+const cacheKeyVersions = new Map<string, number>();
 const serverBaseUrlProbeCache = new Map<string, number>();
+let apiCacheGeneration = 0;
+let serverBaseUrlDiscoveryFailureUntil = 0;
+let serverBaseUrlDiscoveryFailureMessage: string | null = null;
 
 function clearAllApiCaches() {
+  apiCacheGeneration += 1;
   responseCache.clear();
   pendingCacheRequests.clear();
 }
@@ -421,6 +442,8 @@ function loadStoredServerBaseUrl() {
 
 function persistServerBaseUrl(baseUrl: string) {
   resolvedServerBaseUrl = normalizeServerBaseUrl(baseUrl);
+  serverBaseUrlDiscoveryFailureUntil = 0;
+  serverBaseUrlDiscoveryFailureMessage = null;
 
   if (typeof window === 'undefined') {
     return;
@@ -438,6 +461,26 @@ function clearStoredServerBaseUrl() {
   }
 
   window.localStorage.removeItem(SERVER_BASE_URL_STORAGE_KEY);
+}
+
+function markServerBaseUrlDiscoveryFailure(message: string) {
+  serverBaseUrlDiscoveryFailureUntil = Date.now() + SERVER_BASE_URL_FAILURE_BACKOFF_MS;
+  serverBaseUrlDiscoveryFailureMessage = message;
+}
+
+function hasRecentServerBaseUrlDiscoveryFailure() {
+  return Date.now() < serverBaseUrlDiscoveryFailureUntil;
+}
+
+function getRecentServerBaseUrlDiscoveryFailureMessage() {
+  if (!hasRecentServerBaseUrlDiscoveryFailure()) {
+    return null;
+  }
+
+  return (
+    serverBaseUrlDiscoveryFailureMessage ||
+    '鏈湴鍚庣涓嶅彲杈撅紝璇峰厛妫€鏌ュ悗绔槸鍚︽甯歌繍琛岋紝绋嶅悗閲嶈瘯銆?'
+  );
 }
 
 function getServerBaseUrlCandidates() {
@@ -495,6 +538,8 @@ function hasRecentServerBaseUrlProbe(baseUrl: string) {
 
 function markServerBaseUrlReachable(baseUrl: string) {
   serverBaseUrlProbeCache.set(normalizeServerBaseUrl(baseUrl), Date.now());
+  serverBaseUrlDiscoveryFailureUntil = 0;
+  serverBaseUrlDiscoveryFailureMessage = null;
 }
 
 async function probeServerBaseUrl(baseUrl: string) {
@@ -555,10 +600,24 @@ async function discoverServerBaseUrl() {
   }
 
   clearStoredServerBaseUrl();
+  const errorMessage =
+    '鏈湴鍚庣涓嶅彲杈撅紝绯荤粺宸插皾璇曡嚜鍔ㄥ垏鎹㈢鍙ｅ苟鏈彂鐜板彲鐢ㄦ湇鍔?';
+  markServerBaseUrlDiscoveryFailure(errorMessage);
+  throw new Error(errorMessage);
+  // eslint-disable-next-line no-unreachable
   throw new Error('本地后端不可达，系统已尝试自动切换端口但未发现可用服务');
 }
 
 export async function getServerBaseUrl(forceRefresh = false) {
+  if (pendingServerBaseUrlPromise) {
+    return pendingServerBaseUrlPromise;
+  }
+
+  const recentFailureMessage = getRecentServerBaseUrlDiscoveryFailureMessage();
+  if (recentFailureMessage) {
+    throw new Error(recentFailureMessage);
+  }
+
   const envBaseUrl = import.meta.env.VITE_SERVER_BASE_URL?.trim();
 
   if (!forceRefresh) {
@@ -714,36 +773,55 @@ async function validateServerSessionToken(session: ServerSession): Promise<Serve
 
 function invalidateApiCache(...keys: string[]) {
   for (const key of keys) {
+    cacheKeyVersions.set(key, (cacheKeyVersions.get(key) ?? 0) + 1);
     responseCache.delete(key);
     pendingCacheRequests.delete(key);
   }
 }
 
 async function readCachedApi<T>(key: string, ttlMs: number, loader: () => Promise<T>): Promise<T> {
+  const generation = apiCacheGeneration;
+  const version = cacheKeyVersions.get(key) ?? 0;
   const cached = responseCache.get(key);
-  if (cached && cached.expiresAt > Date.now()) {
+  if (
+    cached &&
+    cached.expiresAt > Date.now() &&
+    cached.generation === generation &&
+    cached.version === version
+  ) {
     return cached.value as T;
   }
 
   const pending = pendingCacheRequests.get(key);
-  if (pending) {
-    return pending as Promise<T>;
+  if (pending && pending.generation === generation && pending.version === version) {
+    return pending.promise as Promise<T>;
   }
 
-  const nextRequest = loader()
+  const promise = loader()
     .then((value) => {
-      responseCache.set(key, {
-        value,
-        expiresAt: Date.now() + ttlMs,
-      });
+      if (apiCacheGeneration === generation && (cacheKeyVersions.get(key) ?? 0) === version) {
+        responseCache.set(key, {
+          value,
+          expiresAt: Date.now() + ttlMs,
+          generation,
+          version,
+        });
+      }
       return value;
     })
     .finally(() => {
-      pendingCacheRequests.delete(key);
+      const currentPending = pendingCacheRequests.get(key);
+      if (currentPending?.promise === promise) {
+        pendingCacheRequests.delete(key);
+      }
     });
 
-  pendingCacheRequests.set(key, nextRequest);
-  return nextRequest;
+  pendingCacheRequests.set(key, {
+    promise,
+    generation,
+    version,
+  });
+  return promise;
 }
 
 export function clearStoredSession() {

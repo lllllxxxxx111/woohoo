@@ -3,6 +3,7 @@ import {
   FolderPlus,
   ChevronDown,
   ChevronRight,
+  MessageSquare,
   MessageSquarePlus,
   Trash2,
   Database,
@@ -29,7 +30,6 @@ import type { Asset } from '../../../../types';
 import { useAssetPreviewUrl } from '../../../../hooks/useAssetPreviewUrl';
 import {
   ASSET_TYPE_LABELS,
-  requestAssetLibraryView,
   type AssetLibraryFilterType,
 } from '../../../../lib/assetLibraryView';
 import styles from './Sidebar.module.css';
@@ -72,6 +72,7 @@ export const Sidebar: React.FC = () => {
     setActiveProject,
     setActiveChat,
     switchTab,
+    setAssetLibraryView,
   } = useAppStore(
     useShallow((state) => ({
       projects: state.projects,
@@ -82,6 +83,7 @@ export const Sidebar: React.FC = () => {
       setActiveProject: state.setActiveProject,
       setActiveChat: state.setActiveChat,
       switchTab: state.switchTab,
+      setAssetLibraryView: state.setAssetLibraryView,
     })),
   );
   const {
@@ -189,7 +191,7 @@ export const Sidebar: React.FC = () => {
   const openProjectAssets = (projectId: string, filterType: AssetLibraryFilterType) => {
     setActiveProject(projectId);
     switchTab('assets');
-    requestAssetLibraryView({
+    setAssetLibraryView({
       projectId,
       scope: 'current',
       filterType,
@@ -380,11 +382,18 @@ export const Sidebar: React.FC = () => {
 
         <div className={styles.topMenu}>
           <div
+            className={`${styles.menuItem} ${activeState.currentTab === 'chat' ? styles.activeTab : ''}`}
+            onClick={() => switchTab('chat')}
+          >
+            <MessageSquare size={18} />
+            <span>创意对话</span>
+          </div>
+          <div
             className={`${styles.menuItem} ${activeState.currentTab === 'pipeline' ? styles.activeTab : ''}`}
             onClick={() => switchTab('pipeline')}
           >
             <LayoutDashboard size={18} />
-            <span>工作区</span>
+            <span>制作流程</span>
           </div>
           <div
             className={`${styles.menuItem} ${activeState.currentTab === 'assets' ? styles.activeTab : ''}`}

@@ -14,6 +14,12 @@ import type {
   Storyboard,
 } from '../types';
 import type { AiTask } from '../lib/serverApi';
+import {
+  DEFAULT_ASSET_LIBRARY_VIEW_STATE,
+  normalizeAssetLibraryViewRequest,
+  type AssetLibraryViewRequest,
+  type AssetLibraryViewState,
+} from '../lib/assetLibraryView';
 
 type ExecutionMode = 'task' | 'sync' | 'direct';
 const ACTIVE_STATE_STORAGE_KEY = 'woohoo-active-state-v2';
@@ -131,6 +137,7 @@ export interface AppStoreState {
   autoSaveEnabled: boolean;
   serverAiEndpointId: string | null;
   pendingTaskCount: number;
+  assetLibraryView: AssetLibraryViewState;
 
   /** 共享 SSE 实时任务数据（由 usePendingTaskSse 填充，供 PipelinePreview/AutomationArea 消费） */
   aiTasks: AiTask[];
@@ -153,6 +160,7 @@ export interface AppStoreState {
   setActiveProject: (projectId: string | null) => void;
   setActiveChat: (projectId: string, chatId: string) => void;
   switchTab: (tab: ActiveState['currentTab']) => void;
+  setAssetLibraryView: (request: AssetLibraryViewRequest) => void;
   updateAiSettings: (settings: AiSettings) => void;
   setServerAiEndpointId: (endpointId: string | null) => void;
   setAiTasks: (tasks: AiTask[]) => void;
@@ -190,6 +198,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   autoSaveEnabled: true,
   serverAiEndpointId: null,
   pendingTaskCount: 0,
+  assetLibraryView: DEFAULT_ASSET_LIBRARY_VIEW_STATE,
   aiTasks: [],
   isSseConnected: false,
   sseError: null,
@@ -255,6 +264,10 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         persistActiveState(nextState);
         return nextState;
       })(),
+    })),
+  setAssetLibraryView: (request) =>
+    set((state) => ({
+      assetLibraryView: normalizeAssetLibraryViewRequest(request, state.assetLibraryView),
     })),
   updateAiSettings: (settings) =>
     set({

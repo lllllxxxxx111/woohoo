@@ -724,8 +724,10 @@ export function useChatWorkspaceActions({
       const nextTitle = deriveScriptTitle(content, title || existingScript?.title);
 
       let nextScript: Script;
+      let savedOnServer = false;
       try {
         nextScript = await upsertServerScript(projectId, nextTitle, content);
+        savedOnServer = true;
       } catch (error) {
         logger.error('Failed to save script on server', error);
         nextScript = existingScript
@@ -739,12 +741,16 @@ export function useChatWorkspaceActions({
           return [nextScript, ...prev];
         }
 
-        return prev.map((script) => (script.projectId === projectId ? nextScript : script));
+          return prev.map((script) => (script.projectId === projectId ? nextScript : script));
       });
+
+      if (savedOnServer) {
+        void refreshWorkspaceWithRetries('script document asset sync', 2);
+      }
 
       return nextScript;
     },
-    [scripts, setScripts],
+    [refreshWorkspaceWithRetries, scripts, setScripts],
   );
 
   const saveStoryboard = useCallback(
@@ -757,8 +763,10 @@ export function useChatWorkspaceActions({
       }));
 
       let nextStoryboard: Storyboard;
+      let savedOnServer = false;
       try {
         nextStoryboard = await upsertServerStoryboard(projectId, normalizedLines);
+        savedOnServer = true;
       } catch (error) {
         logger.error('Failed to save storyboard on server', error);
         const currentStoryboard = storyboards.find(
@@ -780,9 +788,13 @@ export function useChatWorkspaceActions({
         );
       });
 
+      if (savedOnServer) {
+        void refreshWorkspaceWithRetries('storyboard document asset sync', 2);
+      }
+
       return nextStoryboard;
     },
-    [storyboards, setStoryboards],
+    [refreshWorkspaceWithRetries, storyboards, setStoryboards],
   );
 
   const updateMessageInChat = useCallback(
