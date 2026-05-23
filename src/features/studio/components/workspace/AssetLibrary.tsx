@@ -20,7 +20,13 @@ import {
   ImageOff,
   Loader2,
   ZoomIn,
+  Minus,
+  Plus,
+  Maximize2,
+  ArrowLeft,
 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useAppStore } from '../../../../store';
 import { useShallow } from 'zustand/react/shallow';
 
@@ -51,6 +57,7 @@ type ViewMode = 'grid' | 'list';
 type PreviewImage = {
   src: string;
   name: string;
+  asset: Asset;
 };
 
 function isFavoriteAsset(asset: Asset): boolean {
@@ -74,6 +81,213 @@ function normalizeAssetMetadata(metadata: Asset['metadata']): Record<string, unk
   return metadata;
 }
 
+function getMetadataNumber(metadata: Record<string, unknown>, keys: string[]): number | null {
+  for (const key of keys) {
+    const value = metadata[key];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === 'string' && value.trim() !== '') {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+
+  return null;
+}
+
+function getMetadataText(metadata: Record<string, unknown>, key: string): string {
+  const value = metadata[key];
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+  return '';
+}
+
+function isMarkdownDocumentAsset(asset: Asset, metadata: Record<string, unknown>): boolean {
+  const format = getMetadataText(metadata, 'format').toLowerCase();
+  const mimeType = getMetadataText(metadata, 'mimeType').toLowerCase();
+  const name = asset.name.toLowerCase();
+
+  return (
+    format === 'markdown' ||
+    format === 'md' ||
+    mimeType.includes('markdown') ||
+    name.endsWith('.md') ||
+    name.endsWith('.markdown')
+  );
+}
+
+function getMetadataDocumentText(metadata: Record<string, unknown>): string | null {
+  const directKeys = ['content', 'text', 'markdown', 'body', 'document'];
+
+  for (const key of directKeys) {
+    const value = metadata[key];
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value;
+    }
+  }
+
+  const output = metadata.output;
+  if (typeof output === 'string' && output.trim().length > 0) {
+    return output;
+  }
+
+  if (output && typeof output === 'object' && !Array.isArray(output)) {
+    return getMetadataDocumentText(output as Record<string, unknown>);
+  }
+
+  return null;
+}
+
+function formatBytesToMb(bytes: number | null | undefined): string {
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) {
+    return '未填写';
+  }
+
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function formatDurationSeconds(value: number | null | undefined): string {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return '未填写';
+  }
+
+  const totalSeconds = Math.max(0, Math.round(value));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function countDocumentCharacters(text: string): number {
+  const cleaned = text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`]*`/g, ' ')
+    .replace(/\[[^\]]*\]\([^)]+\)/g, ' ')
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, ' ')
+    .replace(/[#>*_~|[\]{}()-]/g, ' ')
+    .replace(/\s+/g, '');
+
+  return cleaned.length;
+}
+
+function getAssetMetricLabel(type: Asset['type']): string {
+  switch (type) {
+    case 'image':
+      return '大小';
+    case 'video':
+    case 'audio':
+      return '时长';
+    case 'document':
+      return '字数';
+    default:
+      return '尺寸';
+  }
+}
+
+async function loadAssetBlob(asset: Pick<Asset, 'id' | 'url'>): Promise<Blob> {
+  if (isProtectedAssetUrl(asset.id, asset.url)) {
+    return getServerAssetBlob(asset.id);
+  }
+
+  const response = await fetch(asset.url);
+  if (!response.ok) {
+    throw new Error(`无法读取资产文件: ${response.status}`);
+  }
+
+  return response.blob();
+}
+
+async function resolveAssetMediaDuration(asset: Pick<Asset, 'id' | 'url' | 'type'>): Promise<number | null> {
+  try {
+    const blob = await loadAssetBlob(asset);
+    const objectUrl = window.URL.createObjectURL(blob);
+
+    return await new Promise<number | null>((resolve) => {
+      const media = window.document.createElement(asset.type === 'audio' ? 'audio' : 'video');
+      let settled = false;
+
+      const finish = (value: number | null) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        media.removeAttribute('src');
+        media.load();
+        window.URL.revokeObjectURL(objectUrl);
+        resolve(value);
+      };
+
+      media.preload = 'metadata';
+      media.onloadedmetadata = () => {
+        const duration = Number.isFinite(media.duration) ? media.duration : null;
+        finish(duration);
+      };
+      media.onerror = () => finish(null);
+      media.src = objectUrl;
+      media.load();
+    });
+  } catch {
+    return null;
+  }
+}
+
+function isTextLikeDocument(asset: Pick<Asset, 'name' | 'url' | 'metadata'>, blob: Blob): boolean {
+  const metadata = normalizeAssetMetadata(asset.metadata);
+  const format = getMetadataText(metadata, 'format').toLowerCase();
+  const mimeType = (getMetadataText(metadata, 'mimeType') || blob.type).toLowerCase();
+  const sourceName = `${asset.name} ${asset.url}`.toLowerCase();
+
+  return (
+    format === 'markdown' ||
+    format === 'md' ||
+    format === 'text' ||
+    mimeType.startsWith('text/') ||
+    mimeType.includes('json') ||
+    mimeType.includes('xml') ||
+    mimeType.includes('markdown') ||
+    /\.(md|markdown|txt|json|csv|log|yaml|yml)$/i.test(sourceName)
+  );
+}
+
+async function resolveDocumentText(asset: Pick<Asset, 'id' | 'name' | 'url' | 'metadata'>): Promise<string | null> {
+  const inlineText = getMetadataDocumentText(normalizeAssetMetadata(asset.metadata));
+  if (inlineText !== null) {
+    return inlineText;
+  }
+
+  try {
+    const blob = await loadAssetBlob(asset);
+    if (!isTextLikeDocument(asset, blob)) {
+      return null;
+    }
+    return await blob.text();
+  } catch {
+    return null;
+  }
+}
+
+function formatAssetDate(value: string | number | undefined): string {
+  if (value === undefined || value === null) {
+    return '未填写';
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+
+  return date.toLocaleString('zh-CN');
+}
+
 const AssetPreviewImage: React.FC<{
   asset: Asset;
   onPreview: (preview: PreviewImage) => void;
@@ -87,7 +301,7 @@ const AssetPreviewImage: React.FC<{
         className={styles.previewButton}
         onClick={(event) => {
           event.stopPropagation();
-          onPreview({ src: previewUrl, name: asset.name });
+          onPreview({ src: previewUrl, name: asset.name, asset });
         }}
         title="放大预览"
       >
@@ -145,9 +359,25 @@ export const AssetLibrary: React.FC = () => {
   const [showRatingDropdown, setShowRatingDropdown] = useState(false);
   const [selectedAsset, setSelectedAsset] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null);
+  const [resolvedMediaDurationSeconds, setResolvedMediaDurationSeconds] = useState<number | null>(
+    null,
+  );
+  const [resolvedDocumentText, setResolvedDocumentText] = useState<string | null>(null);
+  const [resolvedDocumentCharacterCount, setResolvedDocumentCharacterCount] = useState<
+    number | null
+  >(null);
+  const [detailResolveStatus, setDetailResolveStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>(
+    'idle',
+  );
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const metadataUpdateQueuesRef = useRef(new Map<string, Promise<Asset>>());
+
+  useEffect(() => {
+    if (selectedAsset && !assets.some((asset) => asset.id === selectedAsset)) {
+      setSelectedAsset(null);
+    }
+  }, [assets, selectedAsset]);
 
   const projectNameById = useMemo(() => {
     const nextMap = new Map<string, string>();
@@ -156,12 +386,191 @@ export const AssetLibrary: React.FC = () => {
     }
     return nextMap;
   }, [projects]);
+  const selectedAssetData = useMemo(
+    () => assets.find((asset) => asset.id === selectedAsset) ?? null,
+    [assets, selectedAsset],
+  );
+  const selectedAssetMetadata = useMemo(
+    () => normalizeAssetMetadata(selectedAssetData?.metadata),
+    [selectedAssetData],
+  );
+  const selectedAssetProjectName = selectedAssetData
+    ? projectNameById.get(selectedAssetData.projectId) || '未命名项目'
+    : null;
+  const selectedAssetFavorite = selectedAssetData ? isFavoriteAsset(selectedAssetData) : false;
+  const selectedAssetPrompt = selectedAssetData?.type === 'image'
+    ? getMetadataText(selectedAssetMetadata, 'prompt')
+    : '';
+  const selectedAssetRevisedPrompt = selectedAssetData?.type === 'image'
+    ? getMetadataText(selectedAssetMetadata, 'revisedPrompt')
+    : '';
+  const selectedAssetIsMarkdownDocument =
+    selectedAssetData?.type === 'document'
+      ? isMarkdownDocumentAsset(selectedAssetData, selectedAssetMetadata)
+      : false;
+  const selectedAssetSizeBytes = getMetadataNumber(selectedAssetMetadata, ['sizeBytes']);
+  const selectedAssetInlineDurationSeconds = getMetadataNumber(selectedAssetMetadata, [
+    'durationSeconds',
+    'durationSec',
+    'duration',
+    'length',
+  ]);
+  const selectedAssetInlineDurationMs = getMetadataNumber(selectedAssetMetadata, [
+    'durationMs',
+    'durationMillis',
+    'durationMilliseconds',
+  ]);
+  const selectedAssetInlineWordCount = getMetadataNumber(selectedAssetMetadata, [
+    'wordCount',
+    'word_count',
+    'characters',
+    'charCount',
+  ]);
+  const selectedAssetMetric = useMemo(() => {
+    if (!selectedAssetData) {
+      return null;
+    }
+
+    if (selectedAssetData.type === 'image') {
+      return {
+        label: getAssetMetricLabel(selectedAssetData.type),
+        value: formatBytesToMb(selectedAssetSizeBytes),
+      };
+    }
+
+    if (selectedAssetData.type === 'video' || selectedAssetData.type === 'audio') {
+      const durationSeconds = resolvedMediaDurationSeconds ?? selectedAssetInlineDurationSeconds;
+      const normalizedDuration =
+        durationSeconds ?? (selectedAssetInlineDurationMs !== null ? selectedAssetInlineDurationMs / 1000 : null);
+      return {
+        label: getAssetMetricLabel(selectedAssetData.type),
+        value: formatDurationSeconds(normalizedDuration),
+      };
+    }
+
+    if (selectedAssetData.type === 'document') {
+      const wordCount = resolvedDocumentCharacterCount ?? selectedAssetInlineWordCount;
+      return {
+        label: getAssetMetricLabel(selectedAssetData.type),
+        value:
+          typeof wordCount === 'number' && Number.isFinite(wordCount)
+            ? `${Math.max(0, Math.round(wordCount)).toLocaleString('zh-CN')} 字`
+            : detailResolveStatus === 'loading'
+              ? '加载中'
+              : '未填写',
+      };
+    }
+
+    return {
+      label: getAssetMetricLabel(selectedAssetData.type),
+      value: formatBytesToMb(selectedAssetSizeBytes),
+    };
+  }, [
+    detailResolveStatus,
+    resolvedDocumentCharacterCount,
+    resolvedMediaDurationSeconds,
+    selectedAssetData,
+    selectedAssetInlineDurationMs,
+    selectedAssetInlineDurationSeconds,
+    selectedAssetInlineWordCount,
+    selectedAssetSizeBytes,
+  ]);
 
   useEffect(() => {
     if (!activeState.projectId && libraryScope === 'current') {
       setAssetLibraryView({ scope: 'all' });
     }
   }, [activeState.projectId, libraryScope, setAssetLibraryView]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    setResolvedMediaDurationSeconds(null);
+    setResolvedDocumentText(null);
+    setResolvedDocumentCharacterCount(null);
+    setDetailResolveStatus(selectedAssetData ? 'loading' : 'idle');
+
+    if (!selectedAssetData) {
+      return undefined;
+    }
+
+    if (selectedAssetData.type === 'video' || selectedAssetData.type === 'audio') {
+      const inlineSeconds =
+        selectedAssetInlineDurationSeconds ??
+        (selectedAssetInlineDurationMs !== null ? selectedAssetInlineDurationMs / 1000 : null);
+      if (inlineSeconds !== null) {
+        setResolvedMediaDurationSeconds(inlineSeconds);
+        setDetailResolveStatus('ready');
+        return undefined;
+      }
+
+      void resolveAssetMediaDuration(selectedAssetData)
+        .then((seconds) => {
+          if (cancelled) {
+            return;
+          }
+          setResolvedMediaDurationSeconds(seconds);
+          setDetailResolveStatus(seconds === null ? 'error' : 'ready');
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setDetailResolveStatus('error');
+          }
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (selectedAssetData.type === 'document') {
+      if (selectedAssetInlineWordCount !== null) {
+        setResolvedDocumentCharacterCount(selectedAssetInlineWordCount);
+      }
+
+      void resolveDocumentText(selectedAssetData)
+        .then((text) => {
+          if (cancelled) {
+            return;
+          }
+          setResolvedDocumentText(text);
+          setResolvedDocumentCharacterCount(
+            text === null ? selectedAssetInlineWordCount : countDocumentCharacters(text),
+          );
+          setDetailResolveStatus(text === null ? 'error' : 'ready');
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setDetailResolveStatus('error');
+          }
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setDetailResolveStatus('ready');
+    return undefined;
+  }, [
+    selectedAssetData,
+    selectedAssetInlineDurationMs,
+    selectedAssetInlineDurationSeconds,
+    selectedAssetInlineWordCount,
+  ]);
+
+  useEffect(() => {
+    if (!selectedAsset || previewImage) {
+      return undefined;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setSelectedAsset(null);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [previewImage, selectedAsset]);
 
   const updateLibraryView = useCallback(
     (request: {
@@ -392,7 +801,7 @@ export const AssetLibrary: React.FC = () => {
   };
 
   const handleAssetClick = (assetId: string) => {
-    setSelectedAsset(assetId === selectedAsset ? null : assetId);
+    setSelectedAsset(assetId);
   };
 
   const updateAssetMetadata = (
@@ -755,6 +1164,163 @@ export const AssetLibrary: React.FC = () => {
         </div>
       </div>
 
+      {selectedAssetData && (
+        <div className={styles.detailOverlay} role="presentation" onClick={() => setSelectedAsset(null)}>
+          <section className={styles.detailPanel} aria-label="资产详情" onClick={(event) => event.stopPropagation()}>
+            <div className={styles.detailSidebar}>
+              <div className={styles.detailPreview}>
+                {selectedAssetData.type === 'image' ? (
+                  <AssetPreviewImage asset={selectedAssetData} onPreview={setPreviewImage} />
+                ) : selectedAssetData.type === 'document' ? (
+                  <div className={styles.detailDocumentPreview}>
+                    <div className={styles.detailDocumentPreviewHeader}>
+                      <div>
+                        <strong>{selectedAssetIsMarkdownDocument ? 'Markdown 预览' : '文档预览'}</strong>
+                        <span>{selectedAssetMetric?.value ?? '加载中'}</span>
+                      </div>
+                    </div>
+                    <div className={styles.detailDocumentPreviewBody}>
+                      {detailResolveStatus === 'loading' && !resolvedDocumentText ? (
+                        <div className={styles.detailLoadingState}>
+                          <Loader2 size={20} className={styles.previewSpinner} />
+                          <span>正在加载文档</span>
+                        </div>
+                      ) : resolvedDocumentText !== null ? (
+                        selectedAssetIsMarkdownDocument ? (
+                          <div className={styles.detailMarkdownPreview}>
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {resolvedDocumentText}
+                            </ReactMarkdown>
+                          </div>
+                        ) : (
+                          <pre className={styles.detailPlaintextPreview}>
+                            {resolvedDocumentText || '文档为空'}
+                          </pre>
+                        )
+                      ) : (
+                        <div className={styles.detailLoadingState}>
+                          <ImageOff size={20} />
+                          <span>文档无法预览</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className={styles.detailFallback}>
+                    <div className={styles.detailFallbackIcon}>
+                      {getAssetIcon(selectedAssetData.type)}
+                    </div>
+                    <span>{getFilterLabel(selectedAssetData.type)}</span>
+                  </div>
+                )}
+              </div>
+
+              {selectedAssetData.type === 'image' &&
+                (selectedAssetPrompt || selectedAssetRevisedPrompt) && (
+                  <div className={styles.detailPromptBlock}>
+                    <div className={styles.detailPromptHeader}>
+                      <span>提示词</span>
+                      {selectedAssetRevisedPrompt && selectedAssetRevisedPrompt !== selectedAssetPrompt && (
+                        <span>AI 优化</span>
+                      )}
+                    </div>
+                    {selectedAssetPrompt && (
+                      <div className={styles.detailPromptSection}>
+                        <span className={styles.detailPromptLabel}>原始提示词</span>
+                        <pre className={styles.detailPromptText}>{selectedAssetPrompt}</pre>
+                      </div>
+                    )}
+                    {selectedAssetRevisedPrompt && selectedAssetRevisedPrompt !== selectedAssetPrompt && (
+                      <div className={styles.detailPromptSection}>
+                        <span className={styles.detailPromptLabel}>优化提示词</span>
+                        <pre className={styles.detailPromptText}>{selectedAssetRevisedPrompt}</pre>
+                      </div>
+                    )}
+                  </div>
+                )}
+            </div>
+
+            <div className={styles.detailBody}>
+              <div className={styles.detailHeader}>
+                <div className={styles.detailHeading}>
+                  <div className={styles.detailNameRow}>
+                    <h3 className={styles.detailName} title={selectedAssetData.name}>
+                      {selectedAssetData.name}
+                    </h3>
+                  </div>
+                  <div className={styles.detailMetaRow}>
+                    <span className={styles.assetType}>{getFilterLabel(selectedAssetData.type)}</span>
+                    <span className={styles.projectBadge}>{selectedAssetProjectName}</span>
+                    <span className={styles.detailMuted}>
+                      {formatAssetDate(selectedAssetData.createdAt)}
+                    </span>
+                  </div>
+                </div>
+                <div className={styles.detailActions}>
+                  <button
+                    type="button"
+                    className={`${styles.detailActionBtn} ${styles.detailBackBtn}`}
+                    onClick={() => setSelectedAsset(null)}
+                    title="返回资产库"
+                  >
+                    <ArrowLeft size={16} />
+                    <span>返回资产库</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.detailActionBtn}
+                    onClick={(event) => void handleAssetDownload(selectedAssetData, event)}
+                    title="下载"
+                  >
+                    <Download size={16} />
+                    <span>下载</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`${styles.detailActionBtn} ${selectedAssetFavorite ? styles.detailActionActive : ''}`}
+                    onClick={(event) => handleFavoriteToggle(selectedAssetData, event)}
+                    title={selectedAssetFavorite ? '取消收藏' : '收藏'}
+                  >
+                    <Star size={16} fill={selectedAssetFavorite ? 'currentColor' : 'none'} />
+                    <span>{selectedAssetFavorite ? '取消收藏' : '收藏'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`${styles.detailActionBtn} ${styles.detailDanger}`}
+                    onClick={(event) => void handleAssetDelete(selectedAssetData, event)}
+                    title="删除"
+                  >
+                    <Trash2 size={16} />
+                    <span>删除</span>
+                  </button>
+                </div>
+              </div>
+
+              <dl className={styles.detailGrid}>
+                <div className={styles.detailField}>
+                  <dt className={styles.detailFieldLabel}>项目</dt>
+                  <dd className={styles.detailFieldValue}>{selectedAssetProjectName}</dd>
+                </div>
+                <div className={styles.detailField}>
+                  <dt className={styles.detailFieldLabel}>类型</dt>
+                  <dd className={styles.detailFieldValue}>{getFilterLabel(selectedAssetData.type)}</dd>
+                </div>
+                <div className={styles.detailField}>
+                  <dt className={styles.detailFieldLabel}>{selectedAssetMetric?.label ?? '尺寸'}</dt>
+                  <dd className={styles.detailFieldValue}>{selectedAssetMetric?.value ?? '未填写'}</dd>
+                </div>
+                <div className={styles.detailField}>
+                  <dt className={styles.detailFieldLabel}>更新时间</dt>
+                  <dd className={styles.detailFieldValue}>
+                    {formatAssetDate(selectedAssetData.updatedAt ?? selectedAssetData.createdAt)}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+          </section>
+        </div>
+      )}
+
       {filteredAssets.length === 0 ? (
         <div className={styles.emptyContainer}>
           <div className={styles.emptyIcon}>
@@ -856,6 +1422,19 @@ const AssetPreviewDialog: React.FC<{
   preview: PreviewImage;
   onClose: () => void;
 }> = ({ preview, onClose }) => {
+  const [zoomLevel, setZoomLevel] = useState(1);
+  const assetMetadata = useMemo(() => normalizeAssetMetadata(preview.asset.metadata), [preview.asset.metadata]);
+  const imageSizeBytes = getMetadataNumber(assetMetadata, ['sizeBytes']);
+  const prompt = getMetadataText(assetMetadata, 'prompt');
+  const revisedPrompt = getMetadataText(assetMetadata, 'revisedPrompt');
+  const hasOptimizedPrompt = prompt !== '' && revisedPrompt !== '' && revisedPrompt !== prompt;
+  const previewPrompt = revisedPrompt || prompt;
+  const hasPrompt = prompt !== '' || revisedPrompt !== '';
+
+  useEffect(() => {
+    setZoomLevel(1);
+  }, [preview.src]);
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
@@ -867,18 +1446,71 @@ const AssetPreviewDialog: React.FC<{
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [onClose]);
 
+  const clampZoom = (value: number) => Math.max(0.5, Math.min(4, Math.round(value * 100) / 100));
+  const zoomOut = () => setZoomLevel((current) => clampZoom(current - 0.25));
+  const zoomIn = () => setZoomLevel((current) => clampZoom(current + 0.25));
+  const resetZoom = () => setZoomLevel(1);
+
   return (
     <div className={styles.previewOverlay} role="dialog" aria-modal="true" onClick={onClose}>
       <div className={styles.previewDialog} onClick={(event) => event.stopPropagation()}>
         <div className={styles.previewHeader}>
-          <strong>{preview.name}</strong>
-          <button type="button" onClick={onClose} title="关闭预览">
-            <X size={18} />
-          </button>
+          <div className={styles.previewHeaderInfo}>
+            <strong>{preview.name}</strong>
+            <div className={styles.previewHeaderMeta}>
+              <span className={styles.previewTypeBadge}>{ASSET_TYPE_LABELS[preview.asset.type]}</span>
+              <span>{formatBytesToMb(imageSizeBytes)}</span>
+            </div>
+          </div>
+          <div className={styles.previewHeaderActions}>
+            <button type="button" onClick={zoomOut} title="缩小" aria-label="缩小">
+              <Minus size={16} />
+            </button>
+            <button type="button" onClick={resetZoom} title="还原" aria-label="还原">
+              <Maximize2 size={16} />
+            </button>
+            <button type="button" onClick={zoomIn} title="放大" aria-label="放大">
+              <Plus size={16} />
+            </button>
+            <span className={styles.previewZoomLabel}>{Math.round(zoomLevel * 100)}%</span>
+            <button type="button" onClick={onClose} title="关闭预览" aria-label="关闭预览">
+              <X size={18} />
+            </button>
+          </div>
         </div>
         <div className={styles.previewCanvas}>
-          <img src={preview.src} alt={preview.name} />
+          <div
+            className={styles.previewCanvasStage}
+            style={{ width: `${zoomLevel * 100}%`, height: `${zoomLevel * 100}%` }}
+          >
+            <img src={preview.src} alt={preview.name} className={styles.previewCanvasImage} />
+          </div>
         </div>
+        {hasPrompt && (
+          <div className={styles.previewFooter}>
+            <div className={styles.previewPromptHeader}>
+              <span>提示词</span>
+              {hasOptimizedPrompt && <span>AI 优化</span>}
+            </div>
+            {prompt ? (
+              <div className={styles.previewPromptSection}>
+                <span className={styles.previewPromptLabel}>原始提示词</span>
+                <pre className={styles.previewPromptText}>{prompt}</pre>
+              </div>
+            ) : previewPrompt ? (
+              <div className={styles.previewPromptSection}>
+                <span className={styles.previewPromptLabel}>提示词</span>
+                <pre className={styles.previewPromptText}>{previewPrompt}</pre>
+              </div>
+            ) : null}
+            {hasOptimizedPrompt && (
+              <div className={styles.previewPromptSection}>
+                <span className={styles.previewPromptLabel}>优化提示词</span>
+                <pre className={styles.previewPromptText}>{revisedPrompt}</pre>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
