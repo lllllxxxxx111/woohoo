@@ -144,7 +144,7 @@ function getMetadataDocumentText(metadata: Record<string, unknown>): string | nu
 
 function formatBytesToMb(bytes: number | null | undefined): string {
   if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) {
-    return '未填写';
+    return '????';
   }
 
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
@@ -152,7 +152,7 @@ function formatBytesToMb(bytes: number | null | undefined): string {
 
 function formatDurationSeconds(value: number | null | undefined): string {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-    return '未填写';
+    return '????';
   }
 
   const totalSeconds = Math.max(0, Math.round(value));
@@ -182,14 +182,14 @@ function countDocumentCharacters(text: string): number {
 function getAssetMetricLabel(type: Asset['type']): string {
   switch (type) {
     case 'image':
-      return '大小';
+      return '??';
     case 'video':
     case 'audio':
-      return '时长';
+      return '??';
     case 'document':
-      return '字数';
+      return '??';
     default:
-      return '尺寸';
+      return '??';
   }
 }
 
@@ -200,7 +200,7 @@ async function loadAssetBlob(asset: Pick<Asset, 'id' | 'url'>): Promise<Blob> {
 
   const response = await fetch(asset.url);
   if (!response.ok) {
-    throw new Error(`无法读取资产文件: ${response.status}`);
+    throw new Error(`????????: ${response.status}`);
   }
 
   return response.blob();
@@ -277,7 +277,7 @@ async function resolveDocumentText(asset: Pick<Asset, 'id' | 'name' | 'url' | 'm
 
 function formatAssetDate(value: string | number | undefined): string {
   if (value === undefined || value === null) {
-    return '未填写';
+    return '????';
   }
 
   const date = new Date(value);
@@ -303,7 +303,7 @@ const AssetPreviewImage: React.FC<{
           event.stopPropagation();
           onPreview({ src: previewUrl, name: asset.name, asset });
         }}
-        title="放大预览"
+        title="????"
       >
         <img src={previewUrl} alt={asset.name} loading="lazy" />
         <span className={styles.zoomHint}>
@@ -315,15 +315,15 @@ const AssetPreviewImage: React.FC<{
 
   if (status === 'error') {
     return (
-      <div className={styles.previewState} title={error ?? '资产文件无法预览'}>
+      <div className={styles.previewState} title={error ?? '????????'}>
         <ImageOff size={24} />
-        <span>无法预览</span>
+        <span>????</span>
       </div>
     );
   }
 
   return (
-    <div className={styles.previewState} aria-label={`${asset.name} 正在加载预览`}>
+    <div className={styles.previewState} aria-label={`${asset.name} ??????`}>
       <Loader2 size={22} className={styles.previewSpinner} />
     </div>
   );
@@ -395,7 +395,7 @@ export const AssetLibrary: React.FC = () => {
     [selectedAssetData],
   );
   const selectedAssetProjectName = selectedAssetData
-    ? projectNameById.get(selectedAssetData.projectId) || '未命名项目'
+    ? projectNameById.get(selectedAssetData.projectId) || '??????'
     : null;
   const selectedAssetFavorite = selectedAssetData ? isFavoriteAsset(selectedAssetData) : false;
   const selectedAssetPrompt = selectedAssetData?.type === 'image'
@@ -454,10 +454,10 @@ export const AssetLibrary: React.FC = () => {
         label: getAssetMetricLabel(selectedAssetData.type),
         value:
           typeof wordCount === 'number' && Number.isFinite(wordCount)
-            ? `${Math.max(0, Math.round(wordCount)).toLocaleString('zh-CN')} 字`
+            ? `${Math.max(0, Math.round(wordCount)).toLocaleString('zh-CN')} ?`
             : detailResolveStatus === 'loading'
-              ? '加载中'
-              : '未填写',
+              ? '????'
+              : '????',
       };
     }
 
@@ -475,7 +475,6 @@ export const AssetLibrary: React.FC = () => {
     selectedAssetInlineWordCount,
     selectedAssetSizeBytes,
   ]);
-
   useEffect(() => {
     if (!activeState.projectId && libraryScope === 'current') {
       setAssetLibraryView({ scope: 'all' });
@@ -604,8 +603,8 @@ export const AssetLibrary: React.FC = () => {
   }, [activeAssets, activeState.projectId, assets, libraryScope]);
 
   const activeProjectName = activeState.projectId
-    ? projectNameById.get(activeState.projectId) || '当前项目'
-    : '未选择项目';
+    ? projectNameById.get(activeState.projectId) || '????'
+    : '?????';
 
   const filteredAssets = useMemo(() => {
     const normalizedSearch = searchQuery.trim().toLowerCase();
@@ -627,8 +626,8 @@ export const AssetLibrary: React.FC = () => {
       return [
         {
           key: 'flat',
-          title: libraryScope === 'current' ? activeProjectName : '全部资产',
-          subtitle: `${filteredAssets.length} 个资产`,
+          title: libraryScope === 'current' ? activeProjectName : '????',
+          subtitle: `${filteredAssets.length} ???`,
           assets: filteredAssets,
         },
       ];
@@ -651,8 +650,8 @@ export const AssetLibrary: React.FC = () => {
         )
         .map(([projectId, groupAssets]) => ({
           key: projectId,
-          title: projectNameById.get(projectId) || '未命名项目',
-          subtitle: `${groupAssets.length} 个资产`,
+          title: projectNameById.get(projectId) || '??????',
+          subtitle: `${groupAssets.length} ???`,
           assets: groupAssets,
         }));
     }
@@ -663,7 +662,7 @@ export const AssetLibrary: React.FC = () => {
         return {
           key: type,
           title: ASSET_TYPE_LABELS[type],
-          subtitle: `${groupAssets.length} 个资产`,
+          subtitle: `${groupAssets.length} ???`,
           assets: groupAssets,
         };
       })
@@ -711,8 +710,8 @@ export const AssetLibrary: React.FC = () => {
       if (!activeState.projectId) {
         showToast({
           type: 'warning',
-          title: '请先创建项目',
-          message: '资产需要挂在具体项目下，先去聊天区或侧栏创建一个项目。',
+          title: '??????',
+          message: '???????????,????????????????',
         });
         return;
       }
@@ -749,16 +748,16 @@ export const AssetLibrary: React.FC = () => {
         );
         showToast({
           type: 'success',
-          title: '上传完成',
-          message: `已保存 ${files.length} 个资产到当前项目。`,
+          title: '????',
+          message: `????${files.length} ?????????`,
         });
         removeUploadingFiles(queue.map((item) => item.id));
       } catch (error) {
         intervals.forEach((timer) => window.clearInterval(timer));
         showToast({
           type: 'error',
-          title: '上传失败',
-          message: error instanceof Error ? error.message : '文件上传失败',
+          title: '????',
+          message: error instanceof Error ? error.message : '??????',
         });
       } finally {
         setIsUploading(false);
@@ -827,8 +826,8 @@ export const AssetLibrary: React.FC = () => {
       .catch((error) => {
         showToast({
           type: 'error',
-          title: '更新资产标记失败',
-          message: error instanceof Error ? error.message : '请稍后重试',
+          title: '????????',
+          message: error instanceof Error ? error.message : '??????',
         });
         return asset;
       })
@@ -872,8 +871,8 @@ export const AssetLibrary: React.FC = () => {
     } catch (error) {
       showToast({
         type: 'error',
-        title: '下载失败',
-        message: error instanceof Error ? error.message : '资产下载失败',
+        title: '????',
+        message: error instanceof Error ? error.message : '??????',
       });
     }
   };
@@ -885,15 +884,15 @@ export const AssetLibrary: React.FC = () => {
       await deleteAsset(asset.id);
       showToast({
         type: 'success',
-        title: '资产已删除',
-        message: `${asset.name} 已从项目资产库移除。`,
+        title: '??????',
+        message: `${asset.name} ??????????`,
       });
       setSelectedAsset((prev) => (prev === asset.id ? null : prev));
     } catch (error) {
       showToast({
         type: 'error',
-        title: '删除失败',
-        message: error instanceof Error ? error.message : '删除资产时发生错误',
+        title: '????',
+        message: error instanceof Error ? error.message : '??????????',
       });
     }
   };
@@ -903,7 +902,7 @@ export const AssetLibrary: React.FC = () => {
   };
 
   const getRatingFilterLabel = (rating: RatingFilter) => {
-    return rating === 0 ? '星级' : `${rating} 星+`;
+    return rating === 0 ? '??' : `${rating} ??`;
   };
 
   const renderAssetItem = (asset: Asset, index: number) => {
@@ -928,21 +927,21 @@ export const AssetLibrary: React.FC = () => {
             <div className={styles.assetOverlay}>
               <button
                 className={styles.actionBtn}
-                title="下载"
+                title="??"
                 onClick={(event) => void handleAssetDownload(asset, event)}
               >
                 <Download size={16} />
               </button>
               <button
                 className={`${styles.actionBtn} ${favorite ? styles.favoriteActive : ''}`}
-                title={favorite ? '取消收藏' : '收藏'}
+                title={favorite ? '????' : '??'}
                 onClick={(event) => handleFavoriteToggle(asset, event)}
               >
                 <Star size={16} fill={favorite ? 'currentColor' : 'none'} />
               </button>
               <button
                 className={`${styles.actionBtn} ${styles.danger}`}
-                title="删除"
+                title="??"
                 onClick={(event) => void handleAssetDelete(asset, event)}
               >
                 <Trash2 size={16} />
@@ -957,8 +956,8 @@ export const AssetLibrary: React.FC = () => {
             </span>
             <button
               className={`${styles.favoriteButton} ${favorite ? styles.favoriteButtonActive : ''}`}
-              title={favorite ? '取消收藏' : '收藏'}
-              aria-label={favorite ? '取消收藏' : '收藏'}
+              title={favorite ? '????' : '??'}
+              aria-label={favorite ? '????' : '??'}
               aria-pressed={favorite}
               onClick={(event) => handleFavoriteToggle(asset, event)}
             >
@@ -976,7 +975,7 @@ export const AssetLibrary: React.FC = () => {
             {favorite && (
               <span className={styles.favoriteBadge}>
                 <Star size={12} fill="currentColor" />
-                收藏
+                ??
               </span>
             )}
             <span className={styles.assetDate}>
@@ -986,15 +985,15 @@ export const AssetLibrary: React.FC = () => {
           <div
             className={styles.ratingRow}
             onClick={(event) => event.stopPropagation()}
-            aria-label={`${asset.name} 星级评分`}
+            aria-label={`${asset.name} ????`}
           >
             {[1, 2, 3, 4, 5].map((value) => (
               <button
                 key={value}
                 type="button"
                 className={`${styles.ratingButton} ${rating >= value ? styles.ratingActive : ''}`}
-                title={`${value} 星`}
-                aria-label={`${value} 星`}
+                title={`${value} ?`}
+                aria-label={`${value} ?`}
                 aria-pressed={rating >= value}
                 onClick={(event) => handleRatingChange(asset, value, event)}
               >
@@ -1014,7 +1013,7 @@ export const AssetLibrary: React.FC = () => {
           <Search size={16} className={styles.searchIcon} />
           <input
             type="text"
-            placeholder="搜索资产..."
+            placeholder="????..."
             value={searchQuery}
             onChange={(event) => setSearchQuery(event.target.value)}
           />
@@ -1033,7 +1032,7 @@ export const AssetLibrary: React.FC = () => {
             disabled={!activeState.projectId}
           >
             <FolderOpen size={18} />
-            <span>当前</span>
+            <span>当前项目</span>
           </button>
           <button
             className={`${styles.viewBtn} ${libraryScope === 'all' ? styles.active : ''}`}
@@ -1064,9 +1063,9 @@ export const AssetLibrary: React.FC = () => {
 
         <div className={styles.groupToggle}>
           {([
-            ['none', '平铺'],
-            ['project', '按项目'],
-            ['type', '按分类'],
+            ["none", "平铺"],
+            ["project", "按项目"],
+            ["type", "按分类"],
           ] as Array<[AssetLibraryGroupMode, string]>).map(([mode, label]) => (
             <button
               key={mode}
@@ -1166,7 +1165,67 @@ export const AssetLibrary: React.FC = () => {
 
       {selectedAssetData && (
         <div className={styles.detailOverlay} role="presentation" onClick={() => setSelectedAsset(null)}>
-          <section className={styles.detailPanel} aria-label="资产详情" onClick={(event) => event.stopPropagation()}>
+          <section
+            className={`${styles.detailPanel} ${
+              selectedAssetData.type === 'image' ? styles.imageDetailPanel : styles.documentDetailPanel
+            }`}
+            aria-label="资产详情"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className={styles.detailToolbar}>
+              <div className={styles.detailToolbarLeft}>
+                <button
+                  type="button"
+                  className={`${styles.detailActionBtn} ${styles.detailBackBtn}`}
+                  onClick={() => setSelectedAsset(null)}
+                  title="返回资产库"
+                >
+                  <ArrowLeft size={16} />
+                  <span>返回资产库</span>
+                </button>
+                <div className={styles.detailToolbarTitle}>
+                  <h3 className={styles.detailName} title={selectedAssetData.name}>
+                    {selectedAssetData.name}
+                  </h3>
+                  <div className={styles.detailMetaRow}>
+                    <span className={styles.assetType}>{getFilterLabel(selectedAssetData.type)}</span>
+                    <span className={styles.projectBadge}>{selectedAssetProjectName}</span>
+                    <span className={styles.detailMuted}>
+                      {formatAssetDate(selectedAssetData.createdAt)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <div className={styles.detailToolbarActions}>
+                <button
+                  type="button"
+                  className={styles.detailActionBtn}
+                  onClick={(event) => void handleAssetDownload(selectedAssetData, event)}
+                  title="下载"
+                >
+                  <Download size={16} />
+                  <span>下载</span>
+                </button>
+                <button
+                  type="button"
+                  className={`${styles.detailActionBtn} ${selectedAssetFavorite ? styles.detailActionActive : ''}`}
+                  onClick={(event) => handleFavoriteToggle(selectedAssetData, event)}
+                  title={selectedAssetFavorite ? '取消收藏' : '收藏'}
+                >
+                  <Star size={16} fill={selectedAssetFavorite ? 'currentColor' : 'none'} />
+                  <span>{selectedAssetFavorite ? '取消收藏' : '收藏'}</span>
+                </button>
+                <button
+                  type="button"
+                  className={`${styles.detailActionBtn} ${styles.detailDanger}`}
+                  onClick={(event) => void handleAssetDelete(selectedAssetData, event)}
+                  title="删除"
+                >
+                  <Trash2 size={16} />
+                  <span>删除</span>
+                </button>
+              </div>
+            </div>
             <div className={styles.detailSidebar}>
               <div className={styles.detailPreview}>
                 {selectedAssetData.type === 'image' ? (
@@ -1214,6 +1273,29 @@ export const AssetLibrary: React.FC = () => {
                   </div>
                 )}
               </div>
+            </div>
+
+            <div className={styles.detailBody}>
+              <dl className={styles.detailGrid}>
+                <div className={styles.detailField}>
+                  <dt className={styles.detailFieldLabel}>项目</dt>
+                  <dd className={styles.detailFieldValue}>{selectedAssetProjectName}</dd>
+                </div>
+                <div className={styles.detailField}>
+                  <dt className={styles.detailFieldLabel}>类型</dt>
+                  <dd className={styles.detailFieldValue}>{getFilterLabel(selectedAssetData.type)}</dd>
+                </div>
+                <div className={styles.detailField}>
+                  <dt className={styles.detailFieldLabel}>{selectedAssetMetric?.label ?? '尺寸'}</dt>
+                  <dd className={styles.detailFieldValue}>{selectedAssetMetric?.value ?? '未填写'}</dd>
+                </div>
+                <div className={styles.detailField}>
+                  <dt className={styles.detailFieldLabel}>更新时间</dt>
+                  <dd className={styles.detailFieldValue}>
+                    {formatAssetDate(selectedAssetData.updatedAt ?? selectedAssetData.createdAt)}
+                  </dd>
+                </div>
+              </dl>
 
               {selectedAssetData.type === 'image' &&
                 (selectedAssetPrompt || selectedAssetRevisedPrompt) && (
@@ -1238,84 +1320,6 @@ export const AssetLibrary: React.FC = () => {
                     )}
                   </div>
                 )}
-            </div>
-
-            <div className={styles.detailBody}>
-              <div className={styles.detailHeader}>
-                <div className={styles.detailHeading}>
-                  <div className={styles.detailNameRow}>
-                    <h3 className={styles.detailName} title={selectedAssetData.name}>
-                      {selectedAssetData.name}
-                    </h3>
-                  </div>
-                  <div className={styles.detailMetaRow}>
-                    <span className={styles.assetType}>{getFilterLabel(selectedAssetData.type)}</span>
-                    <span className={styles.projectBadge}>{selectedAssetProjectName}</span>
-                    <span className={styles.detailMuted}>
-                      {formatAssetDate(selectedAssetData.createdAt)}
-                    </span>
-                  </div>
-                </div>
-                <div className={styles.detailActions}>
-                  <button
-                    type="button"
-                    className={`${styles.detailActionBtn} ${styles.detailBackBtn}`}
-                    onClick={() => setSelectedAsset(null)}
-                    title="返回资产库"
-                  >
-                    <ArrowLeft size={16} />
-                    <span>返回资产库</span>
-                  </button>
-                  <button
-                    type="button"
-                    className={styles.detailActionBtn}
-                    onClick={(event) => void handleAssetDownload(selectedAssetData, event)}
-                    title="下载"
-                  >
-                    <Download size={16} />
-                    <span>下载</span>
-                  </button>
-                  <button
-                    type="button"
-                    className={`${styles.detailActionBtn} ${selectedAssetFavorite ? styles.detailActionActive : ''}`}
-                    onClick={(event) => handleFavoriteToggle(selectedAssetData, event)}
-                    title={selectedAssetFavorite ? '取消收藏' : '收藏'}
-                  >
-                    <Star size={16} fill={selectedAssetFavorite ? 'currentColor' : 'none'} />
-                    <span>{selectedAssetFavorite ? '取消收藏' : '收藏'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className={`${styles.detailActionBtn} ${styles.detailDanger}`}
-                    onClick={(event) => void handleAssetDelete(selectedAssetData, event)}
-                    title="删除"
-                  >
-                    <Trash2 size={16} />
-                    <span>删除</span>
-                  </button>
-                </div>
-              </div>
-
-              <dl className={styles.detailGrid}>
-                <div className={styles.detailField}>
-                  <dt className={styles.detailFieldLabel}>项目</dt>
-                  <dd className={styles.detailFieldValue}>{selectedAssetProjectName}</dd>
-                </div>
-                <div className={styles.detailField}>
-                  <dt className={styles.detailFieldLabel}>类型</dt>
-                  <dd className={styles.detailFieldValue}>{getFilterLabel(selectedAssetData.type)}</dd>
-                </div>
-                <div className={styles.detailField}>
-                  <dt className={styles.detailFieldLabel}>{selectedAssetMetric?.label ?? '尺寸'}</dt>
-                  <dd className={styles.detailFieldValue}>{selectedAssetMetric?.value ?? '未填写'}</dd>
-                </div>
-                <div className={styles.detailField}>
-                  <dt className={styles.detailFieldLabel}>更新时间</dt>
-                  <dd className={styles.detailFieldValue}>
-                    {formatAssetDate(selectedAssetData.updatedAt ?? selectedAssetData.createdAt)}
-                  </dd>
-                </div>
-              </dl>
             </div>
           </section>
         </div>
@@ -1373,8 +1377,7 @@ export const AssetLibrary: React.FC = () => {
               <UploadCloud size={48} className={styles.dropZoneIcon} />
               <p className={styles.dropZoneText}>拖拽文件到这里上传</p>
               <p className={styles.dropZoneSubtext}>
-                当前实现会把文件内容直接写入项目资产库，刷新后仍能保留。
-              </p>
+                当前实现会把文件内容直接写入项目资产库，刷新后仍能保留。</p>
               <input
                 type="file"
                 ref={fileInputRef}
@@ -1463,17 +1466,17 @@ const AssetPreviewDialog: React.FC<{
             </div>
           </div>
           <div className={styles.previewHeaderActions}>
-            <button type="button" onClick={zoomOut} title="缩小" aria-label="缩小">
+            <button type="button" onClick={zoomOut} title="??" aria-label="??">
               <Minus size={16} />
             </button>
-            <button type="button" onClick={resetZoom} title="还原" aria-label="还原">
+            <button type="button" onClick={resetZoom} title="??" aria-label="??">
               <Maximize2 size={16} />
             </button>
-            <button type="button" onClick={zoomIn} title="放大" aria-label="放大">
+            <button type="button" onClick={zoomIn} title="??" aria-label="??">
               <Plus size={16} />
             </button>
             <span className={styles.previewZoomLabel}>{Math.round(zoomLevel * 100)}%</span>
-            <button type="button" onClick={onClose} title="关闭预览" aria-label="关闭预览">
+            <button type="button" onClick={onClose} title="????" aria-label="????">
               <X size={18} />
             </button>
           </div>
@@ -1489,8 +1492,8 @@ const AssetPreviewDialog: React.FC<{
         {hasPrompt && (
           <div className={styles.previewFooter}>
             <div className={styles.previewPromptHeader}>
-              <span>提示词</span>
-              {hasOptimizedPrompt && <span>AI 优化</span>}
+                <span>提示词</span>
+                {hasOptimizedPrompt && <span>AI 优化</span>}
             </div>
             {prompt ? (
               <div className={styles.previewPromptSection}>
