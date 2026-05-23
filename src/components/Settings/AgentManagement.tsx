@@ -1,33 +1,36 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  Avatar,
   Button,
-  Table,
-  Space,
-  Typography,
-  Tag,
-  Modal,
+  Card,
   Form,
   Input,
   InputNumber,
+  Modal,
   Popconfirm,
-  Avatar,
   Select,
+  Space,
+  Table,
+  Tag,
+  Typography,
 } from '@arco-design/web-react';
-import { Bot, Plus } from 'lucide-react';
-import {
-  listServerAgents,
-  createServerAgent,
-  updateServerAgent,
-  deleteServerAgent,
-  listServerAiEndpoints,
-} from '../../lib/serverApi';
+import { Bot, Plus, RefreshCw } from 'lucide-react';
+
 import { useToast } from '../../context/useToast';
 import { useAppStore } from '../../store';
-import { AgentContact } from '../../types';
-import type { CreateAgentInput } from '../../lib/serverApi';
+import {
+  createServerAgent,
+  deleteServerAgent,
+  listServerAgents,
+  listServerAiEndpoints,
+  updateServerAgent,
+  type CreateAgentInput,
+} from '../../lib/serverApi';
 import type { ServerAiEndpoint } from '../../lib/serverApi.endpoints';
+import type { AgentContact } from '../../types';
+import styles from './SettingsSection.module.css';
 
-const { Text, Paragraph } = Typography;
+const { Paragraph, Text } = Typography;
 
 export const AgentManagement: React.FC = () => {
   const [agents, setAgents] = useState<AgentContact[]>([]);
@@ -38,7 +41,8 @@ export const AgentManagement: React.FC = () => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const { showToast } = useToast();
   const [form] = Form.useForm();
-/** 将最新的智能体列表同步到全局状态仓库，同时更新各项目下的 agentRoster */
+
+  /** 将最新的智能体列表同步到全局状态仓库，同时更新各项目下的 agentRoster */
   const syncAgentsToStore = useCallback((nextAgents: AgentContact[]) => {
     const latestAgentsById = new Map(nextAgents.map((agent) => [agent.id, agent]));
     useAppStore.setState((state) => ({
@@ -74,7 +78,11 @@ export const AgentManagement: React.FC = () => {
       syncAgentsToStore(data);
       setEndpoints(eps);
     } catch (error) {
-      showToast({ type: 'error', title: '加载失败', message: String(error) });
+      showToast({
+        type: 'error',
+        title: '加载失败',
+        message: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       setLoading(false);
     }
@@ -91,7 +99,7 @@ export const AgentManagement: React.FC = () => {
     setVisible(true);
   };
 
-  /** 打开编辑指定智能体的弹窗，填充表单初始值 */
+  /** 打开编辑指定智能体的弹窗，并填充表单初始值 */
   const handleEdit = (record: AgentContact) => {
     setEditingId(record.id);
     form.setFieldsValue({
@@ -115,11 +123,15 @@ export const AgentManagement: React.FC = () => {
       showToast({ type: 'success', title: '删除成功' });
       await fetchAgents();
     } catch (error) {
-      showToast({ type: 'error', title: '删除失败', message: String(error) });
+      showToast({
+        type: 'error',
+        title: '删除失败',
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
   };
 
-  /** 提交创建或编辑智能体表单 */
+  /** 提交创建或编辑表单 */
   const handleSubmit = async () => {
     try {
       await form.validate();
@@ -136,6 +148,7 @@ export const AgentManagement: React.FC = () => {
         temperature: typeof values.temperature === 'number' ? values.temperature : undefined,
         maxTokens: typeof values.maxTokens === 'number' ? values.maxTokens : undefined,
       };
+
       if (editingId) {
         await updateServerAgent(editingId, payload);
         showToast({ type: 'success', title: '更新成功' });
@@ -143,6 +156,7 @@ export const AgentManagement: React.FC = () => {
         await createServerAgent(payload);
         showToast({ type: 'success', title: '创建成功' });
       }
+
       setVisible(false);
       await fetchAgents();
     } catch (error) {
@@ -158,7 +172,7 @@ export const AgentManagement: React.FC = () => {
 
   const columns = [
     {
-      title: 'Agent Name',
+      title: '智能体',
       dataIndex: 'name',
       render: (col: string, record: AgentContact) => (
         <Space size="medium">
@@ -177,7 +191,7 @@ export const AgentManagement: React.FC = () => {
       ),
     },
     {
-      title: 'Role / Description',
+      title: '角色 / 说明',
       dataIndex: 'role',
       render: (role: string, record: AgentContact) => (
         <Space direction="vertical" size="mini">
@@ -189,7 +203,7 @@ export const AgentManagement: React.FC = () => {
       ),
     },
     {
-      title: 'Status',
+      title: '状态',
       dataIndex: 'status',
       render: (status: string) => {
         const color = status === 'idle' ? 'green' : status === 'busy' ? 'red' : 'orange';
@@ -197,7 +211,7 @@ export const AgentManagement: React.FC = () => {
       },
     },
     {
-      title: '连线 (Routing)',
+      title: '通道',
       dataIndex: 'endpointId',
       render: (endpointId: string, record: AgentContact) => {
         const ep = endpoints.find((e) => e.id === endpointId);
@@ -222,18 +236,14 @@ export const AgentManagement: React.FC = () => {
       },
     },
     {
-      title: 'Action',
+      title: '操作',
       dataIndex: 'action',
       render: (_col: string, record: AgentContact) => (
         <Space>
           <Button type="text" size="small" onClick={() => handleEdit(record)}>
             编辑
           </Button>
-          <Popconfirm
-            focusLock
-            title="您确定要删除这个 Agent 吗？"
-            onOk={() => handleDelete(record.id)}
-          >
+          <Popconfirm focusLock title="确定要删除这个智能体吗？" onOk={() => handleDelete(record.id)}>
             <Button type="text" size="small" status="danger">
               删除
             </Button>
@@ -245,26 +255,48 @@ export const AgentManagement: React.FC = () => {
 
   return (
     <>
-      <Space direction="vertical" size="large" style={{ width: '100%' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Paragraph type="secondary" style={{ margin: 0 }}>
-            在此管理自动执行的智能体。您可以增删智能体，编排他们专有的角色设定 (System Prompt)
-            与工作流模型限制。
-          </Paragraph>
-          <Button type="primary" icon={<Plus size={16} />} onClick={handleCreate}>
-            创建智能体
-          </Button>
-        </div>
-        <Table
-          rowKey="id"
-          columns={columns}
-          data={agents}
-          loading={loading}
-          pagination={false}
-          border={false}
-          hover={true}
-          style={{ background: 'var(--color-bg-2)' }}
-        />
+      <Space direction="vertical" size="large" className={styles.page}>
+        <Card bordered={false} className={styles.heroCard}>
+          <div className={styles.heroRow}>
+            <div>
+              <Text type="secondary" style={{ display: 'block', marginBottom: 6 }}>
+                智能体管理
+              </Text>
+              <h3 className={styles.heroTitle}>统一管理角色、模型限制和专属通道</h3>
+              <Paragraph type="secondary" className={styles.heroDescription}>
+                在这里维护会自动参与对话和制作流程的智能体。每个智能体都可以绑定独立通道、模型和输出上限。
+              </Paragraph>
+            </div>
+            <div className={styles.heroActions}>
+              <Button
+                type="outline"
+                icon={<RefreshCw size={16} />}
+                loading={loading}
+                onClick={() => void fetchAgents()}
+              >
+                刷新列表
+              </Button>
+              <Button type="primary" icon={<Plus size={16} />} onClick={handleCreate}>
+                创建智能体
+              </Button>
+            </div>
+          </div>
+        </Card>
+
+        <Card bordered={false} className={styles.sectionCard}>
+          <div className={styles.tableShell}>
+            <Table
+              rowKey="id"
+              columns={columns}
+              data={agents}
+              loading={loading}
+              pagination={false}
+              border={false}
+              hover={true}
+              style={{ background: 'transparent' }}
+            />
+          </div>
+        </Card>
       </Space>
 
       <Modal
@@ -273,43 +305,41 @@ export const AgentManagement: React.FC = () => {
         onOk={handleSubmit}
         confirmLoading={saving}
         onCancel={() => setVisible(false)}
-        style={{ width: 600 }}
+        style={{ width: 720 }}
       >
         <Form form={form} layout="vertical">
-          <Form.Item
-            label="名称 (Name)"
-            field="name"
-            rules={[{ required: true, message: '必须输入名称' }]}
-          >
-            <Input placeholder="例如: 剧本大师" />
-          </Form.Item>
-          <Form.Item
-            label="角色标识 (Role)"
-            field="role"
-            rules={[{ required: true, message: '必须输入角色' }]}
-          >
-            <Input placeholder="例如: 编写对白、大纲构建..." />
-          </Form.Item>
-          <Form.Item
-            label="系统设定提示词 (System Prompt)"
-            field="systemPrompt"
-            rules={[{ required: true, message: '必须输入系统设定' }]}
-          >
-            <Input.TextArea
-              autoSize={{ minRows: 4 }}
-              placeholder="You are a helpful assistant..."
-            />
-          </Form.Item>
+          <div className={styles.formGridFull}>
+            <Form.Item
+              label="名称 (Name)"
+              field="name"
+              rules={[{ required: true, message: '必须输入名称' }]}
+            >
+              <Input placeholder="例如：剧本大师" />
+            </Form.Item>
+            <Form.Item
+              label="角色标识 (Role)"
+              field="role"
+              rules={[{ required: true, message: '必须输入角色' }]}
+            >
+              <Input placeholder="例如：编写对白、大纲构建" />
+            </Form.Item>
+            <Form.Item
+              label="系统设定提示词 (System Prompt)"
+              field="systemPrompt"
+              rules={[{ required: true, message: '必须输入系统设定' }]}
+            >
+              <Input.TextArea autoSize={{ minRows: 4 }} placeholder="You are a helpful assistant..." />
+            </Form.Item>
+          </div>
 
-          {/* Advanced fields inside a layout */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+          <div className={styles.formGrid}>
             <Form.Item label="简介 (Description)" field="description">
               <Input placeholder="一句话简介" />
             </Form.Item>
             <Form.Item
               label="API 模型通道 (Endpoint)"
               field="endpointId"
-              tooltip="绑定专属模型通道API"
+              tooltip="绑定专属模型通道 API"
             >
               <Select placeholder="选择系统通道..." allowClear>
                 {endpoints.map((e) => (
@@ -320,15 +350,15 @@ export const AgentManagement: React.FC = () => {
               </Select>
             </Form.Item>
             <Form.Item label="徽章 (Badge)" field="badge">
-              <Input placeholder="例如: Expert" />
+              <Input placeholder="例如：Expert" />
             </Form.Item>
             <Form.Item label="模型绑定 (Model)" field="model" tooltip="覆盖端点默认模型">
-              <Input placeholder="例如: claude-3-5-sonnet-20240620" />
+              <Input placeholder="例如：claude-3-5-sonnet-20240620" />
             </Form.Item>
             <Form.Item label="发散度 (Temperature)" field="temperature">
               <InputNumber placeholder="0.7" step={0.1} />
             </Form.Item>
-            <Form.Item label="最大产出 (Max Tokens)" field="maxTokens">
+            <Form.Item label="最大输出上限" field="maxTokens">
               <InputNumber placeholder="1024" step={100} />
             </Form.Item>
           </div>

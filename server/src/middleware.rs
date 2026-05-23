@@ -197,6 +197,8 @@ fn should_skip_rate_limit(request: &Request) -> bool {
                 "/api/auth/me"
                     | "/api/workspace/bootstrap"
                     | "/api/ai/endpoints"
+                    | "/api/ai/usage/summary"
+                    | "/api/ai/usage/records"
                     | "/api/notifications/channels"
                     | "/api/image-gen/generations"
                     | "/api/billing/credits"

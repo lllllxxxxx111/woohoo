@@ -297,16 +297,14 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
   const refreshedAssetIdsRef = useRef<Set<string>>(new Set());
   const { showToast } = useToast();
   const { refreshWorkspace } = useAppActions();
-  const { activeState, isServerWorkspaceReady, aiSettings, updateAiSettings, setSettingsOpen } =
-    useAppStore(
-      useShallow((state) => ({
-        activeState: state.activeState,
-        isServerWorkspaceReady: state.isServerWorkspaceReady,
-        aiSettings: state.aiSettings,
-        updateAiSettings: state.updateAiSettings,
-        setSettingsOpen: state.setSettingsOpen,
-      })),
-    );
+  const { activeState, isServerWorkspaceReady, aiSettings, setSettingsOpen } = useAppStore(
+    useShallow((state) => ({
+      activeState: state.activeState,
+      isServerWorkspaceReady: state.isServerWorkspaceReady,
+      aiSettings: state.aiSettings,
+      setSettingsOpen: state.setSettingsOpen,
+    })),
+  );
   const multiAgentBetaEnabled = aiSettings.multiAgentBetaEnabled === true;
   const retryBackoffSec = Number.isFinite(aiSettings.pipelineRetryBackoffSec)
     ? Math.min(300, Math.max(1, Math.round(aiSettings.pipelineRetryBackoffSec)))
@@ -398,19 +396,6 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
     }
   }, [currentRun, currentRunStep, latestReviewDecision]);
 
-  const updateRetryPolicy = (nextBackoffSec: number, nextMaxBackoffSec: number) => {
-    const normalizedBackoffSec = Math.min(300, Math.max(1, Math.round(nextBackoffSec || 4)));
-    const normalizedMaxBackoffSec = Math.min(
-      900,
-      Math.max(normalizedBackoffSec, Math.round(nextMaxBackoffSec || 90)),
-    );
-    updateAiSettings({
-      ...aiSettings,
-      pipelineRetryBackoffSec: normalizedBackoffSec,
-      pipelineRetryMaxBackoffSec: normalizedMaxBackoffSec,
-    });
-  };
-
   useEffect(() => {
     const newAssetIds = pipelineOutputAssetIds.filter(
       (assetId) => !refreshedAssetIdsRef.current.has(assetId),
@@ -459,7 +444,7 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
       showToast({
         type: 'warning',
         title: 'Beta 功能未开启',
-        message: '请在 设置 > 高级解码参数 中开启“多智能体自动编排（Beta）”后再试。',
+        message: '请在 设置 > 制作流程 中开启“多智能体自动编排（Beta）”后再试。',
       });
       setSettingsOpen(true);
       return;
@@ -1279,41 +1264,30 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
         </div>
 
         <div className={styles.panelBlock}>
-          <h4 className={styles.panelTitle}>自动重试策略</h4>
-          <div className={styles.retryPolicyGrid}>
-            <label className={styles.retryPolicyItem}>
-              <span>基础退避秒数</span>
-              <input
-                className={styles.numberInput}
-                type="number"
-                min={1}
-                max={300}
-                step={1}
-                value={retryBackoffSec}
-                onChange={(event) => {
-                  const nextBackoffSec = Number(event.target.value || retryBackoffSec);
-                  updateRetryPolicy(nextBackoffSec, retryMaxBackoffSec);
-                }}
-              />
-            </label>
-            <label className={styles.retryPolicyItem}>
-              <span>最大退避秒数</span>
-              <input
-                className={styles.numberInput}
-                type="number"
-                min={1}
-                max={900}
-                step={1}
-                value={retryMaxBackoffSec}
-                onChange={(event) => {
-                  const nextMaxBackoffSec = Number(event.target.value || retryMaxBackoffSec);
-                  updateRetryPolicy(retryBackoffSec, nextMaxBackoffSec);
-                }}
-              />
-            </label>
+          <h4 className={styles.panelTitle}>制作流程设置</h4>
+          <div className={styles.statusRow}>
+            <span className={styles.label}>多智能体编排：</span>
+            <span>{multiAgentBetaEnabled ? '已开启' : '未开启'}</span>
+          </div>
+          <div className={styles.statusRow}>
+            <span className={styles.label}>Prompt 优化：</span>
+            <span>{aiSettings.promptOptimizerBetaEnabled === true ? '已开启' : '未开启'}</span>
+          </div>
+          <div className={styles.statusRow}>
+            <span className={styles.label}>基础退避：</span>
+            <span>{retryBackoffSec} 秒</span>
+          </div>
+          <div className={styles.statusRow}>
+            <span className={styles.label}>最大退避：</span>
+            <span>{retryMaxBackoffSec} 秒</span>
           </div>
           <div className={styles.infoText}>
-            该配置会下发到当前流程步骤的重试策略。网络/上游异常会按退避时间自动重试。
+            这些参数已统一收口到 设置 &gt; 制作流程。修改后会影响大纲设计、审核和自动重试。
+          </div>
+          <div className={styles.alertActions} style={{ marginTop: 12 }}>
+            <button className={styles.btnSecondary} onClick={() => setSettingsOpen(true)}>
+              <PencilLine size={16} /> 打开设置调整
+            </button>
           </div>
         </div>
 
@@ -1526,7 +1500,7 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
         <div className={styles.panelActions}>
           {!multiAgentBetaEnabled && (
             <button className={styles.btnSecondary} onClick={() => setSettingsOpen(true)}>
-              <AlertCircle size={16} /> 前往设置开启 Beta
+              <AlertCircle size={16} /> 前往设置调整流程
             </button>
           )}
           {canControl && (

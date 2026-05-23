@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { createAiSettings, normalizeAiSettingsPayload } from '../lib/ai';
+import { createAiSettings, normalizeAiBaseUrl, normalizeAiSettingsPayload } from '../lib/ai';
 import type {
   ActiveState,
   AgentContact,
@@ -270,9 +270,18 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
       assetLibraryView: normalizeAssetLibraryViewRequest(request, state.assetLibraryView),
     })),
   updateAiSettings: (settings) =>
-    set({
-      aiSettings: normalizeAiSettingsPayload(settings),
-      serverAiEndpointId: null,
+    set((state) => {
+      const nextSettings = normalizeAiSettingsPayload(settings);
+      const keepSelectedEndpoint =
+        Boolean(state.serverAiEndpointId) &&
+        state.aiSettings.provider.trim().toLowerCase() === nextSettings.provider.trim().toLowerCase() &&
+        normalizeAiBaseUrl(state.aiSettings.provider, state.aiSettings.baseUrl) ===
+          normalizeAiBaseUrl(nextSettings.provider, nextSettings.baseUrl);
+
+      return {
+        aiSettings: nextSettings,
+        serverAiEndpointId: keepSelectedEndpoint ? state.serverAiEndpointId : null,
+      };
     }),
   setServerAiEndpointId: (serverAiEndpointId) => set({ serverAiEndpointId }),
   setAiTasks: (aiTasks) => set({ aiTasks }),

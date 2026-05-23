@@ -371,9 +371,9 @@ export function validateAiSettings(settings: Partial<AiSettings> | null | undefi
     errors.push('Frequency Penalty 需在 -2 到 2 之间');
   }
 
-  /** 验证最大Token数 */
+  /** 验证最大输出上限 */
   if (!Number.isFinite(settings?.maxTokens) || (settings?.maxTokens ?? 0) < 1) {
-    errors.push('Max Tokens 需大于 0');
+    errors.push('最大输出上限需大于 0');
   }
 
   return errors;

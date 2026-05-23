@@ -66,6 +66,16 @@ struct PipelineStepRow {
 }
 
 #[derive(Debug, Clone, FromRow)]
+struct PipelineDocumentOutputRow {
+    id: String,
+    run_id: String,
+    step_id: String,
+    task_id: Option<String>,
+    output_json: Option<String>,
+    raw_content: Option<String>,
+}
+
+#[derive(Debug, Clone, FromRow)]
 struct PersistedTaskRow {
     status: String,
     result: Option<String>,
@@ -169,6 +179,147 @@ async fn advance_run_once(state: &AppState, run: &PipelineRunRow) -> Result<()> 
     Ok(())
 }
 
+pub async fn reconcile_pipeline_document_assets(state: &AppState) {
+    let outputs = match sqlx::query_as::<_, PipelineDocumentOutputRow>(
+        "SELECT id, run_id, step_id, task_id, output_json, raw_content
+         FROM pipeline_step_outputs
+         WHERE output_type = 'design'
+         ORDER BY created_at ASC, id ASC",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!("failed to list pipeline document outputs for repair: {}", error);
+            return;
+        }
+    };
+
+    let checked = outputs.len();
+    let mut repaired = 0usize;
+    let mut skipped = 0usize;
+
+    for output in outputs {
+        let Some(content) = output
+            .raw_content
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+
+        if let Some(asset_id) = extract_pipeline_output_asset_id(output.output_json.as_deref()) {
+            match asset::repo::find_by_id(&state.db, &asset_id).await {
+                Ok(Some(_)) => {
+                    skipped += 1;
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        output_id = %output.id,
+                        asset_id = %asset_id,
+                        "failed to check existing pipeline document asset: {}",
+                        error
+                    );
+                    continue;
+                }
+            }
+        }
+
+        let run = match load_pipeline_run_by_id(&state.db, &output.run_id).await {
+            Ok(run) => run,
+            Err(error) => {
+                tracing::warn!(
+                    output_id = %output.id,
+                    run_id = %output.run_id,
+                    "failed to load pipeline run for asset repair: {}",
+                    error
+                );
+                continue;
+            }
+        };
+        let step = match load_pipeline_step_by_id(&state.db, &output.step_id).await {
+            Ok(step) => step,
+            Err(error) => {
+                tracing::warn!(
+                    output_id = %output.id,
+                    step_id = %output.step_id,
+                    "failed to load pipeline step for asset repair: {}",
+                    error
+                );
+                continue;
+            }
+        };
+
+        let task_id = output
+            .task_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                step.ai_task_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or(output.id.as_str());
+
+        let asset = match persist_pipeline_document_asset(state, &run, &step, task_id, content).await
+        {
+            Ok(asset) => asset,
+            Err(error) => {
+                tracing::warn!(
+                    output_id = %output.id,
+                    run_id = %output.run_id,
+                    step_id = %output.step_id,
+                    "failed to persist pipeline document asset during repair: {}",
+                    error
+                );
+                continue;
+            }
+        };
+
+        let output_json = build_pipeline_document_output_json(
+            output.output_json.as_deref(),
+            &asset,
+            classify_pipeline_document_kind(&step),
+        );
+
+        if let Err(error) = sqlx::query(
+            "UPDATE pipeline_step_outputs
+             SET output_json = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+             WHERE id = ?",
+        )
+        .bind(output_json)
+        .bind(&output.id)
+        .execute(&state.db)
+        .await
+        {
+            tracing::warn!(
+                output_id = %output.id,
+                asset_id = %asset.id,
+                "failed to backfill pipeline output_json: {}",
+                error
+            );
+            continue;
+        }
+
+        repaired += 1;
+    }
+
+    if repaired > 0 || skipped > 0 {
+        tracing::info!(
+            checked,
+            repaired,
+            skipped,
+            "reconciled pipeline document assets"
+        );
+    }
+}
+
 async fn load_run_steps(pool: &SqlitePool, run_id: &str) -> Result<Vec<PipelineStepRow>> {
     Ok(sqlx::query_as::<_, PipelineStepRow>(
         "SELECT id, step_key, step_name, step_order, step_type,
@@ -180,6 +331,30 @@ async fn load_run_steps(pool: &SqlitePool, run_id: &str) -> Result<Vec<PipelineS
     )
     .bind(run_id)
     .fetch_all(pool)
+    .await?)
+}
+
+async fn load_pipeline_run_by_id(pool: &SqlitePool, run_id: &str) -> Result<PipelineRunRow> {
+    Ok(sqlx::query_as::<_, PipelineRunRow>(
+        "SELECT id, user_id, project_id, conversation_id, pipeline_type, status
+         FROM pipeline_runs
+         WHERE id = ?",
+    )
+    .bind(run_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn load_pipeline_step_by_id(pool: &SqlitePool, step_id: &str) -> Result<PipelineStepRow> {
+    Ok(sqlx::query_as::<_, PipelineStepRow>(
+        "SELECT id, step_key, step_name, step_order, step_type,
+                depends_on_json, review_policy_json, ai_task_id, status,
+                attempt_count, max_retries, input_summary, error_message, last_error_at
+         FROM pipeline_run_steps
+         WHERE id = ?",
+    )
+    .bind(step_id)
+    .fetch_one(pool)
     .await?)
 }
 
@@ -378,15 +553,7 @@ async fn handle_design_completion(
         None
     };
     let output_json = persisted_asset.as_ref().map(|asset| {
-        json!({
-            "format": "markdown",
-            "assetId": asset.id,
-            "assetName": asset.name,
-            "assetType": asset.asset_type,
-            "assetUrl": asset.url,
-            "documentKind": classify_pipeline_document_kind(step),
-        })
-        .to_string()
+        build_pipeline_document_output_json(None, asset, classify_pipeline_document_kind(step))
     });
     let content_preview = raw_content
         .as_deref()
@@ -442,6 +609,26 @@ async fn handle_design_completion(
     Ok(true)
 }
 
+fn build_pipeline_document_output_json(
+    existing: Option<&str>,
+    asset: &asset::model::Asset,
+    document_kind: &str,
+) -> String {
+    let mut payload = existing
+        .and_then(|value| serde_json::from_str::<Value>(value).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+
+    payload.insert("format".to_string(), json!("markdown"));
+    payload.insert("assetId".to_string(), json!(asset.id.clone()));
+    payload.insert("assetName".to_string(), json!(asset.name.clone()));
+    payload.insert("assetType".to_string(), json!(asset.asset_type.clone()));
+    payload.insert("assetUrl".to_string(), json!(asset.url.clone()));
+    payload.insert("documentKind".to_string(), json!(document_kind));
+
+    Value::Object(payload).to_string()
+}
+
 async fn persist_pipeline_document_asset(
     state: &AppState,
     run: &PipelineRunRow,
@@ -484,6 +671,17 @@ async fn persist_pipeline_document_asset(
         },
     )
     .await?)
+}
+
+fn extract_pipeline_output_asset_id(output_json: Option<&str>) -> Option<String> {
+    let value = output_json?;
+    let parsed = serde_json::from_str::<Value>(value).ok()?;
+    let asset_id = parsed.get("assetId")?.as_str()?.trim();
+    if asset_id.is_empty() {
+        None
+    } else {
+        Some(asset_id.to_string())
+    }
 }
 
 fn classify_pipeline_document_kind(step: &PipelineStepRow) -> &'static str {

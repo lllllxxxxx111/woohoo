@@ -116,6 +116,8 @@
   font-weight: 700;
   color: var(--text-primary);
   font-family: 'Inter', system-ui, sans-serif;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
 }
 
 .statFooter {
@@ -215,6 +217,7 @@
 
 .breakdownMeta {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   font-size: 0.75rem;
   color: var(--text-muted);

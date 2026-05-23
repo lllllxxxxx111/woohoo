@@ -203,12 +203,12 @@ export function useAiMessageRuntime({
       );
       if (disabledOrMissingKeyEndpoint) {
         throw new Error(
-          `匹配的 AI 端点未启用或没有保存 API Key（provider=${settings.provider}）。请前往“设置 > 模型与提供商”启用端点并保存密钥。`,
+          `匹配的 AI 端点未启用或没有保存 API Key（provider=${settings.provider}）。请前往“设置 > API 通道”启用端点并保存密钥。`,
         );
       }
 
       throw new Error(
-        `未找到匹配的 AI 端点（provider=${settings.provider}, model=${settings.model || '未设置'}）。请前往“设置 > 模型与提供商”手动创建或调整端点。`,
+        `未找到可用的 AI 端点（provider=${settings.provider}, model=${settings.model || '未设置'}）。请前往“设置 > API 通道”手动创建或调整通道。`,
       );
     },
     [serverAiEndpointId, setServerAiEndpointId],

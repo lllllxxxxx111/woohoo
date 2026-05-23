@@ -686,23 +686,22 @@ describe('endpointMatchesAiSettings', () => {
     expect(endpointMatchesAiSettings(endpoint, settings)).toBe(false);
   });
 
-  it('应在 model 不匹配时返回 false', () => {
+  it('应在 model 不匹配时仍返回 true', () => {
     const endpoint = {
       provider: 'openai',
       baseUrl: 'https://api.openai.com/v1',
       defaultModel: 'gpt-3.5',
     };
-    expect(endpointMatchesAiSettings(endpoint, settings)).toBe(false);
+    expect(endpointMatchesAiSettings(endpoint, settings)).toBe(true);
   });
 
-  it('应在 defaultModel 为 null 且 settings.model 为空时匹配', () => {
+  it('应在 defaultModel 为 null 时匹配', () => {
     const endpoint = {
       provider: 'openai',
       baseUrl: 'https://api.openai.com/v1',
       defaultModel: null,
     };
-    const emptyModelSettings = { ...settings, model: '' };
-    expect(endpointMatchesAiSettings(endpoint, emptyModelSettings)).toBe(true);
+    expect(endpointMatchesAiSettings(endpoint, settings)).toBe(true);
   });
 });
 

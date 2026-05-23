@@ -35,6 +35,7 @@ import { isProtectedAssetUrl, useAssetPreviewUrl } from '../../hooks/useAssetPre
 import { notifyBillingCreditsChanged } from '../../hooks/useBillingCredits';
 import { useToast } from '../../context/useToast';
 import { useAppActions } from '../../context/useAppActions';
+import { formatCreditAmount } from '../../lib/credits';
 import styles from './ImageGenerationPanel.module.css';
 
 type ImageSize = '1024x1024' | '1024x1536' | '1536x1024';
@@ -103,12 +104,11 @@ function normalizeBaseUrl(value: string) {
 
 function endpointMatchesSettings(
   endpoint: ServerAiEndpoint,
-  settings: { provider: string; baseUrl: string; model: string },
+  settings: { provider: string; baseUrl: string },
 ) {
   return (
     endpoint.provider.trim().toLowerCase() === settings.provider.trim().toLowerCase() &&
-    normalizeBaseUrl(endpoint.baseUrl) === normalizeBaseUrl(settings.baseUrl) &&
-    (endpoint.defaultModel?.trim() || '') === settings.model.trim()
+    normalizeBaseUrl(endpoint.baseUrl) === normalizeBaseUrl(settings.baseUrl)
   );
 }
 
@@ -1138,7 +1138,7 @@ const ParameterSummary: React.FC<{ params: ImageGenerationTurnParams }> = ({ par
       <span>{params.model}</span>
       <span>{sizeOption.ratio}</span>
       <span>{params.count} 张</span>
-      <span>{params.estimatedCost} 积分</span>
+      <span>{formatCreditAmount(params.estimatedCost)} 积分</span>
       <span>{params.endpointName}</span>
     </div>
   );
@@ -1225,7 +1225,8 @@ const GenerationResultCard: React.FC<{
         <div>
           <strong>已保存到公共资产库</strong>
           <p>
-            {turn.creditsCost ?? turn.params.estimatedCost} 积分 / {assets.length || turn.assetIds.length} 张结果
+            {formatCreditAmount(turn.creditsCost ?? turn.params.estimatedCost)} 积分 /{' '}
+            {assets.length || turn.assetIds.length} 张结果
           </p>
         </div>
       </div>
@@ -1525,7 +1526,7 @@ const PromptComposer: React.FC<PromptComposerProps> = ({
               <ChevronDown size={14} />
             </button>
             <span className={styles.costChip}>
-              {estimatedCost} 积分
+              {formatCreditAmount(estimatedCost)} 积分
             </span>
             <button
               type="button"
@@ -1688,7 +1689,7 @@ const ComposerParameterSheet: React.FC<{
       </div>
 
       <div className={styles.sheetFooter}>
-        <span>预计消耗 {estimatedCost} 积分</span>
+        <span>预计消耗 {formatCreditAmount(estimatedCost)} 积分</span>
         {!hasImageEndpoint && (
           <button type="button" onClick={onOpenSettings}>
             打开设置

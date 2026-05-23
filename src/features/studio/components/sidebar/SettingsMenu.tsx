@@ -6,12 +6,9 @@ import { useShallow } from 'zustand/react/shallow';
 import { SettingsModal } from '../../../../components/Settings/SettingsModal';
 import { getStoredServerProfile } from '../../../../lib/serverApi';
 import { useBillingCredits } from '../../../../hooks/useBillingCredits';
+import { formatCreditAmount } from '../../../../lib/credits';
 
 const LONG_PRESS_DELAY_MS = 550;
-
-function formatCredits(value: number) {
-  return Number.isInteger(value) ? String(value) : value.toFixed(2);
-}
 
 export const SettingsMenu: React.FC = () => {
   const { isSidebarCollapsed, isSettingsOpen, setSettingsOpen, isAuthenticated } = useAppStore(
@@ -95,7 +92,7 @@ export const SettingsMenu: React.FC = () => {
     ? '读取中'
     : creditsError
       ? '读取失败'
-      : `${formatCredits(credits?.balance ?? 0)} 积分`;
+      : `${formatCreditAmount(credits?.balance ?? 0)} 积分`;
   const accountMeta = profile?.email || (isAuthenticated ? '已登录' : '未登录');
 
   if (isSidebarCollapsed) {
@@ -158,7 +155,7 @@ export const SettingsMenu: React.FC = () => {
         </div>
       </div>
 
-      <div className={styles.creditBar} aria-label="余额积分">
+      <div className={styles.creditBar} aria-label="余额积分" title={creditsText}>
         <div className={styles.creditLabel}>
           <BadgeDollarSign size={16} />
           <span>余额积分</span>

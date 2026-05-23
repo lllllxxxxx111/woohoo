@@ -578,11 +578,11 @@ export function endpointMatchesAiSettings(
     baseUrl: string;
     defaultModel?: string | null;
   },
-  settings: Pick<AiSettings, 'provider' | 'baseUrl' | 'model'>,
+  settings: Pick<AiSettings, 'provider' | 'baseUrl'>,
 ) {
   return (
-    endpointMatchesAiConnection(endpoint, settings) &&
-    (endpoint.defaultModel?.trim() || '') === settings.model.trim()
+    endpointMatchesAiProvider(endpoint, settings) &&
+    normalizeBaseUrl(endpoint.baseUrl) === normalizeBaseUrl(settings.baseUrl)
   );
 }
 

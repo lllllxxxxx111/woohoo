@@ -114,6 +114,7 @@ async fn main() {
         ai_runtime,
         started_at,
     };
+    pipeline::orchestrator::reconcile_pipeline_document_assets(&state).await;
     ops::monitor::start_background_workers(state.clone());
     ops::dispatcher::start_dispatcher_worker(state.clone());
     pipeline::orchestrator::start_orchestrator_worker(state.clone());
