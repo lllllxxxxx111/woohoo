@@ -144,7 +144,7 @@ function getMetadataDocumentText(metadata: Record<string, unknown>): string | nu
 
 function formatBytesToMb(bytes: number | null | undefined): string {
   if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) {
-    return '????';
+    return '未填写';
   }
 
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
@@ -152,7 +152,7 @@ function formatBytesToMb(bytes: number | null | undefined): string {
 
 function formatDurationSeconds(value: number | null | undefined): string {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-    return '????';
+    return '未填写';
   }
 
   const totalSeconds = Math.max(0, Math.round(value));
@@ -182,14 +182,14 @@ function countDocumentCharacters(text: string): number {
 function getAssetMetricLabel(type: Asset['type']): string {
   switch (type) {
     case 'image':
-      return '??';
+      return '大小';
     case 'video':
     case 'audio':
-      return '??';
+      return '时长';
     case 'document':
-      return '??';
+      return '字数';
     default:
-      return '??';
+      return '尺寸';
   }
 }
 
@@ -200,7 +200,7 @@ async function loadAssetBlob(asset: Pick<Asset, 'id' | 'url'>): Promise<Blob> {
 
   const response = await fetch(asset.url);
   if (!response.ok) {
-    throw new Error(`????????: ${response.status}`);
+    throw new Error(`无法读取资产文件: ${response.status}`);
   }
 
   return response.blob();
@@ -277,7 +277,7 @@ async function resolveDocumentText(asset: Pick<Asset, 'id' | 'name' | 'url' | 'm
 
 function formatAssetDate(value: string | number | undefined): string {
   if (value === undefined || value === null) {
-    return '????';
+    return '未填写';
   }
 
   const date = new Date(value);
@@ -303,7 +303,7 @@ const AssetPreviewImage: React.FC<{
           event.stopPropagation();
           onPreview({ src: previewUrl, name: asset.name, asset });
         }}
-        title="????"
+        title="放大预览"
       >
         <img src={previewUrl} alt={asset.name} loading="lazy" />
         <span className={styles.zoomHint}>
@@ -315,15 +315,15 @@ const AssetPreviewImage: React.FC<{
 
   if (status === 'error') {
     return (
-      <div className={styles.previewState} title={error ?? '????????'}>
+      <div className={styles.previewState} title={error ?? '资产文件无法预览'}>
         <ImageOff size={24} />
-        <span>????</span>
+        <span>无法预览</span>
       </div>
     );
   }
 
   return (
-    <div className={styles.previewState} aria-label={`${asset.name} ??????`}>
+    <div className={styles.previewState} aria-label={`${asset.name} 正在加载预览`}>
       <Loader2 size={22} className={styles.previewSpinner} />
     </div>
   );
@@ -395,7 +395,7 @@ export const AssetLibrary: React.FC = () => {
     [selectedAssetData],
   );
   const selectedAssetProjectName = selectedAssetData
-    ? projectNameById.get(selectedAssetData.projectId) || '??????'
+    ? projectNameById.get(selectedAssetData.projectId) || '未命名项目'
     : null;
   const selectedAssetFavorite = selectedAssetData ? isFavoriteAsset(selectedAssetData) : false;
   const selectedAssetPrompt = selectedAssetData?.type === 'image'
@@ -454,10 +454,10 @@ export const AssetLibrary: React.FC = () => {
         label: getAssetMetricLabel(selectedAssetData.type),
         value:
           typeof wordCount === 'number' && Number.isFinite(wordCount)
-            ? `${Math.max(0, Math.round(wordCount)).toLocaleString('zh-CN')} ?`
+            ? `${Math.max(0, Math.round(wordCount)).toLocaleString('zh-CN')} 字`
             : detailResolveStatus === 'loading'
-              ? '????'
-              : '????',
+              ? '加载中'
+              : '未填写',
       };
     }
 
@@ -603,8 +603,8 @@ export const AssetLibrary: React.FC = () => {
   }, [activeAssets, activeState.projectId, assets, libraryScope]);
 
   const activeProjectName = activeState.projectId
-    ? projectNameById.get(activeState.projectId) || '????'
-    : '?????';
+    ? projectNameById.get(activeState.projectId) || '当前项目'
+    : '未选择项目';
 
   const filteredAssets = useMemo(() => {
     const normalizedSearch = searchQuery.trim().toLowerCase();
@@ -626,8 +626,8 @@ export const AssetLibrary: React.FC = () => {
       return [
         {
           key: 'flat',
-          title: libraryScope === 'current' ? activeProjectName : '????',
-          subtitle: `${filteredAssets.length} ???`,
+          title: libraryScope === 'current' ? activeProjectName : '全部资产',
+          subtitle: `${filteredAssets.length} 个资产`,
           assets: filteredAssets,
         },
       ];
@@ -650,8 +650,8 @@ export const AssetLibrary: React.FC = () => {
         )
         .map(([projectId, groupAssets]) => ({
           key: projectId,
-          title: projectNameById.get(projectId) || '??????',
-          subtitle: `${groupAssets.length} ???`,
+          title: projectNameById.get(projectId) || '未命名项目',
+          subtitle: `${groupAssets.length} 个资产`,
           assets: groupAssets,
         }));
     }
@@ -662,7 +662,7 @@ export const AssetLibrary: React.FC = () => {
         return {
           key: type,
           title: ASSET_TYPE_LABELS[type],
-          subtitle: `${groupAssets.length} ???`,
+          subtitle: `${groupAssets.length} 个资产`,
           assets: groupAssets,
         };
       })
@@ -710,8 +710,8 @@ export const AssetLibrary: React.FC = () => {
       if (!activeState.projectId) {
         showToast({
           type: 'warning',
-          title: '??????',
-          message: '???????????,????????????????',
+          title: '请先创建项目',
+          message: '资产需要挂在具体项目下，先去聊天区或侧栏创建一个项目。',
         });
         return;
       }
@@ -748,16 +748,16 @@ export const AssetLibrary: React.FC = () => {
         );
         showToast({
           type: 'success',
-          title: '????',
-          message: `????${files.length} ?????????`,
+          title: '上传完成',
+          message: `已保存 ${files.length} 个资产到当前项目。`,
         });
         removeUploadingFiles(queue.map((item) => item.id));
       } catch (error) {
         intervals.forEach((timer) => window.clearInterval(timer));
         showToast({
           type: 'error',
-          title: '????',
-          message: error instanceof Error ? error.message : '??????',
+          title: '上传失败',
+          message: error instanceof Error ? error.message : '文件上传失败',
         });
       } finally {
         setIsUploading(false);
@@ -826,8 +826,8 @@ export const AssetLibrary: React.FC = () => {
       .catch((error) => {
         showToast({
           type: 'error',
-          title: '????????',
-          message: error instanceof Error ? error.message : '??????',
+          title: '更新资产标记失败',
+          message: error instanceof Error ? error.message : '请稍后重试',
         });
         return asset;
       })
@@ -871,8 +871,8 @@ export const AssetLibrary: React.FC = () => {
     } catch (error) {
       showToast({
         type: 'error',
-        title: '????',
-        message: error instanceof Error ? error.message : '??????',
+        title: '下载失败',
+        message: error instanceof Error ? error.message : '资产下载失败',
       });
     }
   };
@@ -884,15 +884,15 @@ export const AssetLibrary: React.FC = () => {
       await deleteAsset(asset.id);
       showToast({
         type: 'success',
-        title: '??????',
-        message: `${asset.name} ??????????`,
+        title: '资产已删除',
+        message: `${asset.name} 已从项目资产库移除。`,
       });
       setSelectedAsset((prev) => (prev === asset.id ? null : prev));
     } catch (error) {
       showToast({
         type: 'error',
-        title: '????',
-        message: error instanceof Error ? error.message : '??????????',
+        title: '删除失败',
+        message: error instanceof Error ? error.message : '删除资产时发生错误',
       });
     }
   };
@@ -902,7 +902,7 @@ export const AssetLibrary: React.FC = () => {
   };
 
   const getRatingFilterLabel = (rating: RatingFilter) => {
-    return rating === 0 ? '??' : `${rating} ??`;
+    return rating === 0 ? '星级' : `${rating} 星+`;
   };
 
   const renderAssetItem = (asset: Asset, index: number) => {
@@ -927,21 +927,21 @@ export const AssetLibrary: React.FC = () => {
             <div className={styles.assetOverlay}>
               <button
                 className={styles.actionBtn}
-                title="??"
+                title="下载"
                 onClick={(event) => void handleAssetDownload(asset, event)}
               >
                 <Download size={16} />
               </button>
               <button
                 className={`${styles.actionBtn} ${favorite ? styles.favoriteActive : ''}`}
-                title={favorite ? '????' : '??'}
+                title={favorite ? '取消收藏' : '收藏'}
                 onClick={(event) => handleFavoriteToggle(asset, event)}
               >
                 <Star size={16} fill={favorite ? 'currentColor' : 'none'} />
               </button>
               <button
                 className={`${styles.actionBtn} ${styles.danger}`}
-                title="??"
+                title="删除"
                 onClick={(event) => void handleAssetDelete(asset, event)}
               >
                 <Trash2 size={16} />
@@ -956,8 +956,8 @@ export const AssetLibrary: React.FC = () => {
             </span>
             <button
               className={`${styles.favoriteButton} ${favorite ? styles.favoriteButtonActive : ''}`}
-              title={favorite ? '????' : '??'}
-              aria-label={favorite ? '????' : '??'}
+              title={favorite ? '取消收藏' : '收藏'}
+              aria-label={favorite ? '取消收藏' : '收藏'}
               aria-pressed={favorite}
               onClick={(event) => handleFavoriteToggle(asset, event)}
             >
@@ -975,7 +975,7 @@ export const AssetLibrary: React.FC = () => {
             {favorite && (
               <span className={styles.favoriteBadge}>
                 <Star size={12} fill="currentColor" />
-                ??
+                收藏
               </span>
             )}
             <span className={styles.assetDate}>
@@ -985,15 +985,15 @@ export const AssetLibrary: React.FC = () => {
           <div
             className={styles.ratingRow}
             onClick={(event) => event.stopPropagation()}
-            aria-label={`${asset.name} ????`}
+            aria-label={`${asset.name} 星级评分`}
           >
             {[1, 2, 3, 4, 5].map((value) => (
               <button
                 key={value}
                 type="button"
                 className={`${styles.ratingButton} ${rating >= value ? styles.ratingActive : ''}`}
-                title={`${value} ?`}
-                aria-label={`${value} ?`}
+                title={`${value} 星`}
+                aria-label={`${value} 星`}
                 aria-pressed={rating >= value}
                 onClick={(event) => handleRatingChange(asset, value, event)}
               >
@@ -1013,7 +1013,7 @@ export const AssetLibrary: React.FC = () => {
           <Search size={16} className={styles.searchIcon} />
           <input
             type="text"
-            placeholder="????..."
+            placeholder="搜索资产..."
             value={searchQuery}
             onChange={(event) => setSearchQuery(event.target.value)}
           />
@@ -1466,17 +1466,17 @@ const AssetPreviewDialog: React.FC<{
             </div>
           </div>
           <div className={styles.previewHeaderActions}>
-            <button type="button" onClick={zoomOut} title="??" aria-label="??">
+            <button type="button" onClick={zoomOut} title="缩小" aria-label="缩小">
               <Minus size={16} />
             </button>
-            <button type="button" onClick={resetZoom} title="??" aria-label="??">
+            <button type="button" onClick={resetZoom} title="还原" aria-label="还原">
               <Maximize2 size={16} />
             </button>
-            <button type="button" onClick={zoomIn} title="??" aria-label="??">
+            <button type="button" onClick={zoomIn} title="放大" aria-label="放大">
               <Plus size={16} />
             </button>
             <span className={styles.previewZoomLabel}>{Math.round(zoomLevel * 100)}%</span>
-            <button type="button" onClick={onClose} title="????" aria-label="????">
+            <button type="button" onClick={onClose} title="关闭预览" aria-label="关闭预览">
               <X size={18} />
             </button>
           </div>

@@ -4,6 +4,7 @@ src-tauri/target
 src-tauri/gen
 server/target
 server/target-codex
+target-codex/
 backend/
 data/
 runtime-logs/

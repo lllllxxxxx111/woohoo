@@ -479,7 +479,7 @@ function getRecentServerBaseUrlDiscoveryFailureMessage() {
 
   return (
     serverBaseUrlDiscoveryFailureMessage ||
-    '鏈湴鍚庣涓嶅彲杈撅紝璇峰厛妫€鏌ュ悗绔槸鍚︽甯歌繍琛岋紝绋嶅悗閲嶈瘯銆?'
+    '本地后端不可达，请先检查后端是否正常运行，稍后重试。'
   );
 }
 
@@ -601,11 +601,9 @@ async function discoverServerBaseUrl() {
 
   clearStoredServerBaseUrl();
   const errorMessage =
-    '鏈湴鍚庣涓嶅彲杈撅紝绯荤粺宸插皾璇曡嚜鍔ㄥ垏鎹㈢鍙ｅ苟鏈彂鐜板彲鐢ㄦ湇鍔?';
+    '本地后端不可达，系统已尝试自动切换端口但未发现可用服务';
   markServerBaseUrlDiscoveryFailure(errorMessage);
   throw new Error(errorMessage);
-  // eslint-disable-next-line no-unreachable
-  throw new Error('本地后端不可达，系统已尝试自动切换端口但未发现可用服务');
 }
 
 export async function getServerBaseUrl(forceRefresh = false) {
