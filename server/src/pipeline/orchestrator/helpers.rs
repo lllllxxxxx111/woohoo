@@ -103,11 +103,13 @@ pub(super) fn find_retry_design_step<'a>(
 
 pub(super) fn parse_review_decision(raw: &str) -> ReviewDecision {
     let Some(payload) = parse_json_payload(raw) else {
+        let fallback_issue = compact_review_text(raw)
+            .unwrap_or_else(|| "审核输出无法解析为 JSON，请按约定格式返回。".to_string());
         return ReviewDecision {
             decision: "fail",
             score: None,
-            issues: json!(["审核输出无法解析为 JSON，请按约定格式返回。"]),
-            retry_hints: json!([]),
+            issues: json!([fallback_issue]),
+            retry_hints: json!(["请根据上述评语修订大纲，并确保审核输出包含 decision、score、issues、retryHints。"]),
             parse_error: Some("review_parse_error".to_string()),
         };
     };
@@ -129,6 +131,21 @@ pub(super) fn parse_review_decision(raw: &str) -> ReviewDecision {
         ),
         parse_error: None,
     }
+}
+
+fn compact_review_text(raw: &str) -> Option<String> {
+    let compact = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = compact.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let preview = if trimmed.chars().count() > 180 {
+        format!("{}...", trimmed.chars().take(180).collect::<String>())
+    } else {
+        trimmed.to_string()
+    };
+    Some(format!("审核评语：{}", preview))
 }
 
 pub(super) fn parse_json_payload(raw: &str) -> Option<Value> {
@@ -538,7 +555,7 @@ pub(super) async fn append_pipeline_event(
 mod tests {
     use super::{
         compute_retry_delay_seconds, derive_failed_run_error, derive_running_state_error,
-        normalize_json_array, parse_json_payload, parse_review_decision,
+        extract_text_list, normalize_json_array, parse_json_payload, parse_review_decision,
         pick_next_dispatchable_step, PipelineStepRow, RUN_ERROR_DEPENDENCY_UNSATISFIED,
         RUN_ERROR_EXECUTION_FAILED, RUN_ERROR_MANUAL_REVIEW_REQUIRED, RUN_ERROR_MISSING_ENDPOINT,
         RUN_ERROR_RETRY_SCHEDULED,
@@ -558,6 +575,21 @@ mod tests {
         let review = parse_review_decision("not-json");
         assert_eq!(review.decision, "fail");
         assert!(review.parse_error.is_some());
+    }
+
+    #[test]
+    fn review_parse_error_preserves_plain_text_feedback() {
+        let review = parse_review_decision("结构还可以，但缺少结尾反转和角色动机说明。");
+        let issues = extract_text_list(&review.issues);
+        let hints = extract_text_list(&review.retry_hints);
+
+        assert_eq!(review.decision, "fail");
+        assert!(issues
+            .first()
+            .is_some_and(|item| item.contains("缺少结尾反转")));
+        assert!(hints
+            .first()
+            .is_some_and(|item| item.contains("decision")));
     }
 
     #[test]

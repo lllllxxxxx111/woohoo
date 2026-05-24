@@ -387,11 +387,13 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
     () => extractPipelineOutputAssetIds(currentRunOutputs),
     [currentRunOutputs],
   );
+  const outlineReviewStep =
+    currentRun?.steps.find((step) => isOutlineReviewStep(step.stepKey)) ?? null;
   const latestReviewOutput = currentRunOutputs.find((output) => output.outputType === 'review') ?? null;
   const latestReviewDecision = latestReviewOutput?.reviewDecision ?? null;
   const latestReviewStep = latestReviewOutput
     ? currentRun?.steps.find((step) => step.id === latestReviewOutput.stepId) ?? null
-    : null;
+    : outlineReviewStep;
   const latestReviewIssues = parseTextList(latestReviewOutput?.reviewIssuesJson);
   const latestRetryHints = parseTextList(latestReviewOutput?.retryHintsJson);
   const latestReviewSummaryEvent = currentRun
@@ -495,9 +497,14 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
     ].join('\n');
   };
 
-  const buildOutlineReviewPrompt = () => {
+  const buildOutlineReviewPrompt = (targetOutline?: string) => {
+    const normalizedTargetOutline = targetOutline?.trim();
     return [
-      '你是合规审核官，请审核上一步大纲产出。',
+      '你是合规审核官，请审核大纲内容，并给出可执行评语。',
+      '',
+      normalizedTargetOutline
+        ? `待审核大纲：\n${normalizedTargetOutline}`
+        : '待审核内容：优先审核上游步骤的大纲产出；如果没有上游产出或正文为空，请判定为 fail，并在 issues 中说明缺少待审核内容。',
       '',
       '审核标准：',
       '1. 结构完整度（钩子、冲突、转折、结局）',
@@ -505,6 +512,8 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
       '3. 风险与合规（是否有明显风险或不当表述）',
       '',
       '如果不通过，请给出可执行修改项和重试建议。',
+      '必须只返回 JSON，不要使用 Markdown 代码块或解释文字：',
+      '{"decision":"pass|fail","score":0.0,"issues":["问题或通过理由"],"retryHints":["下一步建议"],"riskLevel":"low|medium|high"}',
     ].join('\n');
   };
 
@@ -546,8 +555,17 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
       return;
     }
 
+    if (mode === 'review_only' && !outlineDraft.trim()) {
+      showToast({
+        type: 'warning',
+        title: '缺少审核内容',
+        message: '请先生成或填写大纲后再提交审核。',
+      });
+      return;
+    }
+
     const designPrompt = buildOutlineDesignPrompt(outlineDraft);
-    const reviewPrompt = buildOutlineReviewPrompt();
+    const reviewPrompt = buildOutlineReviewPrompt(mode === 'review_only' ? outlineDraft : undefined);
     const normalizedRetryBackoffSec = Math.min(300, Math.max(1, Math.round(retryBackoffSec || 4)));
     const normalizedRetryMaxBackoffSec = Math.min(
       900,
@@ -916,6 +934,69 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
     : 0;
   const latestOptimization = promptOptimizations[0] ?? null;
   const latestOutputPreview = extractOutputPreview(currentRunOutputs[0] ?? null);
+  const latestReviewRuntimeEvent = currentRun
+    ? currentRun.recentEvents.find((event) => {
+        if (
+          outlineReviewStep?.id &&
+          event.stepId &&
+          event.stepId !== outlineReviewStep.id
+        ) {
+          return false;
+        }
+        return [
+          'assistant_step_summary',
+          'step_failed',
+          'step_retry',
+          'step_started',
+          'step_completed',
+          'failed',
+        ].includes(event.eventType);
+      }) ?? null
+    : null;
+  const latestReviewRuntimeEventText = latestReviewRuntimeEvent
+    ? summarizeEvent(latestReviewRuntimeEvent.eventType, latestReviewRuntimeEvent.payloadJson)
+    : '';
+  const reviewStepStatusLabel = outlineReviewStep
+    ? STEP_STATUS_MAP[outlineReviewStep.status as StepStatus]?.label || outlineReviewStep.status
+    : '等待审核';
+  const reviewFallbackMessage = (() => {
+    if (!currentRun) {
+      return '审核结果会在这里展示，包含结论、评分、问题和重试建议。';
+    }
+    if (latestReviewSummaryText) {
+      return latestReviewSummaryText;
+    }
+    if (outlineReviewStep?.errorMessage) {
+      return outlineReviewStep.errorMessage;
+    }
+    if (currentRun.run.errorMessage) {
+      return currentRun.run.errorMessage;
+    }
+    if (latestReviewRuntimeEventText) {
+      return latestReviewRuntimeEventText;
+    }
+    if (outlineReviewStep?.status === 'queued') {
+      return '审核任务已提交，正在等待调度。';
+    }
+    if (outlineReviewStep?.status === 'running') {
+      return '审核智能体正在分析大纲，完成后会显示结论、评分、问题和建议。';
+    }
+    if (outlineReviewStep?.status === 'blocked') {
+      return '审核步骤被阻塞，请查看右侧流程控制中的说明后处理。';
+    }
+    return currentRunOutputs.length > 0
+      ? latestOutputPreview || '当前产出已生成，但暂未提取到审核结论。'
+      : '审核任务已创建，评语会在审核完成后显示。';
+  })();
+  const reviewFallbackNextAction =
+    latestReviewNextAction ||
+    (outlineReviewStep?.status === 'failed' || currentRun?.run.status === 'failed'
+      ? '检查失败原因后重试审核步骤。'
+      : outlineReviewStep?.status === 'running'
+        ? '等待审核智能体返回结构化结果。'
+        : outlineReviewStep?.status === 'queued'
+          ? '等待后端调度审核任务。'
+          : '');
   const manualReviewEvents = currentRun
     ? currentRun.recentEvents.filter((event) => {
         const payload = parseEventPayload(event.payloadJson);
@@ -1266,10 +1347,56 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
                 )}
               </div>
             ) : (
-              <div className={styles.infoText}>
-                {currentRunOutputs.length > 0
-                  ? latestOutputPreview || '当前产出已生成，但暂未提取到审核结论。'
-                  : '审核结果会在这里展示，包含结论、评分、问题和重试建议。'}
+              <div className={styles.outputCard}>
+                <div className={styles.outputHeader}>
+                  <div className={styles.outputTitleGroup}>
+                    <span className={styles.outputType} data-output-type="review">
+                      审核
+                    </span>
+                    <strong>{outlineReviewStep?.stepName || '审核任务'}</strong>
+                  </div>
+                  <span className={styles.outputTime}>
+                    {latestReviewRuntimeEvent
+                      ? formatEventTime(latestReviewRuntimeEvent.createdAt)
+                      : outlineReviewStep?.updatedAt
+                        ? formatEventTime(outlineReviewStep.updatedAt)
+                        : ''}
+                  </span>
+                </div>
+
+                <div className={styles.reviewSummaryGrid}>
+                  <div className={styles.reviewSummaryItem}>
+                    <span className={styles.reviewSummaryLabel}>状态</span>
+                    <strong
+                      className={
+                        outlineReviewStep
+                          ? STEP_STATUS_MAP[outlineReviewStep.status as StepStatus]?.className
+                          : styles.statusQueued
+                      }
+                    >
+                      {reviewStepStatusLabel}
+                    </strong>
+                  </div>
+                  <div className={styles.reviewSummaryItem}>
+                    <span className={styles.reviewSummaryLabel}>评语</span>
+                    <div className={styles.outputPreview}>{reviewFallbackMessage}</div>
+                  </div>
+                  {reviewFallbackNextAction && (
+                    <div className={styles.reviewSummaryItem}>
+                      <span className={styles.reviewSummaryLabel}>下一步</span>
+                      <strong>{reviewFallbackNextAction}</strong>
+                    </div>
+                  )}
+                </div>
+
+                {(outlineReviewStep?.errorMessage || latestReviewRuntimeEvent?.payloadJson) && (
+                  <details className={styles.outputDetails}>
+                    <summary>查看审核状态详情</summary>
+                    <pre className={styles.outputRawText}>
+                      {outlineReviewStep?.errorMessage || latestReviewRuntimeEvent?.payloadJson}
+                    </pre>
+                  </details>
+                )}
               </div>
             )}
           </div>
