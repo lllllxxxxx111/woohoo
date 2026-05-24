@@ -4,6 +4,7 @@ import {
   Video,
   Music,
   File,
+  FileText,
   Upload,
   Search,
   Filter,
@@ -207,6 +208,32 @@ function countDocumentCharacters(text: string): number {
   return cleaned.length;
 }
 
+function stripDocumentPreviewText(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, ' ')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^[\s#>*+-]+/gm, '')
+    .replace(/[`*_~|[\]{}]/g, '')
+    .replace(/\r/g, '')
+    .trim();
+}
+
+function getDocumentThumbnailLines(text: string | null, fallbackName: string): string[] {
+  const source = text ? stripDocumentPreviewText(text) : '';
+  const lines = source
+    .split('\n')
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .slice(0, 5);
+
+  if (lines.length > 0) {
+    return lines;
+  }
+
+  return [fallbackName.replace(/\.[^.]+$/, ''), '打开详情查看完整内容'];
+}
+
 function getAssetMetricLabel(type: Asset['type']): string {
   switch (type) {
     case 'image':
@@ -353,6 +380,58 @@ const AssetPreviewImage: React.FC<{
   return (
     <div className={styles.previewState} aria-label={`${asset.name} 正在加载预览`}>
       <Loader2 size={22} className={styles.previewSpinner} />
+    </div>
+  );
+};
+
+const DocumentAssetThumbnail: React.FC<{
+  asset: Asset;
+}> = ({ asset }) => {
+  const metadata = normalizeAssetMetadata(asset.metadata);
+  const inlineText = getMetadataDocumentText(metadata);
+  const summaryText = getMetadataTextFromKeys(metadata, [
+    'summary',
+    'description',
+    'abstract',
+    'reviewSummary',
+    'reviewOpinion',
+    'prompt',
+  ]);
+  const previewText = inlineText ?? summaryText;
+  const previewLines = getDocumentThumbnailLines(previewText, asset.name);
+  const title =
+    getMetadataTextFromKeys(metadata, ['title', 'documentTitle', 'name']) ||
+    asset.name.replace(/\.[^.]+$/, '');
+  const metadataWordCount = getMetadataNumberFromKeys(metadata, [
+    'wordCount',
+    'characterCount',
+    'charCount',
+    'characters',
+  ]);
+  const characterCount = inlineText ? countDocumentCharacters(inlineText) : metadataWordCount;
+  const formatLabel = isMarkdownDocumentAsset(asset, metadata)
+    ? 'Markdown'
+    : getMetadataTextFromKeys(metadata, ['format', 'mimeType']) || '文档';
+
+  return (
+    <div className={styles.documentThumbnail} aria-label={`${asset.name} 文档缩略图`}>
+      <div className={styles.documentThumbPaper}>
+        <div className={styles.documentThumbHeader}>
+          <span className={styles.documentThumbFormat}>
+            <FileText size={13} />
+            {formatLabel}
+          </span>
+          <span className={styles.documentThumbMetric}>
+            {characterCount ? `${characterCount.toLocaleString('zh-CN')} 字` : '预览'}
+          </span>
+        </div>
+        <strong className={styles.documentThumbTitle}>{title}</strong>
+        <div className={styles.documentThumbBody}>
+          {previewLines.map((line, lineIndex) => (
+            <span key={`${asset.id}-doc-line-${lineIndex}`}>{line}</span>
+          ))}
+        </div>
+      </div>
     </div>
   );
 };
@@ -1022,6 +1101,8 @@ export const AssetLibrary: React.FC = () => {
         <div className={styles.assetPreview}>
           {asset.type === 'image' ? (
             <AssetPreviewImage asset={asset} onPreview={setPreviewImage} />
+          ) : asset.type === 'document' ? (
+            <DocumentAssetThumbnail asset={asset} />
           ) : (
             <div className={styles.iconPreview}>{getAssetIcon(asset.type)}</div>
           )}
