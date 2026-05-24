@@ -135,6 +135,41 @@ function getMetadataNumberFromKeys(metadata: Record<string, unknown>, keys: stri
   return null;
 }
 
+function getMetadataTextListFromKeys(metadata: Record<string, unknown>, keys: string[]): string[] {
+  for (const key of keys) {
+    const value = metadata[key];
+    if (Array.isArray(value)) {
+      const items = value
+        .map((item) => (typeof item === 'string' ? item.trim() : String(item ?? '').trim()))
+        .filter(Boolean);
+      if (items.length > 0) {
+        return items;
+      }
+    }
+    if (typeof value === 'string' && value.trim()) {
+      return value
+        .split(/\n|；|;/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+  }
+  return [];
+}
+
+function formatReviewStatus(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (['approved', 'pass', 'passed', 'success'].includes(normalized)) {
+    return '已通过';
+  }
+  if (['rejected', 'fail', 'failed', 'blocked'].includes(normalized)) {
+    return '未通过';
+  }
+  if (['pending', 'queued', 'running'].includes(normalized)) {
+    return '审核中';
+  }
+  return value;
+}
+
 function isMarkdownDocumentAsset(asset: Asset, metadata: Record<string, unknown>): boolean {
   const format = getMetadataText(metadata, 'format').toLowerCase();
   const mimeType = getMetadataText(metadata, 'mimeType').toLowerCase();
@@ -603,6 +638,20 @@ export const AssetLibrary: React.FC = () => {
     'reviewNotes',
     'review_notes',
   ]);
+  const selectedAssetReviewIssues = getMetadataTextListFromKeys(selectedAssetMetadata, [
+    'reviewIssues',
+    'review_issues',
+    'issues',
+  ]);
+  const selectedAssetRetryHints = getMetadataTextListFromKeys(selectedAssetMetadata, [
+    'retryHints',
+    'retry_hints',
+  ]);
+  const selectedAssetReviewer = getMetadataTextFromKeys(selectedAssetMetadata, [
+    'reviewerAgentName',
+    'reviewer_agent_name',
+    'reviewer',
+  ]);
   const selectedAssetReviewStatus = getMetadataTextFromKeys(selectedAssetMetadata, [
     'reviewStatus',
     'review_status',
@@ -630,14 +679,20 @@ export const AssetLibrary: React.FC = () => {
       { label: selectedAssetMetric?.label ?? '尺寸', value: selectedAssetMetric?.value ?? '未填写' },
       { label: '版本', value: selectedAssetData.versionLabel || '当前版' },
       { label: '创建智能体', value: selectedAssetSourceAgent || '未记录' },
+      { label: '创建时间', value: formatAssetDate(selectedAssetData.createdAt) },
       {
         label: '修改次数',
         value: selectedAssetChangeCount === null ? '未记录' : `${Math.max(0, Math.round(selectedAssetChangeCount))} 次`,
       },
       {
         label: '评审状态',
-        value: selectedAssetReviewStatus || (selectedAssetReviewSummary ? '已记录' : '未记录'),
+        value: selectedAssetReviewStatus
+          ? formatReviewStatus(selectedAssetReviewStatus)
+          : selectedAssetReviewSummary || selectedAssetReviewIssues.length > 0
+            ? '已记录'
+            : '未记录',
       },
+      { label: '审核智能体', value: selectedAssetReviewer || '未记录' },
       {
         label: '更新时间',
         value: formatAssetDate(selectedAssetData.updatedAt ?? selectedAssetData.createdAt),
@@ -648,8 +703,10 @@ export const AssetLibrary: React.FC = () => {
     selectedAssetData,
     selectedAssetMetric,
     selectedAssetProjectName,
+    selectedAssetReviewIssues.length,
     selectedAssetReviewStatus,
     selectedAssetReviewSummary,
+    selectedAssetReviewer,
     selectedAssetSourceAgent,
   ]);
   useEffect(() => {
@@ -1508,7 +1565,25 @@ export const AssetLibrary: React.FC = () => {
                     <div className={styles.detailReviewHeader}>
                       <span>评审意见</span>
                     </div>
-                    <p>{selectedAssetReviewSummary || '未记录评审意见'}</p>
+                    <p>
+                      {selectedAssetReviewSummary ||
+                        selectedAssetReviewIssues[0] ||
+                        selectedAssetRetryHints[0] ||
+                        '未记录评审意见'}
+                    </p>
+                    {selectedAssetReviewIssues.length > 0 && (
+                      <ul className={styles.detailReviewList}>
+                        {selectedAssetReviewIssues.slice(0, 4).map((issue, issueIndex) => (
+                          <li key={`${selectedAssetData.id}-review-issue-${issueIndex}`}>{issue}</li>
+                        ))}
+                      </ul>
+                    )}
+                    {selectedAssetRetryHints.length > 0 && (
+                      <div className={styles.detailReviewHint}>
+                        <span>修改建议</span>
+                        <p>{selectedAssetRetryHints.slice(0, 3).join('；')}</p>
+                      </div>
+                    )}
                   </section>
                 </div>
               )}

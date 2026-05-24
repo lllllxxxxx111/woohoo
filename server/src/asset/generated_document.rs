@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use serde_json::Value;
+use chrono::{SecondsFormat, Utc};
+use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use tokio::fs;
 
@@ -39,10 +40,10 @@ pub async fn persist_markdown_document(
         .map_err(|error| AppError::Internal(format!("failed to write document asset: {error}")))?;
 
     let asset_url = format!("/uploads/{filename}");
-    let metadata = input.metadata.to_string();
+    let metadata = with_document_tracking_metadata(input.metadata);
 
     if let Some(existing) = find_by_project_url(&state.db, input.project_id, &asset_url).await? {
-        let merged_metadata = merge_document_metadata(existing.metadata.as_deref(), &input.metadata);
+        let merged_metadata = merge_document_metadata(existing.metadata.as_deref(), &metadata);
         return repo::update_asset(
             &state.db,
             &existing.id,
@@ -60,7 +61,7 @@ pub async fn persist_markdown_document(
         input.name,
         "document",
         &asset_url,
-        Some(&metadata),
+        Some(&metadata.to_string()),
     )
     .await
 }
@@ -97,8 +98,11 @@ fn merge_document_metadata(
     existing: Option<&str>,
     next: &serde_json::Value,
 ) -> serde_json::Value {
-    let mut merged = existing
-        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+    let existing_value = existing.and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok());
+    let existing_change_count = existing_value
+        .as_ref()
+        .and_then(|value| metadata_i64(value, &["changeCount", "change_count", "revisionCount"]));
+    let mut merged = existing_value
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
 
@@ -107,8 +111,56 @@ fn merge_document_metadata(
             merged.insert(key.clone(), value.clone());
         }
     }
+    let now = now_iso();
+    merged.insert(
+        "changeCount".to_string(),
+        json!(existing_change_count.unwrap_or(0).saturating_add(1)),
+    );
+    merged.insert("modifiedAt".to_string(), json!(now.clone()));
+    merged.insert("lastModifiedAt".to_string(), json!(now));
 
     serde_json::Value::Object(merged)
+}
+
+fn with_document_tracking_metadata(mut metadata: Value) -> Value {
+    if !metadata.is_object() {
+        metadata = json!({});
+    }
+
+    if let Some(map) = metadata.as_object_mut() {
+        map.entry("changeCount".to_string()).or_insert(json!(0));
+        map.entry("createdAt".to_string()).or_insert(json!(now_iso()));
+    }
+
+    metadata
+}
+
+fn metadata_i64(value: &Value, keys: &[&str]) -> Option<i64> {
+    for key in keys {
+        let Some(item) = value.get(*key) else {
+            continue;
+        };
+
+        if let Some(number) = item.as_i64() {
+            return Some(number);
+        }
+
+        if let Some(number) = item.as_u64().and_then(|value| i64::try_from(value).ok()) {
+            return Some(number);
+        }
+
+        if let Some(text) = item.as_str() {
+            if let Ok(number) = text.trim().parse::<i64>() {
+                return Some(number);
+            }
+        }
+    }
+
+    None
+}
+
+fn now_iso() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 fn sanitize_filename_stem(value: &str) -> String {

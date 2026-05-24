@@ -767,6 +767,33 @@
   word-break: break-word;
 }
 
+.detailReviewList {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+.detailReviewList li + li {
+  margin-top: 4px;
+}
+
+.detailReviewHint {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-color);
+}
+
+.detailReviewHint span {
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
 .detailName {
   min-width: 0;
   margin: 0;

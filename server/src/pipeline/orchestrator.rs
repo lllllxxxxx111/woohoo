@@ -76,6 +76,14 @@ struct PipelineDocumentOutputRow {
 }
 
 #[derive(Debug, Clone, FromRow)]
+struct PipelineReviewOutputRow {
+    run_id: String,
+    step_id: String,
+    task_id: Option<String>,
+    raw_content: Option<String>,
+}
+
+#[derive(Debug, Clone, FromRow)]
 struct PersistedTaskRow {
     status: String,
     result: Option<String>,
@@ -87,6 +95,12 @@ struct TaskSnapshot {
     status: String,
     result: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct AgentIdentity {
+    id: String,
+    name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -212,8 +226,18 @@ pub async fn reconcile_pipeline_document_assets(state: &AppState) {
 
         if let Some(asset_id) = extract_pipeline_output_asset_id(output.output_json.as_deref()) {
             match asset::repo::find_by_id(&state.db, &asset_id).await {
-                Ok(Some(_)) => {
+                Ok(Some(asset)) => {
                     skipped += 1;
+                    if let Err(error) =
+                        backfill_existing_pipeline_design_asset_metadata(state, &output, content, &asset).await
+                    {
+                        tracing::warn!(
+                            output_id = %output.id,
+                            asset_id = %asset_id,
+                            "failed to backfill existing pipeline document asset metadata: {}",
+                            error
+                        );
+                    }
                     continue;
                 }
                 Ok(None) => {}
@@ -318,6 +342,211 @@ pub async fn reconcile_pipeline_document_assets(state: &AppState) {
             "reconciled pipeline document assets"
         );
     }
+
+    reconcile_pipeline_document_asset_metadata(state).await;
+}
+
+async fn reconcile_pipeline_document_asset_metadata(state: &AppState) {
+    let reviews = match sqlx::query_as::<_, PipelineReviewOutputRow>(
+        "SELECT run_id, step_id, task_id, raw_content
+         FROM pipeline_step_outputs
+         WHERE output_type = 'review'
+         ORDER BY created_at ASC, id ASC",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!("failed to list pipeline review outputs for asset metadata repair: {}", error);
+            return;
+        }
+    };
+
+    let mut repaired_reviews = 0usize;
+    for output in reviews {
+        let run = match load_pipeline_run_by_id(&state.db, &output.run_id).await {
+            Ok(run) => run,
+            Err(error) => {
+                tracing::warn!(
+                    run_id = %output.run_id,
+                    "failed to load pipeline run for review metadata repair: {}",
+                    error
+                );
+                continue;
+            }
+        };
+        let review_step = match load_pipeline_step_by_id(&state.db, &output.step_id).await {
+            Ok(step) => step,
+            Err(error) => {
+                tracing::warn!(
+                    run_id = %output.run_id,
+                    step_id = %output.step_id,
+                    "failed to load review step for metadata repair: {}",
+                    error
+                );
+                continue;
+            }
+        };
+        let steps = match load_run_steps(&state.db, &output.run_id).await {
+            Ok(steps) => steps,
+            Err(error) => {
+                tracing::warn!(
+                    run_id = %output.run_id,
+                    "failed to load run steps for review metadata repair: {}",
+                    error
+                );
+                continue;
+            }
+        };
+
+        let raw = output.raw_content.unwrap_or_default();
+        let review = parse_review_decision(&raw);
+        let review_issues = extract_text_list(&review.issues);
+        let retry_hints = extract_text_list(&review.retry_hints);
+        let task_id = output
+            .task_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(review_step.id.as_str());
+
+        match update_reviewed_asset_metadata(
+            &state.db,
+            &run,
+            &review_step,
+            &steps,
+            task_id,
+            &review,
+            &review_issues,
+            &retry_hints,
+            false,
+        )
+        .await
+        {
+            Ok(true) => repaired_reviews += 1,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    run_id = %output.run_id,
+                    step_id = %output.step_id,
+                    "failed to repair reviewed asset metadata: {}",
+                    error
+                );
+            }
+        }
+    }
+
+    if repaired_reviews > 0 {
+        tracing::info!(
+            repaired_reviews,
+            "repaired pipeline document review metadata"
+        );
+    }
+}
+
+async fn backfill_existing_pipeline_design_asset_metadata(
+    state: &AppState,
+    output: &PipelineDocumentOutputRow,
+    content: &str,
+    asset: &asset::model::Asset,
+) -> Result<()> {
+    let run = load_pipeline_run_by_id(&state.db, &output.run_id).await?;
+    let step = load_pipeline_step_by_id(&state.db, &output.step_id).await?;
+    let task_id = output
+        .task_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            step.ai_task_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or(output.id.as_str());
+    let creator_agent = resolve_task_agent_identity(&state.db, &run.user_id, task_id).await?;
+
+    let mut metadata = asset
+        .metadata
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<Value>(value).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+
+    let document_kind = classify_pipeline_document_kind(&step);
+    metadata
+        .entry("origin".to_string())
+        .or_insert(json!("pipeline_output"));
+    metadata
+        .entry("format".to_string())
+        .or_insert(json!("markdown"));
+    metadata
+        .entry("pipelineRunId".to_string())
+        .or_insert(json!(run.id));
+    metadata
+        .entry("pipelineType".to_string())
+        .or_insert(json!(run.pipeline_type));
+    metadata
+        .entry("conversationId".to_string())
+        .or_insert(json!(run.conversation_id));
+    metadata
+        .entry("stepId".to_string())
+        .or_insert(json!(step.id));
+    metadata
+        .entry("stepKey".to_string())
+        .or_insert(json!(step.step_key));
+    metadata
+        .entry("stepName".to_string())
+        .or_insert(json!(step.step_name));
+    metadata
+        .entry("stepType".to_string())
+        .or_insert(json!(normalize_step_type(&step)));
+    metadata
+        .entry("taskId".to_string())
+        .or_insert(json!(task_id));
+    metadata
+        .entry("documentKind".to_string())
+        .or_insert(json!(document_kind));
+    metadata
+        .entry("sizeBytes".to_string())
+        .or_insert(json!(content.as_bytes().len()));
+    metadata
+        .entry("creator".to_string())
+        .or_insert(json!("制作流程"));
+    metadata
+        .entry("createdBy".to_string())
+        .or_insert(json!("制作流程"));
+    metadata
+        .entry("changeCount".to_string())
+        .or_insert(json!(0));
+    if let Some(agent) = creator_agent {
+        metadata
+            .entry("creatorAgentId".to_string())
+            .or_insert(json!(agent.id.clone()));
+        metadata
+            .entry("creatorAgentName".to_string())
+            .or_insert(json!(agent.name.clone()));
+        metadata
+            .entry("agentId".to_string())
+            .or_insert(json!(agent.id));
+        metadata
+            .entry("agentName".to_string())
+            .or_insert(json!(agent.name));
+    }
+
+    let metadata = Value::Object(metadata).to_string();
+    asset::repo::update_asset(
+        &state.db,
+        &asset.id,
+        &asset.name,
+        &asset.asset_type,
+        &asset.url,
+        Some(&metadata),
+    )
+    .await?;
+
+    Ok(())
 }
 
 async fn load_run_steps(pool: &SqlitePool, run_id: &str) -> Result<Vec<PipelineStepRow>> {
@@ -644,6 +873,7 @@ async fn persist_pipeline_document_asset(
         safe_filename_component(task_id)
     );
     let asset_name = build_pipeline_document_asset_name(step);
+    let creator_agent = resolve_task_agent_identity(&state.db, &run.user_id, task_id).await?;
     let metadata = json!({
         "origin": "pipeline_output",
         "format": "markdown",
@@ -657,6 +887,12 @@ async fn persist_pipeline_document_asset(
         "taskId": task_id,
         "documentKind": document_kind,
         "sizeBytes": content.as_bytes().len(),
+        "creator": "制作流程",
+        "createdBy": "制作流程",
+        "creatorAgentId": creator_agent.as_ref().map(|agent| agent.id.as_str()),
+        "creatorAgentName": creator_agent.as_ref().map(|agent| agent.name.as_str()),
+        "agentId": creator_agent.as_ref().map(|agent| agent.id.as_str()),
+        "agentName": creator_agent.as_ref().map(|agent| agent.name.as_str()),
         "generatedAt": now_iso(),
     });
 
@@ -809,6 +1045,19 @@ async fn handle_review_completion(
     )
     .await?;
 
+    update_reviewed_asset_metadata(
+        pool,
+        run,
+        step,
+        steps,
+        task_id,
+        &review,
+        &review_issues,
+        &retry_hints,
+        true,
+    )
+    .await?;
+
     if review.decision == "pass" {
         mark_step_completed(pool, &run.id, &step.id, Some(&output_id)).await?;
         append_assistant_step_summary(
@@ -872,6 +1121,142 @@ async fn handle_review_completion(
     )
     .await?;
     Ok(true)
+}
+
+async fn update_reviewed_asset_metadata(
+    pool: &SqlitePool,
+    run: &PipelineRunRow,
+    review_step: &PipelineStepRow,
+    steps: &[PipelineStepRow],
+    task_id: &str,
+    review: &ReviewDecision,
+    review_issues: &[String],
+    retry_hints: &[String],
+    emit_event: bool,
+) -> Result<bool> {
+    let Some(design_step) = find_retry_design_step(review_step, steps) else {
+        return Ok(false);
+    };
+    let Some(asset_id) = latest_design_asset_id_for_step(pool, &run.id, &design_step.id).await? else {
+        return Ok(false);
+    };
+    let Some(asset) = asset::repo::find_by_id(pool, &asset_id).await? else {
+        return Ok(false);
+    };
+
+    let review_agent = resolve_task_agent_identity(pool, &run.user_id, task_id).await?;
+    let mut metadata = asset
+        .metadata
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<Value>(value).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+
+    let status = if review.decision == "pass" {
+        "approved"
+    } else {
+        "rejected"
+    };
+    let now = now_iso();
+    metadata.insert("reviewStatus".to_string(), json!(status));
+    metadata.insert("reviewDecision".to_string(), json!(review.decision));
+    metadata.insert("reviewScore".to_string(), json!(review.score));
+    metadata.insert(
+        "reviewSummary".to_string(),
+        json!(summarize_asset_review(review, review_issues, retry_hints)),
+    );
+    metadata.insert("reviewIssues".to_string(), json!(review_issues));
+    metadata.insert("retryHints".to_string(), json!(retry_hints));
+    metadata.insert("reviewStepId".to_string(), json!(review_step.id));
+    metadata.insert("reviewStepKey".to_string(), json!(review_step.step_key));
+    metadata.insert("reviewTaskId".to_string(), json!(task_id));
+    metadata.insert("reviewedAt".to_string(), json!(now));
+    if let Some(agent) = review_agent {
+        metadata.insert("reviewerAgentId".to_string(), json!(agent.id));
+        metadata.insert("reviewerAgentName".to_string(), json!(agent.name));
+    }
+
+    let metadata = Value::Object(metadata).to_string();
+    asset::repo::update_asset(
+        pool,
+        &asset.id,
+        &asset.name,
+        &asset.asset_type,
+        &asset.url,
+        Some(&metadata),
+    )
+    .await?;
+
+    if emit_event {
+        append_pipeline_event(
+            pool,
+            &run.id,
+            Some(&review_step.id),
+            "pipeline_asset_review_recorded",
+            json!({
+                "assetId": asset.id,
+                "assetName": asset.name,
+                "reviewStatus": status,
+                "reviewDecision": review.decision,
+                "reviewScore": review.score,
+                "reviewStepId": review_step.id,
+                "reviewStepKey": review_step.step_key,
+            }),
+            "system",
+        )
+        .await?;
+    }
+
+    Ok(true)
+}
+
+async fn latest_design_asset_id_for_step(
+    pool: &SqlitePool,
+    run_id: &str,
+    step_id: &str,
+) -> Result<Option<String>> {
+    let outputs = sqlx::query_as::<_, (Option<String>,)>(
+        "SELECT output_json
+         FROM pipeline_step_outputs
+         WHERE run_id = ? AND step_id = ? AND output_type = 'design'
+         ORDER BY created_at DESC, id DESC
+         LIMIT 8",
+    )
+    .bind(run_id)
+    .bind(step_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(outputs
+        .into_iter()
+        .find_map(|(output_json,)| extract_pipeline_output_asset_id(output_json.as_deref())))
+}
+
+fn summarize_asset_review(
+    review: &ReviewDecision,
+    review_issues: &[String],
+    retry_hints: &[String],
+) -> String {
+    if let Some(code) = review.parse_error.as_deref() {
+        return format!("审核输出格式异常：{}", code);
+    }
+
+    if review.decision == "pass" {
+        return match review.score {
+            Some(score) => format!("审核通过，评分 {:.1}", score),
+            None => "审核通过".to_string(),
+        };
+    }
+
+    if let Some(issue) = review_issues.first() {
+        return format!("审核未通过：{}", issue);
+    }
+
+    if let Some(hint) = retry_hints.first() {
+        return format!("审核未通过，建议：{}", hint);
+    }
+
+    "审核未通过".to_string()
 }
 
 async fn handle_task_failure(
@@ -1126,6 +1511,25 @@ async fn resolve_step_agent_id(
     .await?;
 
     Ok(fallback.map(|(id,)| id))
+}
+
+async fn resolve_task_agent_identity(
+    pool: &SqlitePool,
+    user_id: &str,
+    task_id: &str,
+) -> Result<Option<AgentIdentity>> {
+    let row = sqlx::query_as::<_, (String, String)>(
+        "SELECT a.id, a.name
+         FROM ai_tasks t
+         INNER JOIN agents a ON a.id = t.agent_id
+         WHERE t.id = ? AND t.user_id = ?",
+    )
+    .bind(task_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|(id, name)| AgentIdentity { id, name }))
 }
 
 async fn build_step_prompt(
