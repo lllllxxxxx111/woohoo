@@ -20,6 +20,7 @@ import {
   getPipelineRun,
   getPipelineOptimizations,
   getAiTask,
+  getServerAssetBlob,
   listPipelineRuns,
   pausePipelineRun,
   resumePipelineRun,
@@ -271,11 +272,77 @@ const isOutlineDesignStep = (stepKey: string | null | undefined) =>
 const isOutlineReviewStep = (stepKey: string | null | undefined) =>
   typeof stepKey === 'string' && OUTLINE_REVIEW_STEP_KEYS.has(stepKey);
 
-const getCompletedOutlineDesignTaskId = (run: PipelineRunSummary | null): string | null => {
-  const designStep = run?.steps.find(
-    (step) => isOutlineDesignStep(step.stepKey) && step.status === 'completed' && step.aiTaskId,
+type OutlineDocumentSource = {
+  assetId?: string;
+  inlineText?: string;
+  key: string;
+  taskId?: string;
+};
+
+const extractPipelineOutputAssetId = (output: PipelineStepOutput | null | undefined): string => {
+  const payload = parseJsonRecord(output?.outputJson);
+  if (typeof payload?.assetId === 'string' && payload.assetId.trim()) {
+    return payload.assetId.trim();
+  }
+
+  const nestedAsset = payload?.asset;
+  if (
+    nestedAsset &&
+    typeof nestedAsset === 'object' &&
+    !Array.isArray(nestedAsset) &&
+    typeof (nestedAsset as { id?: unknown }).id === 'string'
+  ) {
+    return ((nestedAsset as { id: string }).id || '').trim();
+  }
+
+  return '';
+};
+
+const getCompletedOutlineDocumentSource = (
+  run: PipelineRunSummary | null,
+): OutlineDocumentSource | null => {
+  if (!run) {
+    return null;
+  }
+
+  const designStep = run.steps.find(
+    (step) => isOutlineDesignStep(step.stepKey) && step.status === 'completed',
   );
-  return designStep?.aiTaskId ?? null;
+  if (!designStep) {
+    return null;
+  }
+
+  const output = run.outputs.find(
+    (item) => item.stepId === designStep.id && item.outputType === 'design',
+  );
+  const assetId = extractPipelineOutputAssetId(output);
+  const inlineText = normalizeOutlineTaskResult(output?.rawContent);
+
+  if (assetId) {
+    return {
+      assetId,
+      inlineText: inlineText || undefined,
+      key: `asset:${assetId}`,
+      taskId: output?.taskId || designStep.aiTaskId || undefined,
+    };
+  }
+
+  if (inlineText) {
+    return {
+      inlineText,
+      key: `output:${output?.id ?? designStep.id}:${output?.updatedAt ?? designStep.updatedAt}`,
+      taskId: output?.taskId || designStep.aiTaskId || undefined,
+    };
+  }
+
+  if (designStep.aiTaskId) {
+    return {
+      key: `task:${designStep.aiTaskId}`,
+      taskId: designStep.aiTaskId,
+    };
+  }
+
+  return null;
 };
 
 type OutlineViewProps = {
@@ -286,14 +353,16 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
   const [outlineDraft, setOutlineDraft] = useState('');
   const [outlineViewMode, setOutlineViewMode] = useState<'preview' | 'edit'>('preview');
   const [currentRun, setCurrentRun] = useState<PipelineRunSummary | null>(null);
-  const [outlineSourceTaskId, setOutlineSourceTaskId] = useState<string | null>(null);
+  const [outlineDocumentSource, setOutlineDocumentSource] = useState<OutlineDocumentSource | null>(
+    null,
+  );
   const [promptOptimizations, setPromptOptimizations] = useState<PipelinePromptOptimization[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [manualReviewOwner, setManualReviewOwner] = useState('');
   const [manualReviewNote, setManualReviewNote] = useState('');
   const [selectedManualReviewStepId, setSelectedManualReviewStepId] = useState<string | null>(null);
-  const lastSyncedOutlineTaskIdRef = useRef<string | null>(null);
+  const lastSyncedOutlineSourceKeyRef = useRef<string | null>(null);
   const refreshedAssetIdsRef = useRef<Set<string>>(new Set());
   const { showToast } = useToast();
   const { refreshWorkspace } = useAppActions();
@@ -578,7 +647,7 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
       });
       if (runs.length === 0) {
         setCurrentRun(null);
-        setOutlineSourceTaskId(null);
+        setOutlineDocumentSource(null);
         setPromptOptimizations([]);
         return;
       }
@@ -586,13 +655,13 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
         getPipelineRun(runs[0].id),
         getPipelineOptimizations(runs[0].id),
       ]);
-      let nextOutlineSourceTaskId = getCompletedOutlineDesignTaskId(detail);
-      if (!nextOutlineSourceTaskId) {
+      let nextOutlineDocumentSource = getCompletedOutlineDocumentSource(detail);
+      if (!nextOutlineDocumentSource) {
         for (const run of runs.slice(1)) {
           try {
             const candidateDetail = await getPipelineRun(run.id);
-            nextOutlineSourceTaskId = getCompletedOutlineDesignTaskId(candidateDetail);
-            if (nextOutlineSourceTaskId) {
+            nextOutlineDocumentSource = getCompletedOutlineDocumentSource(candidateDetail);
+            if (nextOutlineDocumentSource) {
               break;
             }
           } catch (candidateError) {
@@ -601,7 +670,7 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
         }
       }
       setCurrentRun(detail);
-      setOutlineSourceTaskId(nextOutlineSourceTaskId);
+      setOutlineDocumentSource(nextOutlineDocumentSource);
       setPromptOptimizations(optimizations);
     } catch (error) {
       logger.error('Failed to load pipeline run:', error);
@@ -625,7 +694,10 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
   }, [isServerWorkspaceReady, activeState.projectId, currentRunStatus, loadLatestRun]);
 
   useEffect(() => {
-    if (!outlineSourceTaskId || lastSyncedOutlineTaskIdRef.current === outlineSourceTaskId) {
+    if (
+      !outlineDocumentSource ||
+      lastSyncedOutlineSourceKeyRef.current === outlineDocumentSource.key
+    ) {
       return;
     }
 
@@ -633,21 +705,31 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
 
     const syncGeneratedOutline = async () => {
       try {
-        const task = await getAiTask(outlineSourceTaskId);
+        let nextOutline = '';
+        if (outlineDocumentSource.assetId) {
+          const blob = await getServerAssetBlob(outlineDocumentSource.assetId);
+          nextOutline = normalizeOutlineTaskResult(await blob.text());
+        }
+        if (!nextOutline && outlineDocumentSource.inlineText) {
+          nextOutline = normalizeOutlineTaskResult(outlineDocumentSource.inlineText);
+        }
+        if (!nextOutline && outlineDocumentSource.taskId) {
+          const task = await getAiTask(outlineDocumentSource.taskId);
+          nextOutline = normalizeOutlineTaskResult(task.result);
+        }
         if (cancelled) {
           return;
         }
 
-        const nextOutline = normalizeOutlineTaskResult(task.result);
         if (!nextOutline) {
           return;
         }
 
-        lastSyncedOutlineTaskIdRef.current = outlineSourceTaskId;
+        lastSyncedOutlineSourceKeyRef.current = outlineDocumentSource.key;
         setOutlineDraft(nextOutline);
         setOutlineViewMode('preview');
       } catch (error) {
-        logger.error('Failed to sync generated outline from AI task:', error);
+        logger.error('Failed to sync generated outline document:', error);
       }
     };
 
@@ -656,7 +738,7 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
     return () => {
       cancelled = true;
     };
-  }, [outlineSourceTaskId]);
+  }, [outlineDocumentSource]);
 
   const handleRegenerate = () => {
     void createOutlinePipelineRun('full');
