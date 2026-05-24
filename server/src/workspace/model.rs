@@ -56,6 +56,7 @@ pub struct WorkspaceMessage {
 pub struct WorkspaceAsset {
     pub id: String,
     pub project_id: String,
+    pub owner_user_id: String,
     pub name: String,
     #[serde(rename = "type")]
     pub asset_type: String,

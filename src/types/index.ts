@@ -194,6 +194,7 @@ export interface Message {
 export interface Asset {
   id: string;
   projectId: string;
+  ownerUserId?: string;
   projectName?: string;
   name: string;
   type: 'image' | 'video' | 'audio' | 'document';

@@ -122,6 +122,7 @@ type ServerMessage = {
 type ServerAsset = {
   id: string;
   projectId: string;
+  ownerUserId?: string | null;
   name: string;
   type: Asset['type'];
   url: string;
@@ -1023,6 +1024,7 @@ function mapAsset(asset: ServerAsset): Asset {
   return {
     id: asset.id,
     projectId: asset.projectId,
+    ownerUserId: asset.ownerUserId || getStoredServerUserId() || undefined,
     name: asset.name,
     type: asset.type,
     url,

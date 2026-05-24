@@ -34,7 +34,8 @@ import { useShallow } from 'zustand/react/shallow';
 import { Asset } from '../../../../types';
 import { useAppActions } from '../../../../context/useAppActions';
 import { useToast } from '../../../../context/useToast';
-import { getServerAssetBlob } from '../../../../lib/serverApi';
+import { getServerAssetBlob, getStoredServerProfile } from '../../../../lib/serverApi';
+import { formatCreditAmount, TOKENS_PER_CREDIT } from '../../../../lib/credits';
 import { isProtectedAssetUrl, useAssetPreviewUrl } from '../../../../hooks/useAssetPreviewUrl';
 import {
   ASSET_TYPE_LABELS,
@@ -168,6 +169,45 @@ function formatReviewStatus(value: string): string {
     return '审核中';
   }
   return value;
+}
+
+function getAssetCreditCost(metadata: Record<string, unknown>): number | null {
+  const explicitCost = getMetadataNumberFromKeys(metadata, [
+    'costCredits',
+    'creditsCost',
+    'creditCost',
+    'credits',
+    'spentCredits',
+    'totalCredits',
+  ]);
+  if (explicitCost !== null) {
+    return explicitCost;
+  }
+
+  const totalTokens = getMetadataNumberFromKeys(metadata, ['totalTokens', 'total_tokens']);
+  if (totalTokens !== null) {
+    return totalTokens / TOKENS_PER_CREDIT;
+  }
+
+  const usage = metadata.usage;
+  if (usage && typeof usage === 'object' && !Array.isArray(usage)) {
+    const usageTokens = getMetadataNumberFromKeys(usage as Record<string, unknown>, [
+      'totalTokens',
+      'total_tokens',
+    ]);
+    if (usageTokens !== null) {
+      return usageTokens / TOKENS_PER_CREDIT;
+    }
+  }
+
+  return null;
+}
+
+function formatAssetCreditCost(value: number | null): string {
+  if (value === null) {
+    return '未记录';
+  }
+  return `${formatCreditAmount(value)} 积分`;
 }
 
 function isMarkdownDocumentAsset(asset: Asset, metadata: Record<string, unknown>): boolean {
@@ -472,7 +512,7 @@ const DocumentAssetThumbnail: React.FC<{
 };
 
 export const AssetLibrary: React.FC = () => {
-  const { activeAssets, activeState, assets, projects, assetLibraryView, setAssetLibraryView } =
+  const { activeAssets, activeState, assets, projects, assetLibraryView, setAssetLibraryView, isAuthenticated } =
     useAppStore(
     useShallow((state) => ({
       activeAssets: state.activeAssets,
@@ -481,6 +521,7 @@ export const AssetLibrary: React.FC = () => {
       projects: state.projects,
       assetLibraryView: state.assetLibraryView,
       setAssetLibraryView: state.setAssetLibraryView,
+      isAuthenticated: state.isAuthenticated,
     })),
   );
   const { uploadAssets, deleteAsset, updateAsset } = useAppActions();
@@ -515,6 +556,7 @@ export const AssetLibrary: React.FC = () => {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const metadataUpdateQueuesRef = useRef(new Map<string, Promise<Asset>>());
+  const currentProfile = useMemo(() => getStoredServerProfile(), [isAuthenticated]);
 
   useEffect(() => {
     if (selectedAsset && !assets.some((asset) => asset.id === selectedAsset)) {
@@ -540,6 +582,19 @@ export const AssetLibrary: React.FC = () => {
   const selectedAssetProjectName = selectedAssetData
     ? projectNameById.get(selectedAssetData.projectId) || '未命名项目'
     : null;
+  const selectedAssetOwnerUserId =
+    selectedAssetData?.ownerUserId ||
+    getMetadataTextFromKeys(selectedAssetMetadata, [
+      'ownerUserId',
+      'userId',
+      'createdByUserId',
+      'created_by_user_id',
+    ]) ||
+    '';
+  const selectedAssetOwnerLabel =
+    selectedAssetOwnerUserId && selectedAssetOwnerUserId === currentProfile?.id
+      ? currentProfile.username || currentProfile.email || selectedAssetOwnerUserId
+      : selectedAssetOwnerUserId;
   const selectedAssetFavorite = selectedAssetData ? isFavoriteAsset(selectedAssetData) : false;
   const selectedAssetPrompt = selectedAssetData?.type === 'image'
     ? getMetadataText(selectedAssetMetadata, 'prompt')
@@ -668,15 +723,20 @@ export const AssetLibrary: React.FC = () => {
     'modificationCount',
     'modification_count',
   ]);
+  const selectedAssetCreditCost = getAssetCreditCost(selectedAssetMetadata);
   const selectedAssetInfoRows = useMemo<DetailInfoRow[]>(() => {
     if (!selectedAssetData) {
       return [];
     }
 
     return [
+      { label: '资产 UUID', value: selectedAssetData.id },
       { label: '项目', value: selectedAssetProjectName ?? '未命名项目' },
+      { label: '项目 UUID', value: selectedAssetData.projectId },
+      { label: '所属用户', value: selectedAssetOwnerLabel || '未记录' },
       { label: '类型', value: ASSET_TYPE_LABELS[selectedAssetData.type] },
       { label: selectedAssetMetric?.label ?? '尺寸', value: selectedAssetMetric?.value ?? '未填写' },
+      { label: '消耗积分', value: formatAssetCreditCost(selectedAssetCreditCost) },
       { label: '版本', value: selectedAssetData.versionLabel || '当前版' },
       { label: '创建智能体', value: selectedAssetSourceAgent || '未记录' },
       { label: '创建时间', value: formatAssetDate(selectedAssetData.createdAt) },
@@ -702,6 +762,8 @@ export const AssetLibrary: React.FC = () => {
     selectedAssetChangeCount,
     selectedAssetData,
     selectedAssetMetric,
+    selectedAssetCreditCost,
+    selectedAssetOwnerLabel,
     selectedAssetProjectName,
     selectedAssetReviewIssues.length,
     selectedAssetReviewStatus,
