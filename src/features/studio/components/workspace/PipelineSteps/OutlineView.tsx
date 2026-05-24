@@ -362,6 +362,7 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
   const [manualReviewOwner, setManualReviewOwner] = useState('');
   const [manualReviewNote, setManualReviewNote] = useState('');
   const [selectedManualReviewStepId, setSelectedManualReviewStepId] = useState<string | null>(null);
+  const focusedRunIdRef = useRef<string | null>(null);
   const lastSyncedOutlineSourceKeyRef = useRef<string | null>(null);
   const refreshedAssetIdsRef = useRef<Set<string>>(new Set());
   const { showToast } = useToast();
@@ -634,6 +635,7 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
               ],
       });
 
+      focusedRunIdRef.current = run.id;
       const detail = await getPipelineRun(run.id);
       setCurrentRun(detail);
       showToast({
@@ -669,9 +671,17 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
         setPromptOptimizations([]);
         return;
       }
+      const focusedRunId = focusedRunIdRef.current;
+      const targetRun =
+        (focusedRunId ? runs.find((run) => run.id === focusedRunId) : null) ?? runs[0];
+      if (targetRun.status === 'completed' || targetRun.status === 'failed' || targetRun.status === 'cancelled') {
+        focusedRunIdRef.current = null;
+      } else {
+        focusedRunIdRef.current = targetRun.id;
+      }
       const [detail, optimizations] = await Promise.all([
-        getPipelineRun(runs[0].id),
-        getPipelineOptimizations(runs[0].id),
+        getPipelineRun(targetRun.id),
+        getPipelineOptimizations(targetRun.id),
       ]);
       let nextOutlineDocumentSource = getCompletedOutlineDocumentSource(detail);
       if (!nextOutlineDocumentSource) {
@@ -1035,6 +1045,7 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
     }
     setIsLoading(true);
     try {
+      focusedRunIdRef.current = currentRun.run.id;
       await retryPipelineStep(currentRun.run.id, stepId, reason);
       await loadLatestRun();
       if (reason?.trim()) {
@@ -1072,6 +1083,7 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
     setIsLoading(true);
     try {
       let successCount = 0;
+      focusedRunIdRef.current = currentRun.run.id;
       for (const step of failedOrBlockedSteps) {
         try {
           await retryPipelineStep(currentRun.run.id, step.id, reason);
@@ -1740,7 +1752,7 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
             onClick={handleApprove}
             disabled={isSubmitting || isLoading || !multiAgentBetaEnabled}
           >
-            <CheckCircle size={16} /> 提交审核任务
+            <CheckCircle size={16} /> {latestReviewDecision === 'pass' ? '重新复审' : '提交审核任务'}
           </button>
         </div>
       </div>

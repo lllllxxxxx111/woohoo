@@ -255,7 +255,7 @@ pub async fn list_pipeline_runs(
 
     let where_clause = conditions.join(" AND ");
     let query = format!(
-        "SELECT * FROM pipeline_runs WHERE {} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        "SELECT * FROM pipeline_runs WHERE {} ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
         where_clause
     );
 
