@@ -482,10 +482,10 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
     });
   }, [pipelineOutputAssetIds, refreshWorkspace]);
 
-  const buildOutlineDesignPrompt = (draftText: string) => {
+  const buildOutlineDesignPrompt = (draftText: string, promptPatch?: string | null) => {
     const normalizedDraft =
       draftText.trim() || '当前没有现成草稿，请从项目目标和历史对话中补齐完整大纲。';
-    return [
+    const sections = [
       '你是大纲架构师，请基于当前项目上下文产出可执行的大纲方案。',
       '',
       `已有草稿：${normalizedDraft}`,
@@ -495,12 +495,18 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
       '2. 按短视频/短剧节奏拆出段落节点（起承转合）。',
       '3. 标记每段的目标情绪和人物推进。',
       '4. 输出内容可直接进入剧本阶段，不要只给抽象建议。',
-    ].join('\n');
+    ];
+
+    if (promptPatch?.trim()) {
+      sections.push('', promptPatch.trim());
+    }
+
+    return sections.join('\n');
   };
 
-  const buildOutlineReviewPrompt = (targetOutline?: string) => {
+  const buildOutlineReviewPrompt = (targetOutline?: string, promptPatch?: string | null) => {
     const normalizedTargetOutline = targetOutline?.trim();
-    return [
+    const sections = [
       '你是合规审核官，请审核大纲内容，并给出可执行评语。',
       '',
       normalizedTargetOutline
@@ -515,10 +521,19 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
       '如果不通过，请给出可执行修改项和重试建议。',
       '必须只返回 JSON，不要使用 Markdown 代码块或解释文字：',
       '{"decision":"pass|fail","score":0.0,"issues":["问题或通过理由"],"retryHints":["下一步建议"],"riskLevel":"low|medium|high"}',
-    ].join('\n');
+    ];
+
+    if (promptPatch?.trim()) {
+      sections.push('', promptPatch.trim());
+    }
+
+    return sections.join('\n');
   };
 
-  const createOutlinePipelineRun = async (mode: 'full' | 'review_only') => {
+  const createOutlinePipelineRun = async (
+    mode: 'full' | 'review_only',
+    optimization?: Pick<PipelinePromptOptimization, 'designPromptPatch' | 'reviewPromptPatch'>,
+  ) => {
     if (!multiAgentBetaEnabled) {
       showToast({
         type: 'warning',
@@ -565,8 +580,11 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
       return;
     }
 
-    const designPrompt = buildOutlineDesignPrompt(outlineDraft);
-    const reviewPrompt = buildOutlineReviewPrompt(mode === 'review_only' ? outlineDraft : undefined);
+    const designPrompt = buildOutlineDesignPrompt(outlineDraft, optimization?.designPromptPatch);
+    const reviewPrompt = buildOutlineReviewPrompt(
+      mode === 'review_only' ? outlineDraft : undefined,
+      optimization?.reviewPromptPatch,
+    );
     const normalizedRetryBackoffSec = Math.min(300, Math.max(1, Math.round(retryBackoffSec || 4)));
     const normalizedRetryMaxBackoffSec = Math.min(
       900,
@@ -774,6 +792,20 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
 
   const handleApprove = () => {
     void createOutlinePipelineRun('review_only');
+  };
+
+  const handleRegenerateWithOptimization = () => {
+    if (!latestOptimization) {
+      return;
+    }
+    void createOutlinePipelineRun('full', latestOptimization);
+  };
+
+  const handleReviewWithOptimization = () => {
+    if (!latestOptimization) {
+      return;
+    }
+    void createOutlinePipelineRun('review_only', latestOptimization);
   };
 
   /**
@@ -1689,30 +1721,48 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
 
         {latestOptimization && (
           <div className={styles.panelBlock}>
-            <h4 className={styles.panelTitle}>Prompt 优化建议（Beta）</h4>
+            <h4 className={styles.panelTitle}>下一轮优化建议</h4>
             <div className={styles.infoText}>
-              最新建议时间：{formatEventTime(latestOptimization.createdAt)}
+              这些建议会在你点击下方按钮后自动带入下一次生成或复审。
             </div>
             {latestOptimization.designPromptPatch && (
-              <div className={styles.eventItem} style={{ marginTop: 10 }}>
+              <div className={styles.optimizationCard}>
                 <div className={styles.eventHeader}>
-                  <span className={styles.eventType}>设计侧 Patch</span>
+                  <span className={styles.eventType}>设计改进建议</span>
+                  <span className={styles.eventTime}>{formatEventTime(latestOptimization.createdAt)}</span>
                 </div>
                 <div className={styles.eventText}>
                   {latestOptimization.designPromptPatch.slice(0, 180)}
                   {latestOptimization.designPromptPatch.length > 180 ? '...' : ''}
                 </div>
+                <button
+                  type="button"
+                  className={styles.btnSmall}
+                  onClick={handleRegenerateWithOptimization}
+                  disabled={isSubmitting || isLoading || !multiAgentBetaEnabled}
+                >
+                  <RotateCw size={12} /> 按建议重新生成
+                </button>
               </div>
             )}
             {latestOptimization.reviewPromptPatch && (
-              <div className={styles.eventItem} style={{ marginTop: 8 }}>
+              <div className={styles.optimizationCard}>
                 <div className={styles.eventHeader}>
-                  <span className={styles.eventType}>审核侧 Patch</span>
+                  <span className={styles.eventType}>审核规则补充</span>
+                  <span className={styles.eventTime}>{formatEventTime(latestOptimization.createdAt)}</span>
                 </div>
                 <div className={styles.eventText}>
                   {latestOptimization.reviewPromptPatch.slice(0, 180)}
                   {latestOptimization.reviewPromptPatch.length > 180 ? '...' : ''}
                 </div>
+                <button
+                  type="button"
+                  className={styles.btnSmall}
+                  onClick={handleReviewWithOptimization}
+                  disabled={isSubmitting || isLoading || !multiAgentBetaEnabled}
+                >
+                  <CheckCircle size={12} /> 按建议重新复审
+                </button>
               </div>
             )}
           </div>
