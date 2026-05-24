@@ -60,6 +60,11 @@ type PreviewImage = {
   asset: Asset;
 };
 
+type DetailInfoRow = {
+  label: string;
+  value: string;
+};
+
 function isFavoriteAsset(asset: Asset): boolean {
   return asset.metadata?.favorite === true;
 }
@@ -104,6 +109,29 @@ function getMetadataText(metadata: Record<string, unknown>, key: string): string
     return value.trim();
   }
   return '';
+}
+
+function getMetadataTextFromKeys(metadata: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = metadata[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
+  return '';
+}
+
+function getMetadataNumberFromKeys(metadata: Record<string, unknown>, keys: string[]): number | null {
+  for (const key of keys) {
+    const value = getMetadataNumber(metadata, [key]);
+    if (value !== null) {
+      return value;
+    }
+  }
+  return null;
 }
 
 function isMarkdownDocumentAsset(asset: Asset, metadata: Record<string, unknown>): boolean {
@@ -369,6 +397,7 @@ export const AssetLibrary: React.FC = () => {
   const [detailResolveStatus, setDetailResolveStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>(
     'idle',
   );
+  const [isDetailInfoCollapsed, setIsDetailInfoCollapsed] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const metadataUpdateQueuesRef = useRef(new Map<string, Promise<Asset>>());
@@ -475,6 +504,75 @@ export const AssetLibrary: React.FC = () => {
     selectedAssetInlineWordCount,
     selectedAssetSizeBytes,
   ]);
+  const selectedAssetSourceAgent = getMetadataTextFromKeys(selectedAssetMetadata, [
+    'agentName',
+    'agent_name',
+    'createdByAgentName',
+    'created_by_agent_name',
+    'creatorAgentName',
+    'creator',
+    'createdBy',
+    'sourceAgent',
+  ]);
+  const selectedAssetReviewSummary = getMetadataTextFromKeys(selectedAssetMetadata, [
+    'reviewSummary',
+    'review_summary',
+    'reviewComment',
+    'review_comment',
+    'reviewOpinion',
+    'review_opinion',
+    'reviewNotes',
+    'review_notes',
+  ]);
+  const selectedAssetReviewStatus = getMetadataTextFromKeys(selectedAssetMetadata, [
+    'reviewStatus',
+    'review_status',
+    'reviewDecision',
+    'review_decision',
+  ]);
+  const selectedAssetChangeCount = getMetadataNumberFromKeys(selectedAssetMetadata, [
+    'changeCount',
+    'change_count',
+    'revisionCount',
+    'revision_count',
+    'editCount',
+    'edit_count',
+    'modificationCount',
+    'modification_count',
+  ]);
+  const selectedAssetInfoRows = useMemo<DetailInfoRow[]>(() => {
+    if (!selectedAssetData) {
+      return [];
+    }
+
+    return [
+      { label: '项目', value: selectedAssetProjectName ?? '未命名项目' },
+      { label: '类型', value: ASSET_TYPE_LABELS[selectedAssetData.type] },
+      { label: selectedAssetMetric?.label ?? '尺寸', value: selectedAssetMetric?.value ?? '未填写' },
+      { label: '版本', value: selectedAssetData.versionLabel || '当前版' },
+      { label: '创建智能体', value: selectedAssetSourceAgent || '未记录' },
+      {
+        label: '修改次数',
+        value: selectedAssetChangeCount === null ? '未记录' : `${Math.max(0, Math.round(selectedAssetChangeCount))} 次`,
+      },
+      {
+        label: '评审状态',
+        value: selectedAssetReviewStatus || (selectedAssetReviewSummary ? '已记录' : '未记录'),
+      },
+      {
+        label: '更新时间',
+        value: formatAssetDate(selectedAssetData.updatedAt ?? selectedAssetData.createdAt),
+      },
+    ];
+  }, [
+    selectedAssetChangeCount,
+    selectedAssetData,
+    selectedAssetMetric,
+    selectedAssetProjectName,
+    selectedAssetReviewStatus,
+    selectedAssetReviewSummary,
+    selectedAssetSourceAgent,
+  ]);
   useEffect(() => {
     if (!activeState.projectId && libraryScope === 'current') {
       setAssetLibraryView({ scope: 'all' });
@@ -570,6 +668,10 @@ export const AssetLibrary: React.FC = () => {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [previewImage, selectedAsset]);
+
+  useEffect(() => {
+    setIsDetailInfoCollapsed(false);
+  }, [selectedAsset]);
 
   const updateLibraryView = useCallback(
     (request: {
@@ -1226,7 +1328,7 @@ export const AssetLibrary: React.FC = () => {
                 </button>
               </div>
             </div>
-            <div className={styles.detailSidebar}>
+            <div className={styles.detailMain}>
               <div className={styles.detailPreview}>
                 {selectedAssetData.type === 'image' ? (
                   <AssetPreviewImage asset={selectedAssetData} onPreview={setPreviewImage} />
@@ -1273,29 +1375,6 @@ export const AssetLibrary: React.FC = () => {
                   </div>
                 )}
               </div>
-            </div>
-
-            <div className={styles.detailBody}>
-              <dl className={styles.detailGrid}>
-                <div className={styles.detailField}>
-                  <dt className={styles.detailFieldLabel}>项目</dt>
-                  <dd className={styles.detailFieldValue}>{selectedAssetProjectName}</dd>
-                </div>
-                <div className={styles.detailField}>
-                  <dt className={styles.detailFieldLabel}>类型</dt>
-                  <dd className={styles.detailFieldValue}>{getFilterLabel(selectedAssetData.type)}</dd>
-                </div>
-                <div className={styles.detailField}>
-                  <dt className={styles.detailFieldLabel}>{selectedAssetMetric?.label ?? '尺寸'}</dt>
-                  <dd className={styles.detailFieldValue}>{selectedAssetMetric?.value ?? '未填写'}</dd>
-                </div>
-                <div className={styles.detailField}>
-                  <dt className={styles.detailFieldLabel}>更新时间</dt>
-                  <dd className={styles.detailFieldValue}>
-                    {formatAssetDate(selectedAssetData.updatedAt ?? selectedAssetData.createdAt)}
-                  </dd>
-                </div>
-              </dl>
 
               {selectedAssetData.type === 'image' &&
                 (selectedAssetPrompt || selectedAssetRevisedPrompt) && (
@@ -1321,6 +1400,38 @@ export const AssetLibrary: React.FC = () => {
                   </div>
                 )}
             </div>
+
+            <aside className={`${styles.detailInfoPanel} ${isDetailInfoCollapsed ? styles.collapsedInfoPanel : ''}`}>
+              <button
+                type="button"
+                className={styles.detailInfoToggle}
+                onClick={() => setIsDetailInfoCollapsed((value) => !value)}
+                aria-expanded={!isDetailInfoCollapsed}
+              >
+                <span>信息</span>
+                <span>{isDetailInfoCollapsed ? '展开' : '收起'}</span>
+              </button>
+
+              {!isDetailInfoCollapsed && (
+                <div className={styles.detailInfoContent}>
+                  <dl className={styles.detailGrid}>
+                    {selectedAssetInfoRows.map((row) => (
+                      <div className={styles.detailField} key={row.label}>
+                        <dt className={styles.detailFieldLabel}>{row.label}</dt>
+                        <dd className={styles.detailFieldValue}>{row.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+
+                  <section className={styles.detailReviewBlock}>
+                    <div className={styles.detailReviewHeader}>
+                      <span>评审意见</span>
+                    </div>
+                    <p>{selectedAssetReviewSummary || '未记录评审意见'}</p>
+                  </section>
+                </div>
+              )}
+            </aside>
           </section>
         </div>
       )}

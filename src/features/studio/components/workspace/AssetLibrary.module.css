@@ -331,17 +331,17 @@
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  padding: 24px;
+  padding: 18px;
   overflow: auto;
   background: rgba(2, 6, 23, 0.58);
   backdrop-filter: blur(10px);
 }
 
 .detailPanel {
-  width: min(1180px, 100%);
-  height: auto;
+  width: min(1440px, 100%);
+  min-height: min(860px, calc(100vh - 36px));
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 440px);
+  grid-template-columns: minmax(0, 1fr) minmax(286px, 360px);
   grid-template-rows: auto minmax(0, 1fr);
   gap: 18px;
   padding: 18px;
@@ -356,11 +356,11 @@
 }
 
 .documentDetailPanel {
-  grid-template-columns: minmax(420px, 1fr) minmax(280px, 380px);
+  grid-template-columns: minmax(0, 1fr) minmax(286px, 340px);
 }
 
 .imageDetailPanel {
-  grid-template-columns: minmax(360px, 0.92fr) minmax(340px, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
 }
 
 .detailToolbar {
@@ -401,13 +401,21 @@
   justify-content: flex-end;
 }
 
+.detailMain {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+
 .detailPreview {
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 0;
-  height: clamp(420px, 62vh, 720px);
+  height: clamp(520px, calc(100vh - 190px), 780px);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   overflow: hidden;
@@ -415,19 +423,11 @@
 }
 
 .imageDetailPanel .detailPreview {
-  height: clamp(420px, 66vh, 760px);
+  height: clamp(520px, calc(100vh - 190px), 780px);
 }
 
 .documentDetailPanel .detailPreview {
-  height: clamp(440px, 62vh, 700px);
-}
-
-.detailSidebar {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-height: 0;
+  height: clamp(560px, calc(100vh - 190px), 820px);
 }
 
 .detailFallback {
@@ -684,6 +684,87 @@
   gap: 16px;
   min-height: 0;
   align-self: start;
+}
+
+.detailInfoPanel {
+  min-width: 0;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: rgba(15, 23, 42, 0.18);
+  overflow: hidden;
+}
+
+.collapsedInfoPanel {
+  align-self: start;
+}
+
+.detailInfoToggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 42px;
+  padding: 0 14px;
+  border: 0;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.collapsedInfoPanel .detailInfoToggle {
+  border-bottom: 0;
+}
+
+.detailInfoToggle span:last-child {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.detailInfoContent {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+  padding: 12px;
+}
+
+.detailReviewBlock {
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-tertiary);
+}
+
+.detailReviewHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.detailReviewBlock p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .detailName {
@@ -1746,11 +1827,11 @@
 
 @media (max-width: 1120px) {
   .detailPanel {
-    grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 300px);
   }
 
   .detailGrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1767,11 +1848,11 @@
 
   .detailPreview {
     max-width: 100%;
-    height: clamp(240px, 44vh, 380px);
+    height: clamp(280px, 48vh, 460px);
   }
 
-  .detailSidebar {
-    gap: 10px;
+  .detailInfoPanel {
+    align-self: stretch;
   }
 
   .detailGrid {
@@ -1836,7 +1917,7 @@
   }
 
   .detailPreview {
-    height: clamp(220px, 40vh, 320px);
+    height: clamp(240px, 42vh, 360px);
   }
 
   .previewHeader {
