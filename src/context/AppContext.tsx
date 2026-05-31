@@ -194,41 +194,46 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     if (hasHydratedStoreRef.current) {
       return;
     }
-    hasHydratedStoreRef.current = true;
 
-    const storedProjects = loadStorage<Project[]>(STORAGE_KEYS.projects, []);
-    const storedActiveState = loadStorage<ActiveState>(STORAGE_KEYS.activeState, {
-      projectId: storedProjects[0]?.id ?? null,
-      chatSessionId: storedProjects[0]?.chatSessions[0]?.id ?? null,
-      currentTab: 'chat',
-    });
+    try {
+      const storedProjects = loadStorage<Project[]>(STORAGE_KEYS.projects, []);
+      const storedActiveState = loadStorage<ActiveState>(STORAGE_KEYS.activeState, {
+        projectId: storedProjects[0]?.id ?? null,
+        chatSessionId: storedProjects[0]?.chatSessions[0]?.id ?? null,
+        currentTab: 'chat',
+      });
 
-    useAppStore.setState({
-      projects: storedProjects,
-      globalChatMessages: loadStorage<Message[]>(STORAGE_KEYS.globalChatMessages, []),
-      assets: loadStorage<Asset[]>(STORAGE_KEYS.assets, []),
-      scripts: loadStorage<Script[]>(STORAGE_KEYS.scripts, []),
-      storyboards: loadStorage<Storyboard[]>(STORAGE_KEYS.storyboards, []),
-      allAgentContacts: loadStorage<AgentContact[]>(STORAGE_KEYS.agents, defaultAgents),
-      activeState: sanitizeActiveState(storedProjects, storedActiveState),
-      isSidebarCollapsed: typeof window !== 'undefined' && window.innerWidth <= 920,
-      isSettingsOpen: false,
-      isHelpOpen: false,
-      isAuthenticated: false,
-      language:
-        typeof window !== 'undefined' ? localStorage.getItem('woohoo-lang') || 'zh-CN' : 'zh-CN',
-      theme: hydrateTheme(loadStorage(STORAGE_KEYS.theme, 'dark')),
-      autoSaveEnabled: loadStorage<boolean>(STORAGE_KEYS.autoSave, true),
-      aiSettings: hydrateAiSettings(
-        stripSensitiveAiSettings(
-          loadStorage<Partial<AiSettings> | null>(STORAGE_KEYS.aiSettings, null),
+      useAppStore.setState({
+        projects: storedProjects,
+        globalChatMessages: loadStorage<Message[]>(STORAGE_KEYS.globalChatMessages, []),
+        assets: loadStorage<Asset[]>(STORAGE_KEYS.assets, []),
+        scripts: loadStorage<Script[]>(STORAGE_KEYS.scripts, []),
+        storyboards: loadStorage<Storyboard[]>(STORAGE_KEYS.storyboards, []),
+        allAgentContacts: loadStorage<AgentContact[]>(STORAGE_KEYS.agents, defaultAgents),
+        activeState: sanitizeActiveState(storedProjects, storedActiveState),
+        isSidebarCollapsed: typeof window !== 'undefined' && window.innerWidth <= 920,
+        isSettingsOpen: false,
+        isHelpOpen: false,
+        isAuthenticated: false,
+        language:
+          typeof window !== 'undefined' ? localStorage.getItem('woohoo-lang') || 'zh-CN' : 'zh-CN',
+        theme: hydrateTheme(loadStorage(STORAGE_KEYS.theme, 'dark')),
+        autoSaveEnabled: loadStorage<boolean>(STORAGE_KEYS.autoSave, true),
+        aiSettings: hydrateAiSettings(
+          stripSensitiveAiSettings(
+            loadStorage<Partial<AiSettings> | null>(STORAGE_KEYS.aiSettings, null),
+          ),
         ),
-      ),
-      serverAiEndpointId: loadStorage<string | null>(STORAGE_KEYS.aiEndpointId, null),
-      isServerWorkspaceReady: false,
-      workspaceBootstrapError: null,
-      pendingTaskCount: 0,
-    });
+        serverAiEndpointId: loadStorage<string | null>(STORAGE_KEYS.aiEndpointId, null),
+        isServerWorkspaceReady: false,
+        workspaceBootstrapError: null,
+        pendingTaskCount: 0,
+      });
+
+      hasHydratedStoreRef.current = true;
+    } catch (error) {
+      logger.error('Store hydration failed, will retry on next mount', error);
+    }
   }, []);
 
   useEffect(() => {
@@ -396,15 +401,21 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         return updated;
       } catch (error) {
         logger.error('Failed to update project on server', error);
-        setProjects((prev) =>
-          prev.map((project) =>
+        let fallbackProject: Project | undefined;
+        setProjects((prev) => {
+          const updated = prev.map((project) =>
             project.id === projectId ? { ...project, name } : project,
-          ),
-        );
-        return { ...projects.find((p) => p.id === projectId)!, name } as Project;
+          );
+          fallbackProject = updated.find((p) => p.id === projectId);
+          return updated;
+        });
+        if (!fallbackProject) {
+          throw new Error(`Project ${projectId} not found for local fallback`);
+        }
+        return { ...fallbackProject, name } as Project;
       }
     },
-    [projects, setIsServerWorkspaceReady, setProjects],
+    [setIsServerWorkspaceReady, setProjects],
   );
 
   const deleteProject = useCallback(

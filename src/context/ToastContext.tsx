@@ -30,7 +30,7 @@ export const ToastProvider: React.FC<{ children: ReactNode }> = ({ children }) =
       message?: string;
       duration?: number;
     }) => {
-      const id = `toast-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      const id = `toast-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
       const newToast: ToastItem = {
         id,
         type,

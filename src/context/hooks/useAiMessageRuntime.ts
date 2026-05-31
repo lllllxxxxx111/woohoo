@@ -9,6 +9,7 @@ import type {
   AiSettings,
   Asset,
   ChatSession,
+  ExecutionMode,
   Message,
   MessageAttachment,
   Project,
@@ -30,8 +31,6 @@ import {
   resolveAiTaskRequestModel,
   selectAiEndpointForSettings,
 } from '../utils/appContextHelpers';
-
-type ExecutionMode = 'task' | 'sync' | 'direct';
 
 type SendMessageResult = {
   mode: ExecutionMode;

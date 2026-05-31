@@ -21,7 +21,8 @@ import {
   type AssetLibraryViewState,
 } from '../lib/assetLibraryView';
 
-type ExecutionMode = 'task' | 'sync' | 'direct';
+import type { ExecutionMode } from '../types';
+
 const ACTIVE_STATE_STORAGE_KEY = 'woohoo-active-state-v2';
 const DEFAULT_ACTIVE_STATE: ActiveState = { projectId: null, chatSessionId: null, currentTab: 'chat' };
 

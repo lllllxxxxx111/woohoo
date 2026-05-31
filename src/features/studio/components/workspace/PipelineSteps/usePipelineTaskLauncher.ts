@@ -4,8 +4,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { useAppActions } from '../../../../../context/useAppActions';
 import { useToast } from '../../../../../context/useToast';
 import { useAppStore } from '../../../../../store';
-
-type ExecutionMode = 'task' | 'sync' | 'direct';
+import type { ExecutionMode } from '../../../../../types';
 
 type LaunchOptions = {
   successTitle: string;

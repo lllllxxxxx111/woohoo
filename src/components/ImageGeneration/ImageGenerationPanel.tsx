@@ -125,7 +125,7 @@ function clampImageCount(value: number) {
 
 function calculateCost(model: string, size: ImageSize, count: number) {
   const baseCost = model === 'dall-e-3' ? 5 : 3;
-  const sizeMultiplier = size === '1024x1792' || size === '1792x1024' ? 1.5 : 1;
+  const sizeMultiplier = size === '1024x1536' || size === '1536x1024' ? 1.5 : 1;
   return baseCost * sizeMultiplier * count;
 }
 
