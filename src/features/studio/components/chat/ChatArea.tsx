@@ -5,7 +5,7 @@
  * 以及编排 ChatInputArea、AgentSidePanel、ProjectCreateModal 等子组件。
  */
 import React, { Suspense, lazy, useEffect, useState, useMemo, useCallback } from 'react';
-import { Settings2, Bot, LoaderCircle, Sparkles, Square, PlayCircle } from 'lucide-react';
+import { Settings2, Bot, LoaderCircle, Sparkles, Square } from 'lucide-react';
 import { Button, Tag, Empty, Avatar, Typography, Space } from '@arco-design/web-react';
 import { useAppStore } from '../../../../store';
 import { useShallow } from 'zustand/react/shallow';
@@ -13,16 +13,6 @@ import { useToast } from '../../../../context/useToast';
 import { useAppActions } from '../../../../context/useAppActions';
 import { AI_PROVIDER_PRESETS } from '../../../../lib/ai';
 import {
-  STORAGE_KEYS,
-  buildCollaborationStorageKey,
-  loadStorage,
-  type StoredCollaborationSnapshotMap,
-} from '../../../../context/utils/storageHelpers';
-import {
-  admitCollaboration,
-  checkCollaborationLoop,
-  createCollaborationSession,
-  dispatchCollaboration,
   listServerAgents,
   updateServerAgent,
 } from '../../../../lib/serverApi';
@@ -37,7 +27,6 @@ import { AgentSidePanel } from './AgentSidePanel';
 import { ProjectCreateModal } from './ProjectCreateModal';
 import { CollaborationStatus } from './CollaborationStatus';
 import { CollaborationAlert } from './CollaborationAlert';
-import { detectCollaborationReadiness } from './chatAreaUtils';
 import styles from './ChatArea.module.css';
 
 const AgentDetailModal = lazy(() => import('./AgentDetailModal'));
@@ -65,10 +54,6 @@ export const ChatArea: React.FC = () => {
     activeCollaborationSession,
     activeCollaborationAssignments,
     collaborationLoopCheckResult,
-    setCollaborationSession,
-    setCollaborationAssignments,
-    setCollaborationLoopCheckResult,
-    switchTab,
   } = useAppStore(
     useShallow((state) => ({
       projects: state.projects,
@@ -85,10 +70,6 @@ export const ChatArea: React.FC = () => {
       activeCollaborationSession: state.activeCollaborationSession,
       activeCollaborationAssignments: state.activeCollaborationAssignments,
       collaborationLoopCheckResult: state.collaborationLoopCheckResult,
-      setCollaborationSession: state.setCollaborationSession,
-      setCollaborationAssignments: state.setCollaborationAssignments,
-      setCollaborationLoopCheckResult: state.setCollaborationLoopCheckResult,
-      switchTab: state.switchTab,
     })),
   );
 
@@ -98,7 +79,6 @@ export const ChatArea: React.FC = () => {
   const [editModalVisible, setEditModalVisible] = useState(false);
   /** 当前选中的智能体数据 */
   const [selectedAgent, setSelectedAgent] = useState<AgentContact | null>(null);
-  const [isStartingCollaboration, setStartingCollaboration] = useState(false);
 
   /** 同步智能体数据到 store */
   const syncAgentsToStore = useCallback((nextAgents: AgentContact[]) => {
@@ -134,61 +114,6 @@ export const ChatArea: React.FC = () => {
     : globalChatMessages;
   const activeMessages = rawMessages;
   const isReady = isServerWorkspaceReady;
-  const hasActiveCollaborationForChat =
-    Boolean(activeCollaborationSession) &&
-    activeCollaborationSession?.projectId === activeState.projectId &&
-    activeCollaborationSession?.conversationId === activeState.chatSessionId;
-  const collaborationReadiness = useMemo(
-    () => detectCollaborationReadiness(activeMessages, Boolean(activeProject && activeChat)),
-    [activeMessages, activeProject, activeChat],
-  );
-  const canOfferCollaborationStart =
-    collaborationReadiness.ready &&
-    Boolean(activeProject && activeChat) &&
-    isServerWorkspaceReady &&
-    !hasActiveCollaborationForChat;
-
-  useEffect(() => {
-    if (!isServerWorkspaceReady || !activeState.projectId || !activeState.chatSessionId) {
-      return;
-    }
-
-    const snapshotMap = loadStorage<StoredCollaborationSnapshotMap>(
-      STORAGE_KEYS.collaborationSessions,
-      {},
-    );
-    const conversationKey = buildCollaborationStorageKey(
-      activeState.projectId,
-      activeState.chatSessionId,
-    );
-    const storedSnapshot = snapshotMap[conversationKey];
-    if (!storedSnapshot?.session) {
-      return;
-    }
-
-    if (
-      storedSnapshot.session.projectId !== activeState.projectId ||
-      storedSnapshot.session.conversationId !== activeState.chatSessionId
-    ) {
-      return;
-    }
-
-    if (activeCollaborationSession?.id === storedSnapshot.session.id) {
-      return;
-    }
-
-    setCollaborationSession(storedSnapshot.session);
-    setCollaborationAssignments(Array.isArray(storedSnapshot.assignments) ? storedSnapshot.assignments : []);
-    setCollaborationLoopCheckResult(storedSnapshot.loopCheckResult ?? null);
-  }, [
-    activeCollaborationSession?.id,
-    activeState.chatSessionId,
-    activeState.projectId,
-    isServerWorkspaceReady,
-    setCollaborationAssignments,
-    setCollaborationLoopCheckResult,
-    setCollaborationSession,
-  ]);
 
   const projectNameById = useMemo(
     () => new Map(projects.map((project) => [project.id, project.name])),
@@ -308,144 +233,6 @@ export const ChatArea: React.FC = () => {
     setSelectedAgent(null);
   }, []);
 
-  const findAgentByKeywords = useCallback(
-    (keywords: string[]) =>
-      agentContacts.find((agent) => {
-        const haystack = `${agent.name} ${agent.role} ${agent.badge || ''}`.toLowerCase();
-        return keywords.some((keyword) => haystack.includes(keyword.toLowerCase()));
-      }),
-    [agentContacts],
-  );
-
-  const handleStartCollaboration = useCallback(async () => {
-    if (!activeProject || !activeChat || !isServerWorkspaceReady) {
-      showToast({
-        type: 'warning',
-        title: '暂不能启动协同',
-        message: '需要先进入项目对话，并保持本地后端在线。',
-      });
-      return;
-    }
-
-    const orchestrator =
-      findAgentByKeywords(['主编', '统筹', '项目管理', '管理']) ?? agentContacts[0];
-    const outlineAgent =
-      findAgentByKeywords(['大纲', '剧情', '编剧', '内容']) ?? orchestrator ?? agentContacts[0];
-    const reviewAgent =
-      findAgentByKeywords(['审核', '合规', '风控']) ?? orchestrator ?? outlineAgent;
-
-    if (!orchestrator || !outlineAgent || !reviewAgent) {
-      showToast({
-        type: 'error',
-        title: '无法启动协同',
-        message: '当前项目没有可用智能体，请先在设置中同步或创建智能体。',
-      });
-      return;
-    }
-
-    setStartingCollaboration(true);
-    try {
-      const conversationBrief = activeMessages
-        .slice(-8)
-        .map((message) => `${message.role === 'user' ? '用户' : 'AI'}：${message.content}`)
-        .join('\n\n');
-      const session = await createCollaborationSession({
-        projectId: activeProject.id,
-        conversationId: activeChat.id,
-        entryMessageId: collaborationReadiness.entryMessageId,
-        orchestratorAgentId: orchestrator.id,
-      });
-      setCollaborationSession(session);
-
-      const dispatchResult = await dispatchCollaboration(session.id, {
-        assignments: [
-          {
-            agentId: outlineAgent.id,
-            taskType: 'outline_design',
-            goal: `将「${activeProject.name}」当前创意对话整理为可制作的大纲方案。`,
-            input: {
-              projectName: activeProject.name,
-              conversationBrief,
-              readinessSignals: collaborationReadiness.signals,
-            },
-          },
-          {
-            agentId: reviewAgent.id,
-            taskType: 'outline_review',
-            goal: '审核大纲是否具备制作可执行性、风险可控性和目标受众清晰度。',
-            dependsOn: ['outline_design'],
-            input: {
-              projectName: activeProject.name,
-            },
-          },
-        ],
-      });
-      setCollaborationAssignments(dispatchResult.assignments);
-
-      try {
-        const loopCheck = await checkCollaborationLoop(session.id);
-        setCollaborationLoopCheckResult(loopCheck.loopDetected ? loopCheck : null);
-      } catch {
-        setCollaborationLoopCheckResult(null);
-      }
-
-      const admitResult = await admitCollaboration(session.id);
-      if (admitResult.admitted) {
-        setCollaborationSession({
-          ...session,
-          state: 'workspace_execution',
-          pipelineRunId: admitResult.pipelineRunId,
-          admissionDecisionJson: JSON.stringify({
-            admitted: true,
-            reason: admitResult.reason,
-            pipelineRunId: admitResult.pipelineRunId,
-          }),
-        });
-        switchTab('pipeline');
-        showToast({
-          type: 'success',
-          title: '已进入制作流程',
-          message: admitResult.pipelineRunId
-            ? `协同监管已启动，流程 ${admitResult.pipelineRunId.slice(0, 8)} 已创建。`
-            : '协同监管已启动，制作流程正在排队。',
-        });
-      } else {
-        setCollaborationSession({
-          ...session,
-          state: 'resolving_questions',
-          admissionDecisionJson: JSON.stringify(admitResult),
-        });
-        showToast({
-          type: 'warning',
-          title: '协同已启动',
-          message: admitResult.reason,
-        });
-      }
-    } catch (error) {
-      showToast({
-        type: 'error',
-        title: '启动协同失败',
-        message: error instanceof Error ? error.message : '无法创建制作协同',
-      });
-    } finally {
-      setStartingCollaboration(false);
-    }
-  }, [
-    activeProject,
-    activeChat,
-    isServerWorkspaceReady,
-    findAgentByKeywords,
-    agentContacts,
-    showToast,
-    activeMessages,
-    collaborationReadiness.entryMessageId,
-    collaborationReadiness.signals,
-    setCollaborationSession,
-    setCollaborationAssignments,
-    setCollaborationLoopCheckResult,
-    switchTab,
-  ]);
-
   /** 会话切换时重置消息操作状态 */
   useEffect(() => {
     messageActions.setEditingMessage(null);
@@ -514,33 +301,13 @@ export const ChatArea: React.FC = () => {
         </div>
 
         {/* 协同状态展示 */}
-        {hasActiveCollaborationForChat && activeCollaborationSession && (
+        {activeCollaborationSession && (
           <CollaborationStatus
             session={activeCollaborationSession}
             assignments={activeCollaborationAssignments}
           />
         )}
-        <CollaborationAlert
-          loopCheckResult={hasActiveCollaborationForChat ? collaborationLoopCheckResult : null}
-        />
-
-        {canOfferCollaborationStart && (
-          <div className={styles.collaborationStartBar}>
-            <div>
-              <strong>基础对话已可进入制作</strong>
-              <span>{collaborationReadiness.reason}</span>
-            </div>
-            <Button
-              type="primary"
-              size="small"
-              icon={<PlayCircle size={14} />}
-              loading={isStartingCollaboration}
-              onClick={() => void handleStartCollaboration()}
-            >
-              启动制作协同
-            </Button>
-          </div>
-        )}
+        <CollaborationAlert loopCheckResult={collaborationLoopCheckResult} />
 
         {/* 消息列表 */}
         <div

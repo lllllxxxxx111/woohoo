@@ -533,7 +533,6 @@ export function usePendingTaskSse({
                 useAppStore.getState().setCollaborationSession({
                   ...session,
                   state: 'workspace_admission',
-                  pipelineRunId: data.pipelineRunId || session.pipelineRunId,
                 });
               }
             }
@@ -546,7 +545,6 @@ export function usePendingTaskSse({
                 useAppStore.getState().setCollaborationSession({
                   ...session,
                   state: 'workspace_execution',
-                  pipelineRunId: data.pipelineRunId || session.pipelineRunId,
                 });
               }
             }

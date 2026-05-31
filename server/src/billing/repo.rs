@@ -1,47 +1,47 @@
 use anyhow::Result;
 use chrono::Utc;
-use sqlx::{Sqlite, SqlitePool, Transaction};
+use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use super::model::{CreditTransaction, UserCredits};
-
-fn now_iso() -> String {
-    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-}
-
-async fn ensure_user_credits_tx(tx: &mut Transaction<'_, Sqlite>, user_id: &str) -> Result<()> {
-    let id = Uuid::new_v4().to_string();
-    let now = now_iso();
-
-    sqlx::query(
-        "INSERT INTO user_credits (id, user_id, balance, total_earned, total_spent, updated_at, created_at)
-         VALUES (?, ?, 100, 100, 0, ?, ?)
-         ON CONFLICT(user_id) DO NOTHING",
-    )
-    .bind(&id)
-    .bind(user_id)
-    .bind(&now)
-    .bind(&now)
-    .execute(&mut **tx)
-    .await?;
-
-    Ok(())
-}
 
 /**
  * 获取用户积分余额
  */
 pub async fn get_user_credits(pool: &SqlitePool, user_id: &str) -> Result<UserCredits> {
-    let mut tx = pool.begin().await?;
-    ensure_user_credits_tx(&mut tx, user_id).await?;
+    let credits = sqlx::query_as::<_, UserCredits>(
+        "SELECT * FROM user_credits WHERE user_id = ?",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
 
-    let credits = sqlx::query_as::<_, UserCredits>("SELECT * FROM user_credits WHERE user_id = ?")
-        .bind(user_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    match credits {
+        Some(c) => Ok(c),
+        None => {
+            let id = Uuid::new_v4().to_string();
+            let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true) + "Z";
 
-    tx.commit().await?;
-    Ok(credits)
+            sqlx::query(
+                "INSERT INTO user_credits (id, user_id, balance, total_earned, total_spent, updated_at, created_at)
+                 VALUES (?, ?, 100, 0, 0, ?, ?)",
+            )
+            .bind(&id)
+            .bind(user_id)
+            .bind(&now)
+            .bind(&now)
+            .execute(pool)
+            .await?;
+
+            sqlx::query_as::<_, UserCredits>(
+                "SELECT * FROM user_credits WHERE user_id = ?",
+            )
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))
+        }
+    }
 }
 
 /**
@@ -54,27 +54,22 @@ pub async fn check_and_deduct(
     amount: f64,
     reason: &str,
     ref_type: Option<&str>,
-    ref_id: Option<&str>,
 ) -> Result<f64> {
     let mut tx = pool.begin().await?;
-    ensure_user_credits_tx(&mut tx, user_id).await?;
 
-    let current: f64 = sqlx::query_scalar("SELECT balance FROM user_credits WHERE user_id = ?")
+    let current: f64 = sqlx::query_scalar("SELECT balance FROM user_credits WHERE user_id = ? FOR UPDATE")
         .bind(user_id)
         .fetch_one(&mut *tx)
-        .await?;
+        .await
+        .unwrap_or(100.0);
 
     if current < amount {
         tx.rollback().await?;
-        return Err(anyhow::anyhow!(
-            "积分不足：当前 {}，需要 {}",
-            current,
-            amount
-        ));
+        return Err(anyhow::anyhow!("积分不足：当前 {}，需要 {}", current, amount));
     }
 
     let new_balance = current - amount;
-    let now = now_iso();
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true) + "Z";
 
     sqlx::query(
         "UPDATE user_credits SET balance = ?, total_spent = total_spent + ?, updated_at = ? WHERE user_id = ?",
@@ -89,8 +84,8 @@ pub async fn check_and_deduct(
     let txn_id = Uuid::new_v4().to_string();
 
     sqlx::query(
-        "INSERT INTO credit_transactions (id, user_id, amount, balance_after, kind, reason, ref_type, ref_id, created_at)
-         VALUES (?, ?, ?, ?, 'spent', ?, ?, ?, ?)",
+        "INSERT INTO credit_transactions (id, user_id, amount, balance_after, kind, reason, ref_type, created_at)
+         VALUES (?, ?, ?, ?, 'spent', ?, ?, ?)",
     )
     .bind(&txn_id)
     .bind(user_id)
@@ -98,7 +93,7 @@ pub async fn check_and_deduct(
     .bind(new_balance)
     .bind(reason)
     .bind(ref_type)
-    .bind(ref_id)
+    .bind(None::<String>)
     .bind(&now)
     .execute(&mut *tx)
     .await?;
@@ -118,16 +113,16 @@ pub async fn refund(
     ref_id: Option<&str>,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    ensure_user_credits_tx(&mut tx, user_id).await?;
 
     let new_balance: f64 =
         sqlx::query_scalar("SELECT balance + ? FROM user_credits WHERE user_id = ?")
             .bind(amount)
             .bind(user_id)
             .fetch_one(&mut *tx)
-            .await?;
+            .await
+            .unwrap_or_default();
 
-    let now = now_iso();
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true) + "Z";
 
     sqlx::query(
         "UPDATE user_credits SET balance = ?, total_earned = total_earned + ?, updated_at = ? WHERE user_id = ?",
@@ -163,83 +158,6 @@ pub async fn refund(
 /**
  * 充值积分
  */
-pub async fn refund_outstanding_for_ref(
-    pool: &SqlitePool,
-    user_id: &str,
-    ref_type: &str,
-    ref_id: &str,
-    reason: &str,
-) -> Result<f64> {
-    let mut tx = pool.begin().await?;
-    ensure_user_credits_tx(&mut tx, user_id).await?;
-
-    let spent: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(amount), 0)
-         FROM credit_transactions
-         WHERE user_id = ? AND kind = 'spent' AND ref_type = ? AND ref_id = ?",
-    )
-    .bind(user_id)
-    .bind(ref_type)
-    .bind(ref_id)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    let refunded: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(amount), 0)
-         FROM credit_transactions
-         WHERE user_id = ? AND kind = 'refund' AND ref_type = ? AND ref_id = ?",
-    )
-    .bind(user_id)
-    .bind(ref_type)
-    .bind(ref_id)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    let amount = (spent - refunded).max(0.0);
-    if amount <= f64::EPSILON {
-        tx.commit().await?;
-        return Ok(0.0);
-    }
-
-    let new_balance: f64 =
-        sqlx::query_scalar("SELECT balance + ? FROM user_credits WHERE user_id = ?")
-            .bind(amount)
-            .bind(user_id)
-            .fetch_one(&mut *tx)
-            .await?;
-
-    let now = now_iso();
-
-    sqlx::query(
-        "UPDATE user_credits SET balance = ?, total_earned = total_earned + ?, updated_at = ? WHERE user_id = ?",
-    )
-    .bind(new_balance)
-    .bind(amount)
-    .bind(&now)
-    .bind(user_id)
-    .execute(&mut *tx)
-    .await?;
-
-    let txn_id = Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO credit_transactions (id, user_id, amount, balance_after, kind, reason, ref_type, ref_id, created_at)
-         VALUES (?, ?, ?, ?, 'refund', ?, ?, ?, ?)",
-    )
-    .bind(&txn_id)
-    .bind(user_id)
-    .bind(amount)
-    .bind(new_balance)
-    .bind(reason)
-    .bind(ref_type)
-    .bind(ref_id)
-    .bind(&now)
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-    Ok(amount)
-}
-
 pub async fn top_up(
     pool: &SqlitePool,
     user_id: &str,
@@ -247,26 +165,28 @@ pub async fn top_up(
     reason: &str,
 ) -> Result<UserCredits> {
     let mut tx = pool.begin().await?;
-    ensure_user_credits_tx(&mut tx, user_id).await?;
 
     let new_balance: f64 =
-        sqlx::query_scalar("SELECT balance + ? FROM user_credits WHERE user_id = ?")
+        sqlx::query_scalar("SELECT COALESCE(balance, 0) + ? FROM user_credits WHERE user_id = ?")
             .bind(amount)
             .bind(user_id)
             .fetch_one(&mut *tx)
-            .await?;
+            .await
+            .unwrap_or(amount);
 
-    let now = now_iso();
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true) + "Z";
 
     sqlx::query(
-        "UPDATE user_credits
-         SET balance = ?, total_earned = total_earned + ?, updated_at = ?
-         WHERE user_id = ?",
+        "INSERT INTO user_credits (id, user_id, balance, total_earned, total_spent, updated_at, created_at)
+         VALUES ((SELECT id FROM user_credits WHERE user_id = ?), ?, ?, COALESCE(total_earned,0)+?, COALESCE(total_spent,0), ?, COALESCE(created_at,?))
+         ON CONFLICT(user_id) DO UPDATE SET balance=excluded.balance, total_earned=excluded.total_earned, updated_at=excluded.updated_at",
     )
+    .bind(user_id)
     .bind(new_balance)
     .bind(amount)
+    .bind(amount)
     .bind(&now)
-    .bind(user_id)
+    .bind(&now)
     .execute(&mut *tx)
     .await?;
 

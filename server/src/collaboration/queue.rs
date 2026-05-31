@@ -18,7 +18,10 @@ pub struct ReplyQueueManager;
 
 impl ReplyQueueManager {
     /// 从数据库加载当前回复队列
-    pub async fn load_queue(pool: &SqlitePool, session_id: &str) -> Result<Vec<QueueEntry>> {
+    pub async fn load_queue(
+        pool: &SqlitePool,
+        session_id: &str,
+    ) -> Result<Vec<QueueEntry>> {
         let session = repo::get_session(pool, session_id).await?;
 
         if let Some(queue_json) = session.reply_queue_json {
@@ -72,7 +75,10 @@ impl ReplyQueueManager {
     }
 
     /// 移除队列头部（当前发言者完成发言）
-    pub async fn dequeue(pool: &SqlitePool, session_id: &str) -> Result<Option<QueueEntry>> {
+    pub async fn dequeue(
+        pool: &SqlitePool,
+        session_id: &str,
+    ) -> Result<Option<QueueEntry>> {
         let mut queue = Self::load_queue(pool, session_id).await?;
 
         if queue.is_empty() {

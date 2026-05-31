@@ -35,19 +35,10 @@ impl SessionState {
                 | (SessionState::Discovery, SessionState::Halted)
                 | (SessionState::Delegating, SessionState::ResolvingQuestions)
                 | (SessionState::Delegating, SessionState::Halted)
-                | (
-                    SessionState::ResolvingQuestions,
-                    SessionState::ResolvingQuestions
-                )
-                | (
-                    SessionState::ResolvingQuestions,
-                    SessionState::WorkspaceAdmission
-                )
+                | (SessionState::ResolvingQuestions, SessionState::ResolvingQuestions)
+                | (SessionState::ResolvingQuestions, SessionState::WorkspaceAdmission)
                 | (SessionState::ResolvingQuestions, SessionState::Halted)
-                | (
-                    SessionState::WorkspaceAdmission,
-                    SessionState::WorkspaceExecution
-                )
+                | (SessionState::WorkspaceAdmission, SessionState::WorkspaceExecution)
                 | (SessionState::WorkspaceAdmission, SessionState::Halted)
                 | (SessionState::WorkspaceExecution, SessionState::Completed)
                 | (SessionState::WorkspaceExecution, SessionState::Halted)
@@ -185,7 +176,6 @@ pub struct CollaborationSession {
     pub state: String,
     pub orchestrator_agent_id: Option<String>,
     pub admission_decision_json: Option<String>,
-    pub pipeline_run_id: Option<String>,
     pub loop_status_json: Option<String>,
     pub reply_queue_json: Option<String>,
     pub round_count: i64,
@@ -348,27 +338,16 @@ mod tests {
             (SessionState::Discovery, SessionState::Halted),
             (SessionState::Delegating, SessionState::ResolvingQuestions),
             (SessionState::Delegating, SessionState::Halted),
-            (
-                SessionState::ResolvingQuestions,
-                SessionState::WorkspaceAdmission,
-            ),
+            (SessionState::ResolvingQuestions, SessionState::WorkspaceAdmission),
             (SessionState::ResolvingQuestions, SessionState::Halted),
-            (
-                SessionState::WorkspaceAdmission,
-                SessionState::WorkspaceExecution,
-            ),
+            (SessionState::WorkspaceAdmission, SessionState::WorkspaceExecution),
             (SessionState::WorkspaceAdmission, SessionState::Halted),
             (SessionState::WorkspaceExecution, SessionState::Completed),
             (SessionState::WorkspaceExecution, SessionState::Halted),
             (SessionState::Halted, SessionState::Discovery),
         ];
         for (from, to) in &valid {
-            assert!(
-                from.can_transition_to(to),
-                "{:?} -> {:?} should be valid",
-                from,
-                to
-            );
+            assert!(from.can_transition_to(to), "{:?} -> {:?} should be valid", from, to);
         }
 
         let invalid = [
@@ -377,12 +356,7 @@ mod tests {
             (SessionState::Halted, SessionState::Completed),
         ];
         for (from, to) in &invalid {
-            assert!(
-                !from.can_transition_to(to),
-                "{:?} -> {:?} should be invalid",
-                from,
-                to
-            );
+            assert!(!from.can_transition_to(to), "{:?} -> {:?} should be invalid", from, to);
         }
     }
 
@@ -399,12 +373,7 @@ mod tests {
             (AssignmentStatus::Running, AssignmentStatus::Failed),
         ];
         for (from, to) in &valid {
-            assert!(
-                from.can_transition_to(to),
-                "{:?} -> {:?} should be valid",
-                from,
-                to
-            );
+            assert!(from.can_transition_to(to), "{:?} -> {:?} should be valid", from, to);
         }
 
         let invalid = [
@@ -413,38 +382,21 @@ mod tests {
             (AssignmentStatus::Failed, AssignmentStatus::Ready),
         ];
         for (from, to) in &invalid {
-            assert!(
-                !from.can_transition_to(to),
-                "{:?} -> {:?} should be invalid",
-                from,
-                to
-            );
+            assert!(!from.can_transition_to(to), "{:?} -> {:?} should be invalid", from, to);
         }
     }
 
     #[test]
     fn session_state_try_from_str() {
-        assert_eq!(
-            SessionState::try_from("discovery").unwrap(),
-            SessionState::Discovery
-        );
-        assert_eq!(
-            SessionState::try_from("halted").unwrap(),
-            SessionState::Halted
-        );
+        assert_eq!(SessionState::try_from("discovery").unwrap(), SessionState::Discovery);
+        assert_eq!(SessionState::try_from("halted").unwrap(), SessionState::Halted);
         assert!(SessionState::try_from("invalid").is_err());
     }
 
     #[test]
     fn assignment_status_try_from_str() {
-        assert_eq!(
-            AssignmentStatus::try_from("idle").unwrap(),
-            AssignmentStatus::Idle
-        );
-        assert_eq!(
-            AssignmentStatus::try_from("ready").unwrap(),
-            AssignmentStatus::Ready
-        );
+        assert_eq!(AssignmentStatus::try_from("idle").unwrap(), AssignmentStatus::Idle);
+        assert_eq!(AssignmentStatus::try_from("ready").unwrap(), AssignmentStatus::Ready);
         assert!(AssignmentStatus::try_from("invalid").is_err());
     }
 }

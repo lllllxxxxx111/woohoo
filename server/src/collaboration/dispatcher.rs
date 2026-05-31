@@ -18,10 +18,13 @@ impl Dispatcher {
     ) -> Result<DispatchResult> {
         let session = repo::get_session(pool, session_id).await?;
 
-        let current_state =
-            SessionState::try_from(session.state.as_str()).map_err(|e| anyhow::anyhow!("{}", e))?;
+        let current_state = SessionState::try_from(session.state.as_str())
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         if current_state != SessionState::Discovery && current_state != SessionState::Delegating {
-            return Err(anyhow::anyhow!("当前状态 {} 不允许分派", session.state));
+            return Err(anyhow::anyhow!(
+                "当前状态 {} 不允许分派",
+                session.state
+            ));
         }
 
         if current_state == SessionState::Discovery {
@@ -42,7 +45,7 @@ impl Dispatcher {
                 .map(|v| serde_json::to_string(v))
                 .transpose()?;
 
-            let mut assignment = repo::create_assignment(
+            let assignment = repo::create_assignment(
                 pool,
                 session_id,
                 &item.agent_id,
@@ -53,13 +56,6 @@ impl Dispatcher {
             )
             .await?;
 
-            let new_status = if item.depends_on.is_empty() {
-                assignment = repo::update_assignment_status(pool, &assignment.id, "ready").await?;
-                "ready"
-            } else {
-                "assigned"
-            };
-
             let _ = repo::create_event(
                 pool,
                 session_id,
@@ -69,7 +65,7 @@ impl Dispatcher {
                         "assignmentId": assignment.id,
                         "agentId": assignment.agent_id,
                         "oldStatus": "idle",
-                        "newStatus": new_status
+                        "newStatus": "assigned"
                     })
                     .to_string(),
                 ),
@@ -79,9 +75,12 @@ impl Dispatcher {
             created.push(assignment);
         }
 
-        let _ =
-            repo::update_session_state(pool, session_id, SessionState::ResolvingQuestions.as_str())
-                .await?;
+        let _ = repo::update_session_state(
+            pool,
+            session_id,
+            SessionState::ResolvingQuestions.as_str(),
+        )
+        .await?;
 
         ReplyQueueManager::initialize_from_assignments(pool, session_id).await?;
 
@@ -122,8 +121,8 @@ impl Dispatcher {
             if current == AssignmentStatus::Assigned || current == AssignmentStatus::Questioning {
                 let _ = repo::update_assignment_status(pool, &assignment.id, "questioning").await;
             }
-            let _ =
-                repo::increment_blocking_question_count(pool, &assignment.id, fingerprint).await;
+            let _ = repo::increment_blocking_question_count(pool, &assignment.id, fingerprint)
+                .await;
         }
 
         let next_order = repo::get_next_queue_order(pool, session_id).await?;

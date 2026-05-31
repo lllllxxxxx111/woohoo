@@ -29,7 +29,6 @@ pub struct UserCredits {
     pub balance: f64,
     pub total_earned: f64,
     pub total_spent: f64,
-    pub updated_at: String,
     pub created_at: String,
 }
 

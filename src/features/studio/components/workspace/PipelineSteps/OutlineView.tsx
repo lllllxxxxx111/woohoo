@@ -10,6 +10,8 @@ import {
   Eye,
   PencilLine,
   ArrowRight,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -361,6 +363,7 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [manualReviewOwner, setManualReviewOwner] = useState('');
   const [manualReviewNote, setManualReviewNote] = useState('');
+  const [isReviewPanelCollapsed, setIsReviewPanelCollapsed] = useState(true);
   const [selectedManualReviewStepId, setSelectedManualReviewStepId] = useState<string | null>(null);
   const focusedRunIdRef = useRef<string | null>(null);
   const lastSyncedOutlineSourceKeyRef = useRef<string | null>(null);
@@ -1039,6 +1042,13 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
         : outlineReviewStep?.status === 'queued'
           ? '等待后端调度审核任务。'
           : '');
+  const reviewCompactSummary = latestReviewOutput
+    ? `结论 ${getReviewDecisionLabel(latestReviewOutput.reviewDecision)} · 评分 ${formatReviewScore(
+        latestReviewOutput.reviewScore,
+      )} · 问题 ${latestReviewIssues.length} 条`
+    : latestReviewSummaryText
+      ? latestReviewSummaryText
+      : reviewFallbackMessage;
   const manualReviewEvents = currentRun
     ? currentRun.recentEvents.filter((event) => {
         const payload = parseEventPayload(event.payloadJson);
@@ -1289,7 +1299,19 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
         {currentRun && (
           <div className={styles.panelBlock}>
             <h4 className={styles.panelTitle}>审核结果与产出</h4>
-            {latestReviewOutput ? (
+            <div className={styles.reviewPanelToolbar}>
+              <div className={styles.reviewCompactSummary}>{reviewCompactSummary}</div>
+              <button
+                type="button"
+                className={styles.panelToggleButton}
+                onClick={() => setIsReviewPanelCollapsed((value) => !value)}
+                aria-expanded={!isReviewPanelCollapsed}
+              >
+                {isReviewPanelCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+                {isReviewPanelCollapsed ? '展开' : '收起'}
+              </button>
+            </div>
+            {!isReviewPanelCollapsed && (latestReviewOutput ? (
               <div className={styles.outputCard}>
                 <div className={styles.outputHeader}>
                   <div className={styles.outputTitleGroup}>
@@ -1442,7 +1464,7 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
                   </details>
                 )}
               </div>
-            )}
+            ))}
           </div>
         )}
       </div>

@@ -574,12 +574,12 @@ async function probeServerBaseUrl(baseUrl: string) {
 
     const ok = Boolean(
       parsed &&
-        typeof parsed === 'object' &&
-        'service' in parsed &&
-        parsed.service === 'woohoo-server' &&
-        'status' in parsed &&
-        typeof parsed.status === 'string' &&
-        parsed.status.toLowerCase() === 'ok',
+      typeof parsed === 'object' &&
+      'service' in parsed &&
+      parsed.service === 'woohoo-server' &&
+      'status' in parsed &&
+      typeof parsed.status === 'string' &&
+      parsed.status.toLowerCase() === 'ok',
     );
     if (ok) {
       markServerBaseUrlReachable(baseUrl);

@@ -276,7 +276,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         Boolean(state.serverAiEndpointId) &&
         state.aiSettings.provider.trim().toLowerCase() === nextSettings.provider.trim().toLowerCase() &&
         normalizeAiBaseUrl(state.aiSettings.provider, state.aiSettings.baseUrl) ===
-          normalizeAiBaseUrl(nextSettings.provider, nextSettings.baseUrl);
+        normalizeAiBaseUrl(nextSettings.provider, nextSettings.baseUrl);
 
       return {
         aiSettings: nextSettings,

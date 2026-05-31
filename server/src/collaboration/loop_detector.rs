@@ -30,7 +30,10 @@ pub struct LoopDetector;
 
 impl LoopDetector {
     /// 执行循环检测，返回检测到的信号列表
-    pub async fn detect(pool: &SqlitePool, session_id: &str) -> Result<Vec<LoopSignal>> {
+    pub async fn detect(
+        pool: &SqlitePool,
+        session_id: &str,
+    ) -> Result<Vec<LoopSignal>> {
         let session = repo::get_session(pool, session_id).await?;
 
         if session.round_count < 5 {
@@ -53,7 +56,10 @@ impl LoopDetector {
     ) -> Result<Vec<LoopSignal>> {
         let fingerprints = repo::get_recent_fingerprints(pool, session_id, 5).await?;
 
-        let non_empty: Vec<&str> = fingerprints.iter().filter_map(|fp| fp.as_deref()).collect();
+        let non_empty: Vec<&str> = fingerprints
+            .iter()
+            .filter_map(|fp| fp.as_deref())
+            .collect();
 
         if non_empty.len() < 3 {
             return Ok(vec![]);
@@ -72,7 +78,10 @@ impl LoopDetector {
     }
 
     /// 检查是否有状态变化
-    async fn check_no_state_change(pool: &SqlitePool, session_id: &str) -> Result<Vec<LoopSignal>> {
+    async fn check_no_state_change(
+        pool: &SqlitePool,
+        session_id: &str,
+    ) -> Result<Vec<LoopSignal>> {
         let session = repo::get_session(pool, session_id).await?;
         let assignments = repo::list_assignments(pool, session_id).await?;
 
@@ -93,7 +102,10 @@ impl LoopDetector {
     }
 
     /// 检查两个智能体之间是否来回转发
-    async fn check_ping_pong(pool: &SqlitePool, session_id: &str) -> Result<Vec<LoopSignal>> {
+    async fn check_ping_pong(
+        pool: &SqlitePool,
+        session_id: &str,
+    ) -> Result<Vec<LoopSignal>> {
         let messages = repo::list_messages(pool, session_id).await?;
 
         let recent_questions: Vec<_> = messages

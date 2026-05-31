@@ -552,7 +552,9 @@ impl AiClient {
             .json(&req)
             .send()
             .await
-            .map_err(|e| AppError::Internal(format!("AI 调用失败: {}", e)))?;
+            .map_err(|e| {
+                AppError::Internal(format!("AI 调用失败: {}", summarize_reqwest_error(&e)))
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -813,7 +815,9 @@ impl AiClient {
             .json(&req)
             .send()
             .await
-            .map_err(|e| AppError::Internal(format!("AI 调用失败: {}", e)))?;
+            .map_err(|e| {
+                AppError::Internal(format!("AI 调用失败: {}", summarize_reqwest_error(&e)))
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();

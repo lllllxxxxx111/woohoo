@@ -42,7 +42,6 @@ impl TryFrom<&str> for ImageGenerationStatus {
 pub struct ImageGeneration {
     pub id: String,
     pub user_id: String,
-    pub project_id: Option<String>,
     pub prompt: String,
     pub model: String,
     pub size: String,
@@ -51,7 +50,6 @@ pub struct ImageGeneration {
     pub error_message: Option<String>,
     pub result_urls: Option<String>,
     pub result_b64_json: Option<String>,
-    pub asset_ids: Option<String>,
     pub revised_prompt: Option<String>,
     pub cost_credits: f64,
     pub created_at: String,
@@ -62,8 +60,6 @@ pub struct ImageGeneration {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateImageGenerationReq {
-    pub project_id: String,
-    pub endpoint_id: Option<String>,
     pub prompt: String,
     #[serde(default = "default_model")]
     pub model: String,
@@ -78,16 +74,13 @@ pub struct CreateImageGenerationReq {
 #[serde(rename_all = "camelCase")]
 pub struct ImageGenerationResponse {
     pub id: String,
-    pub project_id: Option<String>,
     pub prompt: String,
     pub model: String,
     pub size: String,
-    pub n: i64,
     pub status: String,
     pub error_message: Option<String>,
     pub urls: Vec<String>,
     pub b64_data: Vec<String>,
-    pub asset_ids: Vec<String>,
     pub revised_prompt: Option<String>,
     pub cost_credits: f64,
     pub created_at: String,

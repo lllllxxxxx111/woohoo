@@ -1,4 +1,7 @@
-use axum::{extract::State, Json};
+use axum::{
+    extract::State,
+    Json,
+};
 
 use crate::auth::middleware::UserId;
 use crate::error::AppError;
