@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::SqlitePool;
 
-use super::model::{AssignmentStatus, SessionState};
+use super::model::{AssignmentStatus, CollaborationMessage, SessionState};
 use super::queue::ReplyQueueManager;
 use super::repo;
 
@@ -105,6 +105,7 @@ impl Dispatcher {
     }
 
     /// 处理智能体提问：将下游 assignment 标记为 questioning/blocked，更新回复队列
+    /// 返回创建的消息对象，避免调用方重新查询
     pub async fn handle_question(
         pool: &SqlitePool,
         session_id: &str,
@@ -112,7 +113,7 @@ impl Dispatcher {
         target_agent_id: &str,
         content: &str,
         fingerprint: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<CollaborationMessage> {
         let assignments = repo::list_assignments(pool, session_id).await?;
 
         if let Some(assignment) = assignments.iter().find(|a| a.agent_id == source_agent_id) {
@@ -127,7 +128,7 @@ impl Dispatcher {
 
         let next_order = repo::get_next_queue_order(pool, session_id).await?;
 
-        let _ = repo::create_message(
+        let message = repo::create_message(
             pool,
             session_id,
             Some(source_agent_id),
@@ -159,10 +160,11 @@ impl Dispatcher {
 
         let _ = repo::increment_round_count(pool, session_id).await;
 
-        Ok(())
+        Ok(message)
     }
 
     /// 处理智能体回答：将下游 assignment 从 blocked/questioning → ready，更新回复队列
+    /// 返回创建的消息对象，避免调用方重新查询
     pub async fn handle_answer(
         pool: &SqlitePool,
         session_id: &str,
@@ -170,7 +172,7 @@ impl Dispatcher {
         target_agent_id: &str,
         content: &str,
         reply_to_message_id: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<CollaborationMessage> {
         let assignments = repo::list_assignments(pool, session_id).await?;
 
         if let Some(assignment) = assignments.iter().find(|a| a.agent_id == target_agent_id) {
@@ -183,7 +185,7 @@ impl Dispatcher {
 
         let next_order = repo::get_next_queue_order(pool, session_id).await?;
 
-        let _ = repo::create_message(
+        let message = repo::create_message(
             pool,
             session_id,
             Some(source_agent_id),
@@ -215,7 +217,7 @@ impl Dispatcher {
 
         let _ = repo::increment_round_count(pool, session_id).await;
 
-        Ok(())
+        Ok(message)
     }
 }
 

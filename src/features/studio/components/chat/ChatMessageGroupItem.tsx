@@ -1154,7 +1154,11 @@ const MessageItem = React.memo<MessageItemProps>(
                     meta?.taskId && (
                       <button
                         className={styles.cancelTaskBtn}
-                        onClick={() => cancelTask(meta.taskId!).catch(() => {})}
+                        onClick={() => {
+                          if (meta?.taskId) {
+                            cancelTask(meta.taskId).catch(() => {});
+                          }
+                        }}
                         title="取消此任务"
                         type="button"
                       >

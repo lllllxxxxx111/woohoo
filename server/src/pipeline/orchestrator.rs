@@ -120,11 +120,27 @@ async fn run_orchestrator_loop(state: AppState) {
     let mut ticker = interval(Duration::from_secs(ORCHESTRATOR_INTERVAL_SECS));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+    // 互斥锁防止 tick 重叠执行（当某次 tick 耗时超过间隔时）
+    let tick_lock = tokio::sync::Mutex::new(());
+
     loop {
         ticker.tick().await;
+
+        // 获取锁，如果上一个 tick 还在执行则等待
+        // 使用 try_lock 跳过而非等待，避免 tick 堆积
+        let guard = match tick_lock.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                tracing::debug!("pipeline orchestrator tick skipped: previous tick still running");
+                continue;
+            }
+        };
+
         if let Err(error) = run_orchestrator_once(&state).await {
             tracing::warn!("pipeline orchestrator tick failed: {}", error);
         }
+
+        drop(guard);
     }
 }
 
@@ -1297,6 +1313,8 @@ async fn handle_task_failure(
     Ok(true)
 }
 
+/// 判断步骤是否仍可重试
+/// max_retries 表示最大重试次数（不含首次执行），总尝试次数 = 1 + max_retries
 fn can_retry_step(step: &PipelineStepRow) -> bool {
     step.attempt_count <= step.max_retries
 }

@@ -2,10 +2,10 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use std::env;
 use sqlx::SqlitePool;
+use std::env;
+use std::time::Duration;
 
-use crate::ai::client::AiClient;
 use crate::auth::middleware::UserId;
 use crate::error::AppError;
 use crate::AppState;
@@ -13,26 +13,43 @@ use crate::AppState;
 use super::model::*;
 use super::repo;
 
-/**
- * 创建图片生成任务
- * 调用 OpenAI 兼容的图片生成 API（如 DALL-E 3）
- * 支持计费扣减和失败回退
- */
+/// 图片生成 API 调用超时时间（秒）
+const IMAGE_GEN_TIMEOUT_SECS: u64 = 120;
+
+/// 创建图片生成任务
+///
+/// 执行顺序：校验 → 扣费 → 创建记录 → 调用 API → 更新状态
+/// 先扣费再创建记录，避免崩溃后产生未扣费的 pending 记录导致误退款
 pub async fn create_generation(
     State(state): State<AppState>,
     axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
     Json(req): Json<CreateImageGenerationReq>,
 ) -> Result<Json<ImageGenerationResponse>, AppError> {
     if req.prompt.trim().is_empty() {
-        return Err(AppError::BadRequest("prompt 不能为空".to_string()));
+        return Err(AppError::BadRequest("prompt cannot be empty".to_string()));
+    }
+
+    if req.n < 1 || req.n > 10 {
+        return Err(AppError::BadRequest(
+            "n must be between 1 and 10".to_string(),
+        ));
     }
 
     let cost = calculate_cost(&req.model, &req.size, req.n);
 
-    crate::billing::repo::check_and_deduct(&state.db, &user_id.0, cost, "image_generation", None)
-        .await
-        .map_err(|e: anyhow::Error| AppError::PaymentRequired(e.to_string()))?;
+    // 先扣费，避免创建记录后崩溃导致非原子问题
+    crate::billing::repo::check_and_deduct(
+        &state.db,
+        &user_id.0,
+        cost,
+        "image_generation",
+        Some("image_generation"),
+        None,
+    )
+    .await
+    .map_err(|error| AppError::PaymentRequired(error.to_string()))?;
 
+    // 扣费成功后创建 generation 记录
     let generation = repo::create_generation(
         &state.db,
         &user_id.0,
@@ -40,20 +57,62 @@ pub async fn create_generation(
         &req.model,
         &req.size,
         req.n,
+        cost,
     )
     .await
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    .map_err(|error| {
+        // 创建记录失败，立即退款
+        let user_id_clone = user_id.0.clone();
+        let db_clone = state.db.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::billing::repo::refund(
+                &db_clone,
+                &user_id_clone,
+                cost,
+                "image_generation_record_create_failed",
+                None,
+            )
+            .await
+            {
+                tracing::error!(error = %e, "创建记录失败后退款也失败");
+            }
+        });
+        AppError::Internal(error.to_string())
+    })?;
+
+    // 更新扣费记录的 ref_id 为 generation id
+    if let Err(e) = crate::billing::repo::update_spent_ref_id(
+        &state.db,
+        &user_id.0,
+        "image_generation",
+        &generation.id,
+    )
+    .await
+    {
+        tracing::warn!(generation_id = %generation.id, error = %e, "更新扣费记录 ref_id 失败，不影响主流程");
+    }
 
     repo::set_processing(&state.db, &generation.id)
         .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+        .map_err(|error| {
+            tracing::error!(generation_id = %generation.id, error = %error, "set_processing 失败，积分已扣");
+            AppError::Internal(error.to_string())
+        })?;
 
-    let base_url = env::var("AI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".to_string());
-    let api_key = env::var("AI_API_KEY").unwrap_or_default();
-    let client = AiClient::new();
+    let base_url = env::var("AI_BASE_URL")
+        .unwrap_or_else(|_| "https://api.openai.com".to_string());
+    let api_key = env::var("AI_API_KEY")
+        .unwrap_or_else(|_| {
+            tracing::warn!("AI_API_KEY 环境变量未设置，图片生成 API 调用将失败");
+            String::new()
+        });
 
-    match client
-        .generate_image(
+    let client = &state.ai_client;
+
+    // 带超时的 API 调用，防止长时间阻塞
+    let generate_result = tokio::time::timeout(
+        Duration::from_secs(IMAGE_GEN_TIMEOUT_SECS),
+        client.generate_image(
             &base_url,
             &api_key,
             &req.model,
@@ -61,19 +120,24 @@ pub async fn create_generation(
             &req.size,
             req.n as u32,
             "b64_json",
-        )
-        .await
-    {
-        Ok(resp) => {
+        ),
+    )
+    .await;
+
+    match generate_result {
+        Ok(Ok(response)) => {
             let mut urls = Vec::new();
             let mut b64_data = Vec::new();
-            let revised_prompt = resp.data.first().and_then(|d| d.revised_prompt.clone());
+            let revised_prompt = response
+                .data
+                .first()
+                .and_then(|item| item.revised_prompt.clone());
 
-            for item in &resp.data {
-                if let Some(ref url) = item.url {
+            for item in &response.data {
+                if let Some(url) = &item.url {
                     urls.push(url.clone());
                 }
-                if let Some(ref b64) = item.b64_json {
+                if let Some(b64) = &item.b64_json {
                     b64_data.push(b64.clone());
                 }
             }
@@ -82,87 +146,119 @@ pub async fn create_generation(
                 &state.db,
                 &generation.id,
                 &urls,
-                b64_data.first().map(|s| s.as_str()),
+                b64_data.first().map(|value| value.as_str()),
                 revised_prompt.as_deref(),
                 cost,
             )
             .await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+            .map_err(|error| AppError::Internal(error.to_string()))?;
         }
-        Err(err) => {
-            crate::billing::repo::refund(&state.db, &user_id.0, cost, "image_generation_failed", Some(&generation.id))
-                .await
-                .ok();
-
-            repo::set_failed(
-                &state.db,
-                &generation.id,
-                &err.to_string(),
-            )
-            .await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-
-            return Err(AppError::Internal(format!("图片生成失败: {}", err)));
+        Ok(Err(error)) => {
+            refund_and_fail(&state, &user_id.0, &generation.id, cost, &error.to_string()).await?;
+            return Err(AppError::Internal(format!(
+                "image generation failed: {}",
+                error
+            )));
+        }
+        Err(_) => {
+            let timeout_msg = format!(
+                "image generation timed out after {}s",
+                IMAGE_GEN_TIMEOUT_SECS
+            );
+            refund_and_fail(&state, &user_id.0, &generation.id, cost, &timeout_msg).await?;
+            return Err(AppError::Internal(timeout_msg));
         }
     }
 
-    build_generation_response(&state.db, &generation.id).await
+    build_generation_response(&state.db, &generation.id, &user_id.0).await
 }
 
-/**
- * 查询图片生成记录详情
- */
+/// 退款并标记 generation 为失败
+async fn refund_and_fail(
+    state: &AppState,
+    user_id: &str,
+    generation_id: &str,
+    cost: f64,
+    error_msg: &str,
+) -> Result<(), AppError> {
+    if let Err(refund_err) = crate::billing::repo::refund(
+        &state.db,
+        user_id,
+        cost,
+        "image_generation_failed",
+        Some(generation_id),
+    )
+    .await
+    {
+        tracing::error!(
+            generation_id = %generation_id,
+            error = %refund_err,
+            "退款失败，用户积分可能丢失"
+        );
+    }
+
+    repo::set_failed(&state.db, generation_id, error_msg)
+        .await
+        .map_err(|repo_error| AppError::Internal(repo_error.to_string()))?;
+
+    Ok(())
+}
+
+/// 查询单个图片生成结果（含用户归属校验）
 pub async fn get_generation(
     State(state): State<AppState>,
+    axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
     Path(generation_id): Path<String>,
 ) -> Result<Json<ImageGenerationResponse>, AppError> {
-    build_generation_response(&state.db, &generation_id).await
+    build_generation_response(&state.db, &generation_id, &user_id.0).await
 }
 
-/**
- * 查询用户的图片生成历史
- */
+/// 列出当前用户的图片生成记录
 pub async fn list_generations(
     State(state): State<AppState>,
     axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
 ) -> Result<Json<Vec<ImageGenerationResponse>>, AppError> {
-    let gens = repo::list_user_generations(&state.db, &user_id.0, 50, 0)
+    let generations = repo::list_user_generations(&state.db, &user_id.0, 50, 0)
         .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+        .map_err(|error| AppError::Internal(error.to_string()))?;
 
-    let results: Vec<ImageGenerationResponse> = gens
-        .into_iter()
-        .map(gen_to_response)
-        .collect();
-
-    Ok(Json(results))
+    Ok(Json(
+        generations
+            .into_iter()
+            .map(generation_to_response)
+            .collect(),
+    ))
 }
 
-/**
- * 从数据库记录构建响应对象
- */
-async fn build_generation_response(db: &SqlitePool, generation_id: &str) -> Result<Json<ImageGenerationResponse>, AppError> {
-    let gen = repo::get_generation(db, generation_id)
+/// 构建图片生成响应，校验用户归属
+async fn build_generation_response(
+    db: &SqlitePool,
+    generation_id: &str,
+    user_id: &str,
+) -> Result<Json<ImageGenerationResponse>, AppError> {
+    let generation = repo::get_generation(db, generation_id)
         .await
-        .map_err(|e| AppError::NotFound(format!("图片生成记录不存在: {}", e)))?;
+        .map_err(|error| AppError::NotFound(format!("image generation not found: {}", error)))?;
 
-    Ok(Json(gen_to_response(gen)))
+    if generation.user_id != user_id {
+        return Err(AppError::Forbidden("无权访问此图片生成记录".to_string()));
+    }
+
+    Ok(Json(generation_to_response(generation)))
 }
 
-/**
- * 将数据库行转换为响应对象（用于列表查询）
- */
-fn gen_to_response(row: crate::image_gen::model::ImageGeneration) -> ImageGenerationResponse {
-    let result_urls: Vec<String> = row
+fn generation_to_response(row: crate::image_gen::model::ImageGeneration) -> ImageGenerationResponse {
+    let urls: Vec<String> = row
         .result_urls
         .as_ref()
-        .and_then(|s| serde_json::from_str(s).ok())
+        .and_then(|value| serde_json::from_str(value).ok())
         .unwrap_or_default();
-    let result_b64: Vec<String> = row
+
+    let b64_data: Vec<String> = row
         .result_b64_json
         .as_ref()
-        .filter(|s| !s.is_empty())
-        .map(|s| vec![s.clone()])
+        .filter(|value| !value.is_empty())
+        .map(|value| vec![value.clone()])
         .unwrap_or_default();
 
     ImageGenerationResponse {
@@ -172,8 +268,8 @@ fn gen_to_response(row: crate::image_gen::model::ImageGeneration) -> ImageGenera
         size: row.size,
         status: row.status,
         error_message: row.error_message,
-        urls: result_urls,
-        b64_data: result_b64,
+        urls,
+        b64_data,
         revised_prompt: row.revised_prompt,
         cost_credits: row.cost_credits,
         created_at: row.created_at,
@@ -181,9 +277,7 @@ fn gen_to_response(row: crate::image_gen::model::ImageGeneration) -> ImageGenera
     }
 }
 
-/**
- * 根据模型、尺寸和数量计算消耗的积分
- */
+/// 根据模型、尺寸、数量计算积分消耗
 fn calculate_cost(model: &str, size: &str, n: i64) -> f64 {
     let base_cost = match model {
         "dall-e-3" => 5.0,

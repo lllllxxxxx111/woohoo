@@ -4,6 +4,7 @@ use axum::{
 };
 use serde_json::json;
 
+use crate::auth::middleware::UserId;
 use crate::error::AppError;
 use crate::AppState;
 
@@ -12,15 +13,32 @@ use super::loop_detector;
 use super::model::*;
 use super::repo;
 
+/// 校验会话归属当前用户，防止越权访问
+async fn verify_session_owner(
+    state: &AppState,
+    session_id: &str,
+    user_id: &UserId,
+) -> Result<CollaborationSession, AppError> {
+    let session = repo::get_session(&state.db, session_id)
+        .await
+        .map_err(|e| AppError::NotFound(format!("协同会话不存在: {}", e)))?;
+
+    if session.user_id != user_id.0 {
+        return Err(AppError::Forbidden("无权访问此协同会话".to_string()));
+    }
+
+    Ok(session)
+}
+
 /// 创建协同会话
 pub async fn create_session(
     axum::extract::State(state): axum::extract::State<AppState>,
-    axum::extract::Extension(user_id): axum::extract::Extension<String>,
+    axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
     Json(req): Json<CreateSessionReq>,
 ) -> Result<Json<CollaborationSession>, AppError> {
     let session = repo::create_session(
         &state.db,
-        &user_id,
+        &user_id.0,
         &req.project_id,
         &req.conversation_id,
         req.entry_message_id.as_deref(),
@@ -50,11 +68,10 @@ pub async fn create_session(
 /// 查询协同会话详情
 pub async fn get_session(
     State(state): State<AppState>,
+    axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionSummary>, AppError> {
-    let session = repo::get_session(&state.db, &session_id)
-        .await
-        .map_err(|e| AppError::NotFound(format!("协同会话不存在: {}", e)))?;
+    let session = verify_session_owner(&state, &session_id, &user_id).await?;
 
     let assignments = repo::list_assignments(&state.db, &session_id)
         .await
@@ -69,9 +86,12 @@ pub async fn get_session(
 /// 编导分派任务
 pub async fn dispatch(
     State(state): State<AppState>,
+    axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
     Path(session_id): Path<String>,
     Json(req): Json<DispatchReq>,
 ) -> Result<Json<DispatchResponse>, AppError> {
+    verify_session_owner(&state, &session_id, &user_id).await?;
+
     let items: Vec<DispatchItem> = req
         .assignments
         .into_iter()
@@ -97,16 +117,15 @@ pub async fn dispatch(
 /// 发送协同消息
 pub async fn send_message(
     State(state): State<AppState>,
+    axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
     Path(session_id): Path<String>,
     Json(req): Json<SendMessageReq>,
 ) -> Result<Json<CollaborationMessage>, AppError> {
-    let _session = repo::get_session(&state.db, &session_id)
-        .await
-        .map_err(|e| AppError::NotFound(format!("协同会话不存在: {}", e)))?;
+    verify_session_owner(&state, &session_id, &user_id).await?;
 
     match req.message_kind.as_str() {
         "question" => {
-            dispatcher::Dispatcher::handle_question(
+            let message = dispatcher::Dispatcher::handle_question(
                 &state.db,
                 &session_id,
                 req.source_agent_id.as_deref().unwrap_or(""),
@@ -117,14 +136,10 @@ pub async fn send_message(
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            let messages = repo::list_messages(&state.db, &session_id)
-                .await
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-            let last = messages.last().cloned();
-            Ok(Json(last.ok_or_else(|| AppError::Internal("消息创建失败".to_string()))?))
+            Ok(Json(message))
         }
         "answer" => {
-            dispatcher::Dispatcher::handle_answer(
+            let message = dispatcher::Dispatcher::handle_answer(
                 &state.db,
                 &session_id,
                 req.source_agent_id.as_deref().unwrap_or(""),
@@ -135,11 +150,7 @@ pub async fn send_message(
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            let messages = repo::list_messages(&state.db, &session_id)
-                .await
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-            let last = messages.last().cloned();
-            Ok(Json(last.ok_or_else(|| AppError::Internal("消息创建失败".to_string()))?))
+            Ok(Json(message))
         }
         _ => {
             let next_order = repo::get_next_queue_order(&state.db, &session_id)
@@ -170,11 +181,10 @@ pub async fn send_message(
 /// 循环检测
 pub async fn loop_check(
     State(state): State<AppState>,
+    axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
     Path(session_id): Path<String>,
 ) -> Result<Json<LoopCheckResponse>, AppError> {
-    let session = repo::get_session(&state.db, &session_id)
-        .await
-        .map_err(|e| AppError::NotFound(format!("协同会话不存在: {}", e)))?;
+    verify_session_owner(&state, &session_id, &user_id).await?;
 
     let signals = loop_detector::LoopDetector::detect(&state.db, &session_id)
         .await
@@ -189,6 +199,10 @@ pub async fn loop_check(
             message: "未检测到循环风险".to_string(),
         }));
     }
+
+    let session = repo::get_session(&state.db, &session_id)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let level = loop_detector::LoopDetector::calculate_level(&signals, session.round_count);
 
@@ -248,11 +262,10 @@ pub async fn loop_check(
 /// 入工作区判定
 pub async fn admit(
     State(state): State<AppState>,
+    axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
     Path(session_id): Path<String>,
 ) -> Result<Json<AdmitResponse>, AppError> {
-    let session = repo::get_session(&state.db, &session_id)
-        .await
-        .map_err(|e| AppError::NotFound(format!("协同会话不存在: {}", e)))?;
+    let session = verify_session_owner(&state, &session_id, &user_id).await?;
 
     let current_state = SessionState::try_from(session.state.as_str())
         .map_err(|e| AppError::BadRequest(e))?;
@@ -307,18 +320,21 @@ pub async fn admit(
         }));
     }
 
-    let _ = repo::update_session_state(&state.db, &session_id, "workspace_admission")
+    repo::update_session_state(&state.db, &session_id, "workspace_admission")
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    let _ = repo::update_admission_decision(
+    if let Err(e) = repo::update_admission_decision(
         &state.db,
         &session_id,
         &json!({"admitted": true, "reason": "大纲智能体就绪，关键依赖链无阻塞"}).to_string(),
     )
-    .await;
+    .await
+    {
+        tracing::warn!(session_id = %session_id, error = %e, "更新入场判定记录失败");
+    }
 
-    let _ = repo::create_event(
+    if let Err(e) = repo::create_event(
         &state.db,
         &session_id,
         "collaboration_admission_changed",
@@ -330,7 +346,10 @@ pub async fn admit(
             .to_string(),
         ),
     )
-    .await;
+    .await
+    {
+        tracing::warn!(session_id = %session_id, error = %e, "创建入场事件记录失败");
+    }
 
     Ok(Json(AdmitResponse {
         admitted: true,
@@ -343,12 +362,11 @@ pub async fn admit(
 /// 暂停协同
 pub async fn halt(
     State(state): State<AppState>,
+    axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
     Path(session_id): Path<String>,
     Json(req): Json<HaltReq>,
 ) -> Result<Json<CollaborationSession>, AppError> {
-    let session = repo::get_session(&state.db, &session_id)
-        .await
-        .map_err(|e| AppError::NotFound(format!("协同会话不存在: {}", e)))?;
+    let session = verify_session_owner(&state, &session_id, &user_id).await?;
 
     let current_state = SessionState::try_from(session.state.as_str())
         .map_err(|e| AppError::BadRequest(e))?;
@@ -364,7 +382,7 @@ pub async fn halt(
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    let _ = repo::create_event(
+    if let Err(e) = repo::create_event(
         &state.db,
         &session_id,
         "collaboration_session_halted",
@@ -376,7 +394,10 @@ pub async fn halt(
             .to_string(),
         ),
     )
-    .await;
+    .await
+    {
+        tracing::warn!(session_id = %session_id, error = %e, "创建暂停事件记录失败");
+    }
 
     Ok(Json(session))
 }

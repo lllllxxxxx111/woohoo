@@ -11,7 +11,6 @@
     "drill:rollback:local": "node scripts/run-local-rollback-drill.mjs",
     "drill:rollback:cross-version": "node scripts/run-cross-version-rollback-drill.mjs",
     "build": "tsc && vite build",
-    "build:image-studio": "vite build --config vite.image-studio.config.ts",
     "lint": "eslint src/ --ext .ts,.tsx",
     "lint:fix": "eslint src/ --ext .ts,.tsx --fix",
     "format": "prettier --write src vite.config.ts eslint.config.js package.json tsconfig.json tsconfig.node.json .prettierrc.json",
