@@ -1,48 +1,4 @@
-<p align="center">
-  <img src="docs/screenshots/logo.png" alt="Woohoo Studio" width="120" />
-</p>
-
-<h1 align="center">Woohoo Studio</h1>
-
-<p align="center">
-  <strong>AI 驱动的短剧/影视创作工作台</strong>
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/Rust-Axum_0.8-orange" alt="Rust" />
-  <img src="https://img.shields.io/badge/React-18_TypeScript-blue" alt="React" />
-  <img src="https://img.shields.io/badge/SQLite-sqlx_0.8-green" alt="SQLite" />
-  <img src="https://img.shields.io/badge/License-MIT-yellow" alt="License" />
-</p>
-
----
-
-## 截图预览
-
-<table>
-  <tr>
-    <td align="center"><b>创意对话</b></td>
-    <td align="center"><b>制作流水线</b></td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshots/chat.png" alt="创意对话" width="480" /></td>
-    <td><img src="docs/screenshots/pipeline.png" alt="制作流水线" width="480" /></td>
-  </tr>
-  <tr>
-    <td align="center"><b>图片生成</b></td>
-    <td align="center"><b>资产管理</b></td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshots/image-gen.png" alt="图片生成" width="480" /></td>
-    <td><img src="docs/screenshots/assets.png" alt="资产管理" width="480" /></td>
-  </tr>
-</table>
-
-> 截图占位 — 请将实际截图放入 `docs/screenshots/` 目录
-
----
-
-## 功能特性
+功能特性
 
 ### 核心功能
 
@@ -61,21 +17,21 @@
 - **请求追踪** — 全链路 `x-request-id` 请求追踪
 - **暗色主题** — 基于 Arco Design 的深色 UI 风格
 
----
+***
 
 ## 技术栈
 
-| 层级 | 技术 | 说明 |
-|------|------|------|
-| **前端** | React 18 + TypeScript + Vite 5 | SPA 单页应用 |
-| **UI** | Arco Design + Lucide Icons | 字节跳动组件库 |
-| **状态管理** | Zustand 5 | 轻量全局状态 |
-| **后端** | Rust (Axum 0.8) + Tokio | 高性能异步 Web 服务 |
-| **数据库** | SQLite (sqlx 0.8) | 嵌入式零配置 |
-| **认证** | JWT + bcrypt | 安全认证体系 |
-| **桌面端** | Tauri 2.x（可选） | 桌面应用封装 |
+| 层级       | 技术                             | 说明           |
+| -------- | ------------------------------ | ------------ |
+| **前端**   | React 18 + TypeScript + Vite 5 | SPA 单页应用     |
+| **UI**   | Arco Design + Lucide Icons     | 字节跳动组件库      |
+| **状态管理** | Zustand 5                      | 轻量全局状态       |
+| **后端**   | Rust (Axum 0.8) + Tokio        | 高性能异步 Web 服务 |
+| **数据库**  | SQLite (sqlx 0.8)              | 嵌入式零配置       |
+| **认证**   | JWT + bcrypt                   | 安全认证体系       |
+| **桌面端**  | Tauri 2.x（可选）                  | 桌面应用封装       |
 
----
+***
 
 ## 架构
 
@@ -94,23 +50,23 @@
 
 ### 后端模块
 
-| 模块 | 路径 | 说明 |
-|------|------|------|
-| `auth` | `/api/auth/*` | 用户注册、登录、Token 验证 |
-| `workspace` | `/api/workspace/*` | 工作区初始化加载 |
-| `project` | `/api/projects/*` | 项目 CRUD |
-| `conversation` | `/api/conversations/*` | 对话与消息管理 |
-| `asset` | `/api/assets/*` | 资产上传与管理 |
-| `script` | `/api/projects/*/script` | 剧本管理 |
-| `storyboard` | `/api/projects/*/storyboard` | 分镜管理 |
-| `ai` | `/api/ai/*` | AI 端点、智能体、对话、任务、用量 |
-| `pipeline` | `/api/pipelines/*` | 流水线编排与执行 |
-| `collaboration` | `/api/collaboration/*` | 多智能体协同会话 |
-| `image_gen` | `/api/image-gen/*` | AI 图片生成 |
-| `billing` | `/api/billing/*` | 积分计费 |
-| `ops` | `/api/ops/*` | 运维监控 |
+| 模块              | 路径                           | 说明                 |
+| --------------- | ---------------------------- | ------------------ |
+| `auth`          | `/api/auth/*`                | 用户注册、登录、Token 验证   |
+| `workspace`     | `/api/workspace/*`           | 工作区初始化加载           |
+| `project`       | `/api/projects/*`            | 项目 CRUD            |
+| `conversation`  | `/api/conversations/*`       | 对话与消息管理            |
+| `asset`         | `/api/assets/*`              | 资产上传与管理            |
+| `script`        | `/api/projects/*/script`     | 剧本管理               |
+| `storyboard`    | `/api/projects/*/storyboard` | 分镜管理               |
+| `ai`            | `/api/ai/*`                  | AI 端点、智能体、对话、任务、用量 |
+| `pipeline`      | `/api/pipelines/*`           | 流水线编排与执行           |
+| `collaboration` | `/api/collaboration/*`       | 多智能体协同会话           |
+| `image_gen`     | `/api/image-gen/*`           | AI 图片生成            |
+| `billing`       | `/api/billing/*`             | 积分计费               |
+| `ops`           | `/api/ops/*`                 | 运维监控               |
 
----
+***
 
 ## 快速开始
 
@@ -166,9 +122,9 @@ npm run dev:all
 
 ### 5. 访问应用
 
-打开浏览器访问 http://127.0.0.1:5173
+打开浏览器访问 <http://127.0.0.1:5173>
 
----
+***
 
 ## 项目结构
 
@@ -205,65 +161,65 @@ woohoo/
 └── package.json
 ```
 
----
+***
 
 ## 默认智能体
 
-| 角色 | Agent ID | 职责 |
-|------|----------|------|
-| 大纲架构师 | `agent-outline` | 剧情大纲与结构设计 |
-| 人设生成专家 | `agent-character` | 角色设定与人物弧光 |
-| 分镜渲染师 | `agent-storyboard` | 分镜和画面表达 |
-| 合规审核官 | `agent-review` | 内容风险审视与合规检查 |
-| 主编统筹官 | `agent-chief-editor` | 结构取舍与节奏优化 |
-| 项目管理官 | `agent-project-manager` | 任务拆解与进度推进 |
+| 角色     | Agent ID                | 职责          |
+| ------ | ----------------------- | ----------- |
+| 大纲架构师  | `agent-outline`         | 剧情大纲与结构设计   |
+| 人设生成专家 | `agent-character`       | 角色设定与人物弧光   |
+| 分镜渲染师  | `agent-storyboard`      | 分镜和画面表达     |
+| 合规审核官  | `agent-review`          | 内容风险审视与合规检查 |
+| 主编统筹官  | `agent-chief-editor`    | 结构取舍与节奏优化   |
+| 项目管理官  | `agent-project-manager` | 任务拆解与进度推进   |
 
----
+***
 
 ## 环境变量
 
 ### 后端
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `PORT` | `8080` | 服务端口 |
-| `HOST` | `0.0.0.0` | 监听地址 |
-| `DATABASE_URL` | `sqlite:data/woohoo.db?mode=rwc` | 数据库路径 |
-| `JWT_SECRET` | (必填) | JWT 签名密钥 (≥32字符) |
-| `JWT_EXPIRE_HOURS` | `72` | Token 过期时间 |
-| `ASSETS_DIR` | `./data/assets` | 资产存储目录 |
-| `AI_BASE_URL` | `https://api.openai.com` | AI API 基础 URL |
-| `AI_API_KEY` | (可选) | AI API 密钥 |
-| `AI_MAX_CONCURRENT_TASKS` | `10` | AI 最大并发任务数 |
-| `CORS_ALLOWED_ORIGINS` | (逗号分隔) | CORS 允许的来源 |
-| `RUST_LOG` | `woohoo_server=debug` | 日志级别 |
+| 变量                        | 默认值                              | 说明               |
+| ------------------------- | -------------------------------- | ---------------- |
+| `PORT`                    | `8080`                           | 服务端口             |
+| `HOST`                    | `0.0.0.0`                        | 监听地址             |
+| `DATABASE_URL`            | `sqlite:data/woohoo.db?mode=rwc` | 数据库路径            |
+| `JWT_SECRET`              | (必填)                             | JWT 签名密钥 (≥32字符) |
+| `JWT_EXPIRE_HOURS`        | `72`                             | Token 过期时间       |
+| `ASSETS_DIR`              | `./data/assets`                  | 资产存储目录           |
+| `AI_BASE_URL`             | `https://api.openai.com`         | AI API 基础 URL    |
+| `AI_API_KEY`              | (可选)                             | AI API 密钥        |
+| `AI_MAX_CONCURRENT_TASKS` | `10`                             | AI 最大并发任务数       |
+| `CORS_ALLOWED_ORIGINS`    | (逗号分隔)                           | CORS 允许的来源       |
+| `RUST_LOG`                | `woohoo_server=debug`            | 日志级别             |
 
 ### 前端
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `VITE_SERVER_BASE_URL` | `http://127.0.0.1:8080` | 后端服务地址 |
-| `VITE_SERVER_PORT` | `8080` | 后端服务端口 |
-| `VITE_SERVER_REQUEST_TIMEOUT_MS` | `10000` | 请求超时时间 |
+| 变量                               | 默认值                     | 说明     |
+| -------------------------------- | ----------------------- | ------ |
+| `VITE_SERVER_BASE_URL`           | `http://127.0.0.1:8080` | 后端服务地址 |
+| `VITE_SERVER_PORT`               | `8080`                  | 后端服务端口 |
+| `VITE_SERVER_REQUEST_TIMEOUT_MS` | `10000`                 | 请求超时时间 |
 
----
+***
 
 ## 可用脚本
 
-| 命令 | 说明 |
-|------|------|
-| `npm run dev` | 启动前端开发服务器 |
-| `npm run dev:server` | 启动 Rust 后端 |
-| `npm run dev:all` | 同时启动前后端 |
-| `npm run build` | 构建前端生产版本 |
-| `npm run lint` | ESLint 代码检查 |
-| `npm run lint:fix` | ESLint 自动修复 |
-| `npm run format` | Prettier 格式化 |
-| `npm run typecheck` | TypeScript 类型检查 |
-| `npm run test` | 运行测试 |
-| `npm run tauri` | Tauri 桌面端 CLI |
+| 命令                   | 说明              |
+| -------------------- | --------------- |
+| `npm run dev`        | 启动前端开发服务器       |
+| `npm run dev:server` | 启动 Rust 后端      |
+| `npm run dev:all`    | 同时启动前后端         |
+| `npm run build`      | 构建前端生产版本        |
+| `npm run lint`       | ESLint 代码检查     |
+| `npm run lint:fix`   | ESLint 自动修复     |
+| `npm run format`     | Prettier 格式化    |
+| `npm run typecheck`  | TypeScript 类型检查 |
+| `npm run test`       | 运行测试            |
+| `npm run tauri`      | Tauri 桌面端 CLI   |
 
----
+***
 
 ## License
 

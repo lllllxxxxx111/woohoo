@@ -443,3 +443,23 @@ pub async fn get_next_queue_order(pool: &SqlitePool, session_id: &str) -> Result
 
     Ok(max_order + 1)
 }
+
+/// 查询项目下活跃的协同会话（非终态）
+pub async fn list_active_sessions_for_project(
+    pool: &SqlitePool,
+    user_id: &str,
+    project_id: &str,
+) -> Result<Vec<CollaborationSession>> {
+    let sessions = sqlx::query_as::<_, CollaborationSession>(
+        "SELECT * FROM collaboration_sessions \
+         WHERE user_id = ? AND project_id = ? \
+         AND state NOT IN ('completed', 'halted') \
+         ORDER BY updated_at DESC",
+    )
+    .bind(user_id)
+    .bind(project_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(sessions)
+}

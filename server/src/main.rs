@@ -44,6 +44,7 @@ pub struct AppState {
     pub config: AppConfig,
     pub ai_client: AiClient,
     pub ai_runtime: ai::runtime::AiTaskRuntime,
+    pub collaboration_broadcaster: collaboration::broadcast::CollaborationBroadcaster,
     pub started_at: i64,
 }
 
@@ -112,6 +113,7 @@ async fn main() {
         config: config.clone(),
         ai_client,
         ai_runtime,
+        collaboration_broadcaster: collaboration::broadcast::CollaborationBroadcaster::new(),
         started_at,
     };
     pipeline::orchestrator::reconcile_pipeline_document_assets(&state).await;
@@ -476,6 +478,14 @@ async fn main() {
             post(collaboration::handlers::create_session),
         )
         .route(
+            "/api/collaboration/sessions/active",
+            get(collaboration::handlers::get_active_session),
+        )
+        .route(
+            "/api/collaboration/events/stream",
+            get(collaboration::handlers::stream_collaboration_events),
+        )
+        .route(
             "/api/collaboration/sessions/{id}",
             get(collaboration::handlers::get_session),
         )
@@ -485,7 +495,7 @@ async fn main() {
         )
         .route(
             "/api/collaboration/sessions/{id}/messages",
-            post(collaboration::handlers::send_message),
+            get(collaboration::handlers::list_messages).post(collaboration::handlers::send_message),
         )
         .route(
             "/api/collaboration/sessions/{id}/loop-check",

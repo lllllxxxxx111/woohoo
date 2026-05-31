@@ -1,5 +1,8 @@
 export type ProjectResponsibilityKind = 'design' | 'review' | 'editor' | 'manager' | 'custom';
 
+/** AI 消息执行模式：task=异步任务 / sync=同步等待 / direct=直接返回 */
+export type ExecutionMode = 'task' | 'sync' | 'direct';
+
 export interface ProjectRoleCounts {
   design: number;
   review: number;

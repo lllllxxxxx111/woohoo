@@ -311,6 +311,13 @@ pub struct HaltReq {
     pub detail: Option<String>,
 }
 
+/// 查询活跃协同会话请求
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveSessionQuery {
+    pub project_id: String,
+}
+
 /// 协同会话聚合视图
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
