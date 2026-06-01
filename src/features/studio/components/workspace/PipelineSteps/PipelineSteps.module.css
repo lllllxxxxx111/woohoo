@@ -1252,6 +1252,21 @@
   color: var(--text-muted);
 }
 
+.kfGeneratedImage {
+  width: 160px;
+  height: 90px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+}
+
+.videoResult {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+}
+
 .kfConnector {
   flex: 1;
   display: flex;

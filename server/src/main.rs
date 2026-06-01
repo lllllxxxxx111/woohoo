@@ -15,6 +15,7 @@ mod pipeline; // 流程运行模型
 mod project;
 mod script;
 mod storyboard;
+mod video_gen;
 mod workspace;
 
 use axum::{
@@ -107,6 +108,7 @@ async fn main() {
     }
 
     reconcile_interrupted_image_generations(&pool).await;
+    reconcile_interrupted_video_generations(&pool).await;
 
     let state = AppState {
         db: pool,
@@ -539,6 +541,15 @@ async fn main() {
             "/api/image-gen/generations/{id}",
             get(image_gen::handlers::get_generation),
         )
+        // 视频生成
+        .route(
+            "/api/video-gen/generations",
+            post(video_gen::handlers::create_generation).get(video_gen::handlers::list_generations),
+        )
+        .route(
+            "/api/video-gen/generations/{id}",
+            get(video_gen::handlers::get_generation),
+        )
         // 计费
         .route("/api/billing/credits", get(billing::handlers::get_credits))
         .route(
@@ -644,6 +655,64 @@ async fn reconcile_interrupted_image_generations(pool: &SqlitePool) {
         Err(error) => {
             tracing::warn!(
                 "Failed to reconcile interrupted image generation tasks: {}",
+                error
+            );
+        }
+    }
+}
+
+/// 对账中断的视频生成任务
+async fn reconcile_interrupted_video_generations(pool: &SqlitePool) {
+    let interrupted = match video_gen::repo::list_interrupted_generations(pool).await {
+        Ok(generations) => generations,
+        Err(error) => {
+            tracing::warn!(
+                "Failed to list interrupted video generation tasks: {}",
+                error
+            );
+            return;
+        }
+    };
+
+    for generation in &interrupted {
+        match billing::repo::refund_outstanding_for_ref(
+            pool,
+            &generation.user_id,
+            "video_generation",
+            &generation.id,
+            "video_generation_interrupted",
+        )
+        .await
+        {
+            Ok(amount) if amount > 0.0 => {
+                tracing::info!(
+                    generation_id = %generation.id,
+                    amount,
+                    "Refunded interrupted video generation charge"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    generation_id = %generation.id,
+                    error = %error,
+                    "Failed to refund interrupted video generation charge"
+                );
+            }
+        }
+    }
+
+    match video_gen::repo::fail_interrupted_generations(pool).await {
+        Ok(count) if count > 0 => {
+            tracing::info!(
+                "Marked {} interrupted video generation tasks as failed",
+                count
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                "Failed to reconcile interrupted video generation tasks: {}",
                 error
             );
         }

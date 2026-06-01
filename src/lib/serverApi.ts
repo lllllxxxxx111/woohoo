@@ -17,6 +17,7 @@ import { createEndpointApi } from './serverApi.endpoints';
 import { createImageGenApi } from './serverApi.imageGen';
 import { createNotificationApi } from './serverApi.notifications';
 import { createUsageTaskPipelineApi } from './serverApi.pipeline';
+import { createVideoGenApi } from './serverApi.videoGen';
 
 export type { CreateAgentInput, ProjectAgentInput } from './serverApi.agents';
 export type {
@@ -26,6 +27,11 @@ export type {
   ImageGenerationStatus,
   UserCredits,
 } from './serverApi.imageGen';
+export type {
+  CreateVideoGenerationInput,
+  VideoGeneration,
+  VideoGenerationStatus,
+} from './serverApi.videoGen';
 export type {
   ServerAiEndpoint,
   ServerAiEndpointCapability,
@@ -1898,6 +1904,7 @@ export const pausePipelineRun = usageTaskPipelineApi.pausePipelineRun;
 export const resumePipelineRun = usageTaskPipelineApi.resumePipelineRun;
 export const cancelPipelineRun = usageTaskPipelineApi.cancelPipelineRun;
 export const retryPipelineStep = usageTaskPipelineApi.retryPipelineStep;
+export const streamPipelineRun = usageTaskPipelineApi.streamPipelineRun;
 
 const collaborationApi = createCollaborationApi({ requestApi });
 
@@ -1908,6 +1915,7 @@ export const sendCollaborationMessage = collaborationApi.sendMessage;
 export const checkCollaborationLoop = collaborationApi.loopCheck;
 export const admitCollaboration = collaborationApi.admit;
 export const haltCollaboration = collaborationApi.halt;
+export const streamCollaborationEvents = collaborationApi.streamEvents;
 
 const imageGenApi = createImageGenApi(requestApi, {
   invalidateWorkspaceCache: () => invalidateApiCache(CACHE_KEYS.workspaceBootstrap),
@@ -1918,3 +1926,11 @@ export const getImageGeneration = imageGenApi.getGeneration;
 export const createImageGeneration = imageGenApi.createGeneration;
 export const getImageCredits = imageGenApi.getCredits;
 export const listImageCreditTransactions = imageGenApi.listCreditTransactions;
+
+const videoGenApi = createVideoGenApi(requestApi, {
+  invalidateWorkspaceCache: () => invalidateApiCache(CACHE_KEYS.workspaceBootstrap),
+});
+
+export const listVideoGenerations = videoGenApi.listGenerations;
+export const getVideoGeneration = videoGenApi.getGeneration;
+export const createVideoGeneration = videoGenApi.createGeneration;
