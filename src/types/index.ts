@@ -317,6 +317,10 @@ export interface AiSettings {
   promptOptimizerBetaEnabled: boolean;
   pipelineRetryBackoffSec: number;
   pipelineRetryMaxBackoffSec: number;
+  assistantActionsEnabled?: boolean;
+  maxActionsPerResponse?: number;
+  actionProjectScope?: string;
+  requireConfirmationFor?: string[];
 }
 
 export type CollaborationSessionState =

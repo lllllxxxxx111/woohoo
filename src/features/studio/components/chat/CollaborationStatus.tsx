@@ -2,10 +2,12 @@
  * CollaborationStatus - 协同会话状态展示组件
  *
  * 在对话区顶部显示当前协同会话的状态标签，
- * 包括会话阶段、回复队列、阻塞问题清单。
+ * 包括会话阶段、回复队列、阻塞问题清单和待回答问题。
  */
 import React from 'react';
 import { Tag, Space } from '@arco-design/web-react';
+import { useShallow } from 'zustand/react/shallow';
+import { useAppStore } from '../../../../store';
 import type {
   CollaborationSession,
   CollaborationAssignment,
@@ -33,6 +35,10 @@ export const CollaborationStatus: React.FC<CollaborationStatusProps> = ({
   session,
   assignments,
 }) => {
+  const pendingQuestions = useAppStore(
+    useShallow((state) => state.collaborationPendingQuestions),
+  );
+
   const display = STATE_DISPLAY[session.state] || { color: 'gray', label: session.state };
   const progressPreviewLabel =
     session.state === 'workspace_execution'
@@ -63,7 +69,7 @@ export const CollaborationStatus: React.FC<CollaborationStatusProps> = ({
 
   return (
     <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--color-border-2)' }}>
-      <Space size="small" align="center">
+      <Space size="small" align="center" wrap>
         <Tag color={display.color} size="small">
           {display.label}
         </Tag>
@@ -101,6 +107,27 @@ export const CollaborationStatus: React.FC<CollaborationStatusProps> = ({
           </span>
         )}
       </Space>
+      {pendingQuestions.length > 0 && (
+        <div
+          style={{
+            marginTop: 6,
+            padding: '6px 10px',
+            background: 'var(--color-warning-light-1)',
+            borderRadius: 6,
+            fontSize: 12,
+          }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: 4, color: 'var(--color-warning-6)' }}>
+            待回答问题 ({pendingQuestions.length})
+          </div>
+          {pendingQuestions.map((q) => (
+            <div key={q.fingerprint} style={{ marginBottom: 2, color: 'var(--color-text-2)' }}>
+              <span style={{ color: 'var(--color-text-3)' }}>[{q.agentId.slice(0, 8)}]</span>{' '}
+              {q.question}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };

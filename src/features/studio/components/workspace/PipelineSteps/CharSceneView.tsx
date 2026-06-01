@@ -1,22 +1,25 @@
-import React, { useMemo } from 'react';
-import { Map, Send, UserPlus } from 'lucide-react';
+import React, { useCallback, useMemo, useState } from 'react';
+import { LoaderCircle, Map, Send, UserPlus } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 
 import { useAppStore } from '../../../../../store';
+import { useToast } from '../../../../../context/useToast';
+import { createImageGeneration } from '../../../../../lib/serverApi';
 import styles from './PipelineSteps.module.css';
-import { usePipelineTaskLauncher } from './usePipelineTaskLauncher';
 import { createProjectSnapshot } from '../workspaceMvp';
 
 export const CharSceneView: React.FC = () => {
-  const { activeProject, activeScript, activeStoryboard, activeAssets } = useAppStore(
+  const { activeProject, activeScript, activeStoryboard, activeAssets, activeState } = useAppStore(
     useShallow((state) => ({
       activeProject: state.projects.find((project) => project.id === state.activeState.projectId) ?? null,
       activeScript: state.activeScript,
       activeStoryboard: state.activeStoryboard,
       activeAssets: state.activeAssets,
+      activeState: state.activeState,
     })),
   );
-  const { launchTask, isSubmitting } = usePipelineTaskLauncher();
+  const { showToast } = useToast();
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const snapshot = useMemo(() => {
     if (!activeProject) {
@@ -32,27 +35,43 @@ export const CharSceneView: React.FC = () => {
     });
   }, [activeAssets, activeProject, activeScript, activeStoryboard]);
 
-  const handleGenerateCharacterAsset = (name: string, prompt: string) => {
-    void launchTask(
-      `@分镜渲染师 请为项目中的角色「${name}」生成三视图人设资产。\n\n要求：\n1. 输出正面、侧面、背面三个角度的视觉描述。\n2. 包含服装细节、配饰、标志性特征。\n3. 输出格式应可直接用于 AI 图像生成。\n\n补充信息：${prompt}`,
-      {
-        successTitle: '人物资产任务已提交',
-        successMessage: '人设三视图生成任务已发送至服务端队列。',
-        requireServerTask: true,
-      },
-    );
-  };
+  /** 生成角色人设资产：调用图片生成 API */
+  const handleGenerateCharacterAsset = useCallback(async (name: string, prompt: string) => {
+    setIsSubmitting(true);
+    try {
+      await createImageGeneration({
+        projectId: activeState.projectId ?? '',
+        prompt: `角色三视图人设：${name}。${prompt}。输出正面、侧面、背面三个角度，电影质感，高细节`,
+        model: 'dall-e-3',
+        size: '1024x1792',
+        n: 1,
+      });
+      showToast({ type: 'success', title: '人物资产任务已提交', message: `角色「${name}」人设生成任务已创建。` });
+    } catch (error) {
+      showToast({ type: 'error', title: '人物资产生成失败', message: error instanceof Error ? error.message : '提交失败' });
+    } finally {
+      setIsSubmitting(false);
+    }
+  }, [activeState.projectId, showToast]);
 
-  const handleGenerateSceneAsset = (sceneName: string, prompt: string) => {
-    void launchTask(
-      `@分镜渲染师 请为场景「${sceneName}」生成环境资产。\n\n要求：\n1. 描述场景的空间布局、光影氛围、色调。\n2. 列出关键道具和背景元素。\n3. 给出镜头机位建议（全景/中景/特写）。\n\n补充信息：${prompt}`,
-      {
-        successTitle: '场景资产任务已提交',
-        successMessage: '场景环境生成任务已发送至服务端队列。',
-        requireServerTask: true,
-      },
-    );
-  };
+  /** 生成场景环境资产：调用图片生成 API */
+  const handleGenerateSceneAsset = useCallback(async (sceneName: string, prompt: string) => {
+    setIsSubmitting(true);
+    try {
+      await createImageGeneration({
+        projectId: activeState.projectId ?? '',
+        prompt: `场景环境概念图：${sceneName}。${prompt}。广角全景，电影级光影，16:9`,
+        model: 'dall-e-3',
+        size: '1792x1024',
+        n: 1,
+      });
+      showToast({ type: 'success', title: '场景资产任务已提交', message: `场景「${sceneName}」环境生成任务已创建。` });
+    } catch (error) {
+      showToast({ type: 'error', title: '场景资产生成失败', message: error instanceof Error ? error.message : '提交失败' });
+    } finally {
+      setIsSubmitting(false);
+    }
+  }, [activeState.projectId, showToast]);
 
   if (!activeProject || !snapshot) {
     return (
@@ -96,10 +115,10 @@ export const CharSceneView: React.FC = () => {
               <div className={styles.cardActions}>
                 <button
                   className={styles.btnPrimary}
-                  onClick={() => handleGenerateCharacterAsset(character.name, character.prompt)}
+                  onClick={() => void handleGenerateCharacterAsset(character.name, character.prompt)}
                   disabled={isSubmitting}
                 >
-                  <Send size={12} /> 生成人设
+                  {isSubmitting ? <LoaderCircle size={12} className={styles.iconSpin} /> : <Send size={12} />} 生成人设
                 </button>
               </div>
             </div>
@@ -141,10 +160,10 @@ export const CharSceneView: React.FC = () => {
               <div className={styles.cardActions}>
                 <button
                   className={styles.btnPrimary}
-                  onClick={() => handleGenerateSceneAsset(scene.name, scene.prompt)}
+                  onClick={() => void handleGenerateSceneAsset(scene.name, scene.prompt)}
                   disabled={isSubmitting}
                 >
-                  <Send size={12} /> 生成场景
+                  {isSubmitting ? <LoaderCircle size={12} className={styles.iconSpin} /> : <Send size={12} />} 生成场景
                 </button>
               </div>
             </div>

@@ -4,7 +4,7 @@ import { useShallow } from 'zustand/react/shallow';
 
 import { useAppStore } from '../../../../../store';
 import { useToast } from '../../../../../context/useToast';
-import { createVideoGeneration } from '../../../../../lib/serverApi';
+import { createVideoGeneration, getVideoGeneration } from '../../../../../lib/serverApi';
 import type { VideoGeneration } from '../../../../../lib/serverApi';
 import styles from './PipelineSteps.module.css';
 import { createProjectSnapshot, type DerivedVideoShot } from '../workspaceMvp';
@@ -54,6 +54,29 @@ export const VideoView: React.FC = () => {
       Object.fromEntries(snapshot.videoShots.map((shot) => [shot.id, shot.prompt])),
     );
   }, [snapshot]);
+
+  /** 轮询未完成的视频生成任务状态 */
+  useEffect(() => {
+    const pendingGens = Object.entries(generations).filter(
+      ([, gen]) => gen.status === 'pending' || gen.status === 'processing',
+    );
+    if (pendingGens.length === 0) return;
+
+    const interval = setInterval(() => {
+      void Promise.all(
+        pendingGens.map(async ([shotId, gen]) => {
+          try {
+            const updated = await getVideoGeneration(gen.id);
+            setGenerations((prev) => ({ ...prev, [shotId]: updated }));
+          } catch {
+            // 轮询失败静默处理
+          }
+        }),
+      );
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [generations]);
 
   /** 提交视频生成任务到 video-gen API */
   const handleGen = useCallback(async (shot: DerivedVideoShot, prompt: string) => {

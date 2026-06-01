@@ -149,6 +149,7 @@ export interface AppStoreState {
   activeCollaborationSession: CollaborationSession | null;
   activeCollaborationAssignments: CollaborationAssignment[];
   collaborationLoopCheckResult: LoopCheckResponse | null;
+  collaborationPendingQuestions: Array<{ agentId: string; question: string; fingerprint: string }>;
 
   // Actions
   setTheme: (theme: 'dark' | 'light') => void;
@@ -170,6 +171,7 @@ export interface AppStoreState {
   setCollaborationSession: (session: CollaborationSession | null) => void;
   setCollaborationAssignments: (assignments: CollaborationAssignment[]) => void;
   setCollaborationLoopCheckResult: (result: LoopCheckResponse | null) => void;
+  setCollaborationPendingQuestions: (questions: Array<{ agentId: string; question: string; fingerprint: string }>) => void;
   clearCollaboration: () => void;
 }
 
@@ -206,6 +208,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   activeCollaborationSession: null,
   activeCollaborationAssignments: [],
   collaborationLoopCheckResult: null,
+  collaborationPendingQuestions: [],
 
   setTheme: (theme) => set({ theme }),
   setLanguage: (language) => {
@@ -291,5 +294,6 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   setCollaborationSession: (activeCollaborationSession) => set({ activeCollaborationSession }),
   setCollaborationAssignments: (activeCollaborationAssignments) => set({ activeCollaborationAssignments }),
   setCollaborationLoopCheckResult: (collaborationLoopCheckResult) => set({ collaborationLoopCheckResult }),
-  clearCollaboration: () => set({ activeCollaborationSession: null, activeCollaborationAssignments: [], collaborationLoopCheckResult: null }),
+  setCollaborationPendingQuestions: (collaborationPendingQuestions) => set({ collaborationPendingQuestions }),
+  clearCollaboration: () => set({ activeCollaborationSession: null, activeCollaborationAssignments: [], collaborationLoopCheckResult: null, collaborationPendingQuestions: [] }),
 }));
