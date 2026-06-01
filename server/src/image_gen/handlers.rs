@@ -99,13 +99,30 @@ pub async fn create_generation(
             AppError::Internal(error.to_string())
         })?;
 
-    let base_url = env::var("AI_BASE_URL")
-        .unwrap_or_else(|_| "https://api.openai.com".to_string());
-    let api_key = env::var("AI_API_KEY")
-        .unwrap_or_else(|_| {
-            tracing::warn!("AI_API_KEY 环境变量未设置，图片生成 API 调用将失败");
-            String::new()
-        });
+    // 从数据库端点配置解析图片生成能力，支持用户在前端设置页面配置
+    let resolved = crate::ai::capabilities::resolve_image_generation_capability(
+        &state,
+        &user_id.0,
+        None,
+        Some(&req.model),
+    )
+    .await
+    .map_err(|error| {
+        tracing::warn!(error = %error, "图片生成端点解析失败，回退到环境变量");
+        let _base_url = env::var("AI_BASE_URL")
+            .unwrap_or_else(|_| "https://api.openai.com".to_string());
+        let api_key = env::var("AI_API_KEY").unwrap_or_default();
+        if api_key.is_empty() {
+            return AppError::Validation(
+                "请先在设置里为 API 通道启用图片生成能力，或配置 AI_API_KEY 环境变量".into(),
+            );
+        }
+        AppError::Internal(format!("图片生成端点解析失败: {}", error))
+    })?;
+
+    let base_url = resolved.endpoint.base_url.clone();
+    let api_key = resolved.endpoint.api_key.clone();
+    let model = resolved.model.clone();
 
     let client = &state.ai_client;
 
@@ -115,7 +132,7 @@ pub async fn create_generation(
         client.generate_image(
             &base_url,
             &api_key,
-            &req.model,
+            &model,
             &req.prompt,
             &req.size,
             req.n as u32,

@@ -58,6 +58,24 @@ pub async fn resolve_image_generation_capability(
     .await
 }
 
+/// 解析视频生成能力，从数据库查找启用了 video_generation 能力的端点
+pub async fn resolve_video_generation_capability(
+    state: &AppState,
+    user_id: &str,
+    endpoint_id: Option<&str>,
+    requested_model: Option<&str>,
+) -> AppResult<ResolvedAiCapability> {
+    resolve_capability(
+        state,
+        user_id,
+        "video_generation",
+        endpoint_id,
+        requested_model,
+        Some("wan2.1-t2v-480p"),
+    )
+    .await
+}
+
 async fn resolve_capability(
     state: &AppState,
     user_id: &str,
@@ -152,7 +170,14 @@ async fn resolve_capability(
             .bind(capability)
             .fetch_optional(&state.db)
             .await?
-            .ok_or_else(|| AppError::Validation("请先在设置里为 API 通道启用图片生成能力".into()))?
+            .ok_or_else(|| {
+                let label = match capability {
+                    "image_generation" => "图片生成",
+                    "video_generation" => "视频生成",
+                    other => other,
+                };
+                AppError::Validation(format!("请先在设置里为 API 通道启用{}能力", label))
+            })?
         };
 
     let endpoint = AiEndpoint {
@@ -211,7 +236,14 @@ async fn resolve_capability(
                 .map(str::to_owned)
         })
         .or_else(|| fallback_model.map(str::to_owned))
-        .ok_or_else(|| AppError::Validation("图片生成模型未配置".into()))?;
+        .ok_or_else(|| {
+            let label = match capability {
+                "image_generation" => "图片生成",
+                "video_generation" => "视频生成",
+                other => other,
+            };
+            AppError::Validation(format!("{}模型未配置", label))
+        })?;
 
     Ok(ResolvedAiCapability {
         endpoint,

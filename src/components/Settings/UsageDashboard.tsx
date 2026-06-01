@@ -18,8 +18,10 @@ import {
   AiUsageRecord,
   AiUsageSummary,
   getUsageSummary,
+  listImageCreditTransactions,
   listServerAiEndpoints,
 } from '../../lib/serverApi';
+import type { CreditTransaction } from '../../lib/serverApi';
 import { useToast } from '../../context/useToast';
 import { useAppStore } from '../../store';
 import { useShallow } from 'zustand/react/shallow';
@@ -293,6 +295,8 @@ export const UsageDashboard: React.FC = () => {
   });
   const [activeFilterKeys, setActiveFilterKeys] = useState<OptionalFilterKey[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
+  const [transactions, setTransactions] = useState<CreditTransaction[]>([]);
+  const [transactionsLoading, setTransactionsLoading] = useState(false);
   const requestIdRef = useRef(0);
   const summaryCacheRef = useRef<{
     key: string;
@@ -394,6 +398,25 @@ export const UsageDashboard: React.FC = () => {
     void listServerAiEndpoints().then((next) => {
       if (isActive) setEndpointOptions(next.map((e) => ({ id: e.id, name: e.name })));
     });
+    return () => {
+      isActive = false;
+    };
+  }, []);
+
+  /** 加载积分交易历史 */
+  useEffect(() => {
+    let isActive = true;
+    setTransactionsLoading(true);
+    void listImageCreditTransactions()
+      .then((result) => {
+        if (isActive) setTransactions(result);
+      })
+      .catch(() => {
+        // 交易历史加载失败不阻塞主面板
+      })
+      .finally(() => {
+        if (isActive) setTransactionsLoading(false);
+      });
     return () => {
       isActive = false;
     };
@@ -742,6 +765,100 @@ export const UsageDashboard: React.FC = () => {
           border={false}
           loading={loading}
           scroll={{ x: 740, y: 320 }}
+          style={{ width: '100%' }}
+        />
+      </div>
+
+      <div className={styles.mainTableCard}>
+        <div className={styles.tableHeader}>
+          <h3>
+            积分交易历史{' '}
+            <span
+              style={{ fontWeight: 400, fontSize: 13, color: 'var(--text-muted)', marginLeft: 12 }}
+            >
+              充值、消费与退款记录
+            </span>
+          </h3>
+        </div>
+        <Table
+          columns={[
+            {
+              title: '时间',
+              dataIndex: 'createdAt',
+              width: 160,
+              render: (v: string) => (
+                <Text type="secondary" style={{ fontSize: 13 }}>
+                  {new Date(v).toLocaleString()}
+                </Text>
+              ),
+            },
+            {
+              title: '类型',
+              dataIndex: 'kind',
+              width: 100,
+              render: (v: string) => {
+                const colorMap: Record<string, string> = {
+                  earned: 'green',
+                  spent: 'orange',
+                  refund: 'blue',
+                };
+                const labelMap: Record<string, string> = {
+                  earned: '充值',
+                  spent: '消费',
+                  refund: '退款',
+                };
+                return (
+                  <Tag color={colorMap[v] || 'gray'} size="small">
+                    {labelMap[v] || v}
+                  </Tag>
+                );
+              },
+            },
+            {
+              title: '金额',
+              dataIndex: 'amount',
+              width: 120,
+              render: (v: number) => (
+                <Text bold style={{ color: v >= 0 ? 'var(--color-success-6)' : 'var(--color-danger-6)' }}>
+                  {v >= 0 ? '+' : ''}{v.toFixed(2)}
+                </Text>
+              ),
+            },
+            {
+              title: '余额',
+              dataIndex: 'balanceAfter',
+              width: 120,
+              render: (v: number) => <Text>{v.toFixed(2)}</Text>,
+            },
+            {
+              title: '原因',
+              dataIndex: 'reason',
+              render: (v: string | null) => (
+                <Text type="secondary" style={{ fontSize: 13 }}>
+                  {v || '-'}
+                </Text>
+              ),
+            },
+            {
+              title: '关联',
+              dataIndex: 'refType',
+              width: 140,
+              render: (_: string, r: CreditTransaction) =>
+                r.refType && r.refId ? (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {r.refType} / {r.refId.slice(0, 8)}
+                  </Text>
+                ) : (
+                  <Text type="secondary" style={{ fontSize: 12 }}>-</Text>
+                ),
+            },
+          ]}
+          data={transactions}
+          rowKey="id"
+          pagination={{ pageSize: 20, showTotal: true }}
+          border={false}
+          loading={transactionsLoading}
+          scroll={{ x: 680, y: 300 }}
           style={{ width: '100%' }}
         />
       </div>

@@ -28,6 +28,7 @@ import {
   resumePipelineRun,
   cancelPipelineRun,
   retryPipelineStep,
+  streamPipelineRun,
   type PipelinePromptOptimization,
   type PipelineRunSummary,
   type PipelineStepOutput,
@@ -735,10 +736,29 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
       if (isTerminal) {
         return;
       }
-      const interval = setInterval(() => {
-        void loadLatestRun();
-      }, 5000);
-      return () => clearInterval(interval);
+
+      const focusedRunId = focusedRunIdRef.current;
+      if (!focusedRunId) {
+        const interval = setInterval(() => {
+          void loadLatestRun();
+        }, 5000);
+        return () => clearInterval(interval);
+      }
+
+      const controller = streamPipelineRun(
+        focusedRunId,
+        () => {
+          void loadLatestRun();
+        },
+        () => {
+          void loadLatestRun();
+        },
+        () => {
+          void loadLatestRun();
+        },
+      );
+
+      return () => controller.abort();
     }
   }, [isServerWorkspaceReady, activeState.projectId, currentRunStatus, loadLatestRun]);
 
