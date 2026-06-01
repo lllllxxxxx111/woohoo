@@ -13,6 +13,7 @@ import {
   Sparkles,
   User,
   Users,
+  Wrench,
   X,
 } from 'lucide-react';
 import {
@@ -42,8 +43,10 @@ import { useBillingCredits } from '../../hooks/useBillingCredits';
 import '../../styles/arco-async';
 import styles from './SettingsModal.module.css';
 import { AgentManagement } from './AgentManagement';
+import { ActionAuditLog } from './ActionAuditLog';
 import { EndpointManagement } from './EndpointManagement';
 import { NotificationSettings } from './NotificationSettings';
+import { OpsMonitorPanel } from './OpsMonitorPanel';
 import { UsageDashboard } from './UsageDashboard';
 
 const { Title, Text } = Typography;
@@ -57,6 +60,7 @@ type SettingsTab =
   | 'agents'
   | 'notifications'
   | 'theme'
+  | 'policy'
   | 'diagnostics';
 
 type NavItem = {
@@ -74,7 +78,8 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'agents', icon: <Users size={16} />, label: '智能体' },
   { id: 'notifications', icon: <BellRing size={16} />, label: '通知' },
   { id: 'theme', icon: <Palette size={16} />, label: '偏好设置' },
-  { id: 'diagnostics', icon: <ShieldCheck size={16} />, label: '高级诊断' },
+  { id: 'policy', icon: <ShieldCheck size={16} />, label: '安全策略' },
+  { id: 'diagnostics', icon: <Wrench size={16} />, label: '高级诊断' },
 ];
 
 const TAB_TITLES: Record<SettingsTab, string> = {
@@ -86,6 +91,7 @@ const TAB_TITLES: Record<SettingsTab, string> = {
   agents: '智能体',
   notifications: '通知',
   theme: '偏好设置',
+  policy: '安全策略',
   diagnostics: '高级诊断',
 };
 
@@ -628,6 +634,90 @@ export const SettingsModal: React.FC = () => {
               </Space>
             )}
 
+            {activeTab === 'policy' && (
+              <Space direction="vertical" size="large" style={{ width: '100%' }}>
+                <Card bordered={false} title="助理动作策略" className={styles.sectionCard}>
+                  <Space direction="vertical" size="medium" style={{ width: '100%' }}>
+                    <div className={styles.settingRow}>
+                      <span>允许助理动作</span>
+                      <Switch
+                        checked={draftAiSettings.assistantActionsEnabled ?? true}
+                        onChange={(v) =>
+                          setDraftAiSettings((s) => ({ ...s, assistantActionsEnabled: v }))
+                        }
+                      />
+                    </div>
+                    <div className={styles.settingRow}>
+                      <span>单次最大动作数</span>
+                      <InputNumber
+                        min={1}
+                        max={20}
+                        value={draftAiSettings.maxActionsPerResponse ?? 5}
+                        onChange={(v) =>
+                          setDraftAiSettings((s) => ({ ...s, maxActionsPerResponse: v ?? 5 }))
+                        }
+                        style={{ width: 100 }}
+                      />
+                    </div>
+                    <div className={styles.settingRow}>
+                      <span>项目作用域</span>
+                      <Select
+                        value={draftAiSettings.actionProjectScope ?? 'current_only'}
+                        onChange={(v) =>
+                          setDraftAiSettings((s) => ({ ...s, actionProjectScope: v }))
+                        }
+                        style={{ width: 180 }}
+                      >
+                        <Select.Option value="current_only">仅当前项目</Select.Option>
+                        <Select.Option value="user_projects">用户所有项目</Select.Option>
+                        <Select.Option value="all_accessible">所有可访问项目</Select.Option>
+                      </Select>
+                    </div>
+                  </Space>
+                </Card>
+
+                <Card bordered={false} title="需要确认的动作" className={styles.sectionCard}>
+                  <Space direction="vertical" size="medium" style={{ width: '100%' }}>
+                    {[
+                      { key: 'remove_project_agent', label: '移除智能体' },
+                      { key: 'create_project_agent', label: '创建智能体' },
+                      { key: 'delete_project_path', label: '删除文件/目录' },
+                      { key: 'move_project_path', label: '移动文件/目录' },
+                    ].map((item) => (
+                      <div key={item.key} className={styles.settingRow}>
+                        <span>{item.label}</span>
+                        <Switch
+                          checked={
+                            draftAiSettings.requireConfirmationFor?.includes(item.key) ?? true
+                          }
+                          onChange={(v) =>
+                            setDraftAiSettings((s) => {
+                              const current = s.requireConfirmationFor ?? [
+                                'remove_project_agent',
+                                'create_project_agent',
+                                'delete_project_path',
+                                'move_project_path',
+                              ];
+                              return {
+                                ...s,
+                                requireConfirmationFor: v
+                                  ? [...current, item.key]
+                                  : current.filter((k) => k !== item.key),
+                              };
+                            })
+                          }
+                        />
+                      </div>
+                    ))}
+                  </Space>
+                </Card>
+
+                <Card bordered={false} title="动作审计日志" className={styles.sectionCard}>
+                  <ActionAuditLog />
+                </Card>
+              </Space>
+            )}
+
             {activeTab === 'diagnostics' && (
               <Space direction="vertical" size="large" style={{ width: '100%' }}>
                 <Card bordered={false} title="本地后端诊断" className={styles.sectionCard}>
@@ -653,6 +743,10 @@ export const SettingsModal: React.FC = () => {
                       <Tag color="arcoblue">后端统一处理</Tag>
                     </div>
                   </Space>
+                </Card>
+
+                <Card bordered={false} title="运维监控" className={styles.sectionCard}>
+                  <OpsMonitorPanel />
                 </Card>
               </Space>
             )}

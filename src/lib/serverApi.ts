@@ -16,6 +16,8 @@ import { createCollaborationApi } from './serverApi.collaboration';
 import { createEndpointApi } from './serverApi.endpoints';
 import { createImageGenApi } from './serverApi.imageGen';
 import { createNotificationApi } from './serverApi.notifications';
+import { createOpsApi } from './serverApi.ops';
+import { createPolicyApi } from './serverApi.policy';
 import { createUsageTaskPipelineApi } from './serverApi.pipeline';
 import { createVideoGenApi } from './serverApi.videoGen';
 
@@ -32,6 +34,14 @@ export type {
   VideoGeneration,
   VideoGenerationStatus,
 } from './serverApi.videoGen';
+export type {
+  ActionProjectScope,
+  AssistantActionAudit,
+  AssistantActionPolicy,
+  AuditLogFilter,
+  ConfirmationToken,
+  ConsumeTokenInput,
+} from './serverApi.policy';
 export type {
   ServerAiEndpoint,
   ServerAiEndpointCapability,
@@ -1934,3 +1944,17 @@ const videoGenApi = createVideoGenApi(requestApi, {
 export const listVideoGenerations = videoGenApi.listGenerations;
 export const getVideoGeneration = videoGenApi.getGeneration;
 export const createVideoGeneration = videoGenApi.createGeneration;
+
+const policyApi = createPolicyApi(requestApi);
+
+export const getActionPolicy = policyApi.getPolicy;
+export const updateActionPolicy = policyApi.updatePolicy;
+export const listActionAudits = policyApi.listAudits;
+export const createConfirmationToken = policyApi.createConfirmationToken;
+export const consumeConfirmationToken = policyApi.consumeConfirmationToken;
+
+const opsApi = createOpsApi(requestApi);
+
+export const getOpsOverview = opsApi.getOverview;
+export const listOpsHeartbeats = opsApi.listHeartbeats;
+export const listOpsFindings = opsApi.listFindings;

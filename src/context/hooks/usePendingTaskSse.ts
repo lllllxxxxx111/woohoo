@@ -458,96 +458,13 @@ export function usePendingTaskSse({
             break;
 
           case 'collaboration_session_created':
-            if (data.sessionId) {
-              useAppStore.getState().setCollaborationSession({
-                id: data.sessionId,
-                userId: '',
-                projectId: data.projectId || '',
-                conversationId: '',
-                state: data.state || 'discovery',
-                roundCount: 0,
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-              });
-            }
-            break;
-
           case 'collaboration_assignment_updated':
-            if (data.assignmentId) {
-              const store = useAppStore.getState();
-              const existing = store.activeCollaborationAssignments;
-              const updated = existing.map((a) =>
-                a.id === data.assignmentId
-                  ? { ...a, status: data.newStatus || a.status }
-                  : a,
-              );
-              if (!existing.some((a) => a.id === data.assignmentId)) {
-                updated.push({
-                  id: data.assignmentId,
-                  sessionId: '',
-                  agentId: data.agentId || '',
-                  taskType: '',
-                  goal: '',
-                  status: data.newStatus || 'assigned',
-                  blockingQuestionCount: 0,
-                  createdAt: new Date().toISOString(),
-                  updatedAt: new Date().toISOString(),
-                });
-              }
-              store.setCollaborationAssignments(updated);
-            }
-            break;
-
           case 'collaboration_queue_updated':
-            if (data.sessionId) {
-              const session = useAppStore.getState().activeCollaborationSession;
-              if (session && session.id === data.sessionId) {
-                useAppStore.getState().setCollaborationSession({
-                  ...session,
-                  replyQueueJson: JSON.stringify(data.replyQueue || []),
-                });
-              }
-            }
-            break;
-
           case 'collaboration_question_asked':
           case 'collaboration_question_answered':
-            break;
-
           case 'collaboration_loop_warning':
-            if (data.level !== undefined) {
-              useAppStore.getState().setCollaborationLoopCheckResult({
-                loopDetected: true,
-                signals: data.signals || [],
-                level: data.level,
-                action: data.action || '',
-                message: data.message || '',
-              });
-            }
-            break;
-
           case 'collaboration_admission_changed':
-            if (data.admitted && data.sessionId) {
-              const session = useAppStore.getState().activeCollaborationSession;
-              if (session && session.id === data.sessionId) {
-                useAppStore.getState().setCollaborationSession({
-                  ...session,
-                  state: 'workspace_admission',
-                });
-              }
-            }
-            break;
-
           case 'collaboration_workspace_started':
-            if (data.sessionId) {
-              const session = useAppStore.getState().activeCollaborationSession;
-              if (session && session.id === data.sessionId) {
-                useAppStore.getState().setCollaborationSession({
-                  ...session,
-                  state: 'workspace_execution',
-                });
-              }
-            }
             break;
 
           default:

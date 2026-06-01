@@ -426,6 +426,15 @@ pub async fn admit(
 
     broadcast_collaboration_event(&state, &session_id, "collaboration_admission_changed", Some(payload));
 
+    if pipeline_run_id.is_some() {
+        let workspace_payload = json!({
+            "sessionId": session_id,
+            "pipelineRunId": pipeline_run_id,
+            "state": "workspace_execution"
+        });
+        broadcast_collaboration_event(&state, &session_id, "collaboration_workspace_started", Some(workspace_payload));
+    }
+
     Ok(Json(AdmitResponse {
         admitted: true,
         pipeline_run_id,

@@ -1,3 +1,12 @@
+@keyframes iconSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.iconSpin {
+  animation: iconSpin 1s linear infinite;
+}
+
 .container {
   flex: 1;
   padding: 24px;
