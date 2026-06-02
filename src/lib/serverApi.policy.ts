@@ -16,7 +16,7 @@ export type AssistantActionAudit = {
   conversationId: string;
   messageId: string;
   actionType: string;
-  actionPayloadJson: string;
+  actionPayload: string;
   executionStatus: string;
   errorMessage?: string | null;
   envelopeHash: string;

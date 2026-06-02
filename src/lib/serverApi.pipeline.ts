@@ -1,3 +1,4 @@
+import { getServerBaseUrl } from './serverApi';
 import type { AiTask, AiUsageBucket, AiUsageRecord, AiUsageSummary } from './serverApi';
 
 type RequestApi = <T>(path: string, init?: RequestInit, retry?: boolean) => Promise<T>;
@@ -270,17 +271,19 @@ export function createUsageTaskPipelineApi(requestApi: RequestApi) {
     const rawSession = window.localStorage.getItem('woohoo-server-session-v1');
     const token = rawSession ? (JSON.parse(rawSession) as { token?: string }).token : undefined;
 
-    const baseUrl = (window as unknown as { __WOOHOO_API_BASE?: string }).__WOOHOO_API_BASE || '';
-    const url = `${baseUrl}/api/pipelines/runs/${runId}/stream`;
+    void (async () => {
+      try {
+        const baseUrl = await getServerBaseUrl();
+        const url = `${baseUrl}/api/pipelines/runs/${runId}/stream`;
 
-    void fetch(url, {
-      headers: {
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        Accept: 'text/event-stream',
-      },
-      signal: controller.signal,
-    })
-      .then(async (response) => {
+        const response = await fetch(url, {
+          headers: {
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            Accept: 'text/event-stream',
+          },
+          signal: controller.signal,
+        });
+
         if (!response.ok || !response.body) {
           throw new Error(`SSE connection failed: ${response.status}`);
         }
@@ -315,12 +318,12 @@ export function createUsageTaskPipelineApi(requestApi: RequestApi) {
         }
 
         onDone?.();
-      })
-      .catch((error) => {
+      } catch (error) {
         if (!controller.signal.aborted) {
           onError?.(error instanceof Error ? error : new Error(String(error)));
         }
-      });
+      }
+    })();
 
     return controller;
   };

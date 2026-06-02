@@ -260,7 +260,7 @@ function generationToTurn(
       estimatedCost: calculateCost(generation.model || DEFAULT_IMAGE_MODEL, size, count),
     },
     status: generationStatusToTurnStatus(generation.status),
-    assetIds: generation.assetIds,
+    assetIds: generation.assetIds ?? [],
     b64Data: generation.b64Data,
     error: generation.errorMessage ?? undefined,
     creditsCost: generation.costCredits,
@@ -561,7 +561,7 @@ export const ImageGenerationPanel: React.FC = () => {
         };
         return nextTurns;
       });
-      if (generation.assetIds[0]) {
+      if (generation.assetIds?.[0]) {
         setSelectedAssetId(generation.assetIds[0]);
       }
     },
@@ -585,7 +585,7 @@ export const ImageGenerationPanel: React.FC = () => {
       const latestAssetId = projectGenerations
         .slice()
         .reverse()
-        .find((generation) => generation.assetIds.length > 0)?.assetIds[0];
+        .find((generation) => (generation.assetIds?.length ?? 0) > 0)?.assetIds?.[0];
       if (latestAssetId) {
         setSelectedAssetId(latestAssetId);
       }
