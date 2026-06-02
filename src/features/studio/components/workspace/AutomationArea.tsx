@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useAppStore } from '../../../../store';
 import { useShallow } from 'zustand/react/shallow';
+import { useToast } from '../../../../context/useToast';
 import type { AiTask } from '../../../../lib/serverApi';
 import styles from './AutomationArea.module.css';
 
@@ -25,6 +26,8 @@ export const AutomationArea: React.FC = () => {
     })),
   );
   const [searchQuery, setSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<string | null>(null);
+  const { showToast } = useToast();
 
   const getStatusClass = (status: string) => {
     switch (status) {
@@ -150,7 +153,11 @@ export const AutomationArea: React.FC = () => {
           />
         </div>
         <div className={styles.actions}>
-          <button className={styles.toolBtn}>
+          <button className={styles.toolBtn} onClick={() => {
+            const next = statusFilter === null ? 'running' : statusFilter === 'running' ? 'completed' : null;
+            setStatusFilter(next);
+            showToast({ type: 'info', title: '筛选', message: next ? `显示：${next === 'running' ? '运行中' : '已完成'}` : '显示全部' });
+          }}>
             <Filter size={16} /> 筛选
           </button>
           <div className={styles.sseStatus}>

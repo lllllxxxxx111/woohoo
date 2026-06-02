@@ -1920,8 +1920,10 @@ const collaborationApi = createCollaborationApi({ requestApi });
 
 export const createCollaborationSession = collaborationApi.createSession;
 export const getCollaborationSession = collaborationApi.getSession;
+export const getActiveCollaborationSession = collaborationApi.getActiveSession;
 export const dispatchCollaboration = collaborationApi.dispatch;
 export const sendCollaborationMessage = collaborationApi.sendMessage;
+export const listCollaborationMessages = collaborationApi.listMessages;
 export const checkCollaborationLoop = collaborationApi.loopCheck;
 export const admitCollaboration = collaborationApi.admit;
 export const haltCollaboration = collaborationApi.halt;

@@ -13,6 +13,7 @@ import {
   Cpu,
 } from 'lucide-react';
 import styles from './SkillsArea.module.css';
+import { useToast } from '../../../../context/useToast';
 
 type SkillStatus = 'enabled' | 'disabled';
 
@@ -121,7 +122,10 @@ function buildSkillsWithStatus(): Skill[] {
 }
 
 export const SkillsArea: React.FC = () => {
+  const { showToast } = useToast();
   const [searchQuery, setSearchQuery] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+  const [showFilterMenu, setShowFilterMenu] = useState(false);
   const [skills, setSkills] = useState<Skill[]>(buildSkillsWithStatus);
 
   /** 切换技能启用/禁用状态并持久化 */
@@ -168,8 +172,9 @@ export const SkillsArea: React.FC = () => {
 
   const filteredSkills = skills.filter(
     (skill) =>
-      skill.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      skill.description.toLowerCase().includes(searchQuery.toLowerCase()),
+      (skill.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        skill.description.toLowerCase().includes(searchQuery.toLowerCase())) &&
+      (categoryFilter === null || skill.category === categoryFilter),
   );
 
   return (
@@ -185,10 +190,43 @@ export const SkillsArea: React.FC = () => {
           />
         </div>
         <div className={styles.actions}>
-          <button className={styles.toolBtn}>
-            <Filter size={16} /> 筛选
-          </button>
-          <button className={styles.primaryBtn}>
+          <div style={{ position: 'relative' }}>
+            <button className={styles.toolBtn} onClick={() => setShowFilterMenu(!showFilterMenu)}>
+              <Filter size={16} /> 筛选
+            </button>
+            {showFilterMenu && (
+              <div style={{
+                position: 'absolute', top: '100%', right: 0, zIndex: 10,
+                background: 'var(--bg-elevated)', border: '1px solid var(--border-color)',
+                borderRadius: 6, padding: '4px 0', minWidth: 120, boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+              }}>
+                <button
+                  style={{
+                    display: 'block', width: '100%', padding: '6px 12px', textAlign: 'left',
+                    background: categoryFilter === null ? 'var(--color-primary-light-1)' : 'transparent',
+                    border: 'none', cursor: 'pointer', fontSize: 13,
+                  }}
+                  onClick={() => { setCategoryFilter(null); setShowFilterMenu(false); }}
+                >
+                  全部
+                </button>
+                {[...new Set(DEFAULT_SKILLS.map((s) => s.category))].map((cat) => (
+                  <button
+                    key={cat}
+                    style={{
+                      display: 'block', width: '100%', padding: '6px 12px', textAlign: 'left',
+                      background: categoryFilter === cat ? 'var(--color-primary-light-1)' : 'transparent',
+                      border: 'none', cursor: 'pointer', fontSize: 13,
+                    }}
+                    onClick={() => { setCategoryFilter(cat); setShowFilterMenu(false); }}
+                  >
+                    {cat}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <button className={styles.primaryBtn} onClick={() => showToast({ type: 'info', title: '即将推出', message: '自定义技能添加功能正在开发中。' })}>
             <Plus size={16} /> 添加技能
           </button>
         </div>
@@ -238,7 +276,7 @@ export const SkillsArea: React.FC = () => {
                     >
                       {skill.status === 'enabled' ? '禁用' : '启用'}
                     </button>
-                    <button className={styles.actionBtn} title="配置">
+                    <button className={styles.actionBtn} title="配置" onClick={() => showToast({ type: 'info', title: '技能配置', message: `${skill.name} 的详细配置正在开发中。` })}>
                       <Settings size={18} />
                     </button>
                   </div>

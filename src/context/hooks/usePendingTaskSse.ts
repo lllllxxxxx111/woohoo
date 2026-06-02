@@ -580,6 +580,9 @@ export function usePendingTaskSse({
   /**
    * 独立协作 SSE 连接：当存在活跃协作会话时自动建立，
    * 直接消费 /api/collaboration/events/stream 端点
+   *
+   * 后端 SSE 格式：event: collaboration, data: { sessionId, eventType, payload }
+   * 实际事件类型在 eventType 字段中，数据在 payload 子对象中
    */
   const activeCollaborationSession = useAppStore(
     (state) => state.activeCollaborationSession,
@@ -593,16 +596,22 @@ export function usePendingTaskSse({
     const controller = streamCollaborationEvents(
       (event) => {
         try {
-          const data = JSON.parse(event.data);
-          switch (event.event) {
+          const envelope = JSON.parse(event.data);
+          const eventType = envelope.eventType as string | undefined;
+          const payload = envelope.payload ?? {};
+          const sessionId = envelope.sessionId as string | undefined;
+
+          if (!eventType) return;
+
+          switch (eventType) {
             case 'collaboration_session_created':
-              if (data.sessionId) {
+              if (sessionId) {
                 useAppStore.getState().setCollaborationSession({
-                  id: data.sessionId,
+                  id: sessionId,
                   userId: '',
-                  projectId: data.projectId || '',
+                  projectId: payload.projectId || '',
                   conversationId: '',
-                  state: data.state || 'discovery',
+                  state: payload.state || 'discovery',
                   roundCount: 0,
                   createdAt: new Date().toISOString(),
                   updatedAt: new Date().toISOString(),
@@ -611,22 +620,22 @@ export function usePendingTaskSse({
               break;
 
             case 'collaboration_assignment_updated':
-              if (data.assignmentId) {
+              if (payload.assignmentId) {
                 const store = useAppStore.getState();
                 const existing = store.activeCollaborationAssignments;
                 const updated = existing.map((a) =>
-                  a.id === data.assignmentId
-                    ? { ...a, status: data.newStatus || a.status }
+                  a.id === payload.assignmentId
+                    ? { ...a, status: payload.newStatus || a.status }
                     : a,
                 );
-                if (!existing.some((a) => a.id === data.assignmentId)) {
+                if (!existing.some((a) => a.id === payload.assignmentId)) {
                   updated.push({
-                    id: data.assignmentId,
+                    id: payload.assignmentId,
                     sessionId: '',
-                    agentId: data.agentId || '',
+                    agentId: payload.agentId || '',
                     taskType: '',
                     goal: '',
-                    status: data.newStatus || 'assigned',
+                    status: payload.newStatus || 'assigned',
                     blockingQuestionCount: 0,
                     createdAt: new Date().toISOString(),
                     updatedAt: new Date().toISOString(),
@@ -637,51 +646,105 @@ export function usePendingTaskSse({
               break;
 
             case 'collaboration_queue_updated':
-              if (data.sessionId) {
+              if (sessionId) {
                 const session = useAppStore.getState().activeCollaborationSession;
-                if (session && session.id === data.sessionId) {
+                if (session && session.id === sessionId) {
                   useAppStore.getState().setCollaborationSession({
                     ...session,
-                    replyQueueJson: JSON.stringify(data.replyQueue || []),
+                    replyQueueJson: JSON.stringify(payload.replyQueue || []),
                   });
                 }
               }
               break;
 
+            case 'collaboration_question_asked': {
+              const existing = useAppStore.getState().collaborationPendingQuestions;
+              const fingerprint = `${payload.agentId || ''}-${payload.question || ''}`;
+              if (!existing.some((q) => q.fingerprint === fingerprint)) {
+                useAppStore.getState().setCollaborationPendingQuestions([
+                  ...existing,
+                  {
+                    agentId: payload.agentId || '',
+                    question: payload.question || '',
+                    fingerprint,
+                  },
+                ]);
+              }
+              break;
+            }
+
+            case 'collaboration_question_answered': {
+              const prev = useAppStore.getState().collaborationPendingQuestions;
+              const answeredFingerprint = `${payload.agentId || ''}-${payload.question || ''}`;
+              useAppStore.getState().setCollaborationPendingQuestions(
+                prev.filter((q) => q.fingerprint !== answeredFingerprint),
+              );
+              break;
+            }
+
             case 'collaboration_loop_warning':
-              if (data.level !== undefined) {
+              if (payload.level !== undefined) {
                 useAppStore.getState().setCollaborationLoopCheckResult({
                   loopDetected: true,
-                  signals: data.signals || [],
-                  level: data.level,
-                  action: data.action || '',
-                  message: data.message || '',
+                  signals: payload.signals || [],
+                  level: payload.level,
+                  action: payload.action || '',
+                  message: payload.message || '',
                 });
               }
               break;
 
             case 'collaboration_admission_changed':
-              if (data.admitted && data.sessionId) {
+              if (sessionId) {
                 const session = useAppStore.getState().activeCollaborationSession;
-                if (session && session.id === data.sessionId) {
+                if (session && session.id === sessionId) {
                   useAppStore.getState().setCollaborationSession({
                     ...session,
-                    state: 'workspace_admission',
+                    state: payload.admitted ? 'workspace_admission' : session.state,
                   });
                 }
               }
               break;
 
             case 'collaboration_workspace_started':
-              if (data.sessionId) {
+              if (sessionId) {
                 const session = useAppStore.getState().activeCollaborationSession;
-                if (session && session.id === data.sessionId) {
+                if (session && session.id === sessionId) {
                   useAppStore.getState().setCollaborationSession({
                     ...session,
                     state: 'workspace_execution',
+                    pipelineRunId: payload.pipelineRunId || session.pipelineRunId,
                   });
                 }
               }
+              break;
+
+            case 'collaboration_session_halted':
+              if (sessionId) {
+                const session = useAppStore.getState().activeCollaborationSession;
+                if (session && session.id === sessionId) {
+                  useAppStore.getState().setCollaborationSession({
+                    ...session,
+                    state: 'halted',
+                  });
+                }
+              }
+              break;
+
+            case 'collaboration_dispatched':
+              if (sessionId) {
+                const session = useAppStore.getState().activeCollaborationSession;
+                if (session && session.id === sessionId) {
+                  useAppStore.getState().setCollaborationSession({
+                    ...session,
+                    state: 'delegating',
+                  });
+                }
+              }
+              break;
+
+            case 'collaboration_message_sent':
+              // 消息已发送，无需特殊处理，由消息列表 API 刷新
               break;
           }
         } catch {
