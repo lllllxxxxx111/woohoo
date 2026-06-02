@@ -11,7 +11,7 @@ export type ImageGeneration = {
   errorMessage?: string | null;
   urls: string[];
   b64Data: string[];
-  assetIds: string[];
+  assetIds?: string[];
   revisedPrompt?: string | null;
   costCredits: number;
   createdAt: string;

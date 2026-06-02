@@ -146,9 +146,9 @@ export const VideoView: React.FC = () => {
             return (
               <div key={shot.id} className={styles.entityCard}>
                 <div className={styles.videoPreview}>
-                  {isCompleted && gen.resultUrl ? (
+                  {isCompleted && gen.url ? (
                     <video
-                      src={gen.resultUrl}
+                      src={gen.url}
                       className={styles.videoResult}
                       muted
                       loop

@@ -2,15 +2,14 @@ export type VideoGenerationStatus = 'pending' | 'processing' | 'completed' | 'fa
 
 export type VideoGeneration = {
   id: string;
-  projectId?: string | null;
   prompt: string;
   model: string;
   durationSeconds?: number | null;
   aspectRatio: string;
   status: VideoGenerationStatus;
   errorMessage?: string | null;
-  resultUrl?: string | null;
-  resultB64Json?: string | null;
+  url?: string | null;
+  b64Data?: string | null;
   costCredits: number;
   createdAt: string;
   completedAt?: string | null;

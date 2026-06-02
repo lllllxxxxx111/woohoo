@@ -1,3 +1,4 @@
+import { getServerBaseUrl } from './serverApi';
 import type {
   CollaborationSession,
   CollaborationSessionSummary,
@@ -114,17 +115,19 @@ export function createCollaborationApi({ requestApi }: CreateCollaborationApiInp
     const rawSession = window.localStorage.getItem('woohoo-server-session-v1');
     const token = rawSession ? (JSON.parse(rawSession) as { token?: string }).token : undefined;
 
-    const baseUrl = (window as unknown as { __WOOHOO_API_BASE?: string }).__WOOHOO_API_BASE || '';
-    const url = `${baseUrl}/api/collaboration/events/stream`;
+    void (async () => {
+      try {
+        const baseUrl = await getServerBaseUrl();
+        const url = `${baseUrl}/api/collaboration/events/stream`;
 
-    void fetch(url, {
-      headers: {
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        Accept: 'text/event-stream',
-      },
-      signal: controller.signal,
-    })
-      .then(async (response) => {
+        const response = await fetch(url, {
+          headers: {
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            Accept: 'text/event-stream',
+          },
+          signal: controller.signal,
+        });
+
         if (!response.ok || !response.body) {
           throw new Error(`Collaboration SSE connection failed: ${response.status}`);
         }
@@ -151,12 +154,12 @@ export function createCollaborationApi({ requestApi }: CreateCollaborationApiInp
             }
           }
         }
-      })
-      .catch((error) => {
+      } catch (error) {
         if (!controller.signal.aborted) {
           onError?.(error instanceof Error ? error : new Error(String(error)));
         }
-      });
+      }
+    })();
 
     return controller;
   };
