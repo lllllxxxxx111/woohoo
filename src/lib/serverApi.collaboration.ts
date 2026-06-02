@@ -59,6 +59,20 @@ export function createCollaborationApi({ requestApi }: CreateCollaborationApiInp
     );
   };
 
+  /** 获取协同会话的消息列表 */
+  const listMessages = async (sessionId: string) => {
+    return requestApi<CollaborationMessage[]>(
+      `/api/collaboration/sessions/${sessionId}/messages`,
+    );
+  };
+
+  /** 获取项目当前活跃的协同会话 */
+  const getActiveSession = async (projectId: string) => {
+    return requestApi<CollaborationSession>(
+      `/api/collaboration/sessions/active?projectId=${projectId}`,
+    );
+  };
+
   const loopCheck = async (sessionId: string) => {
     return requestApi<LoopCheckResponse>(
       `/api/collaboration/sessions/${sessionId}/loop-check`,
@@ -150,8 +164,10 @@ export function createCollaborationApi({ requestApi }: CreateCollaborationApiInp
   return {
     createSession,
     getSession,
+    getActiveSession,
     dispatch,
     sendMessage,
+    listMessages,
     loopCheck,
     admit,
     halt,
