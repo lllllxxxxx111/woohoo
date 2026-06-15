@@ -82,8 +82,8 @@ export const OpsMonitorPanel: React.FC = () => {
       {unresolvedFindings.length > 0 && (
         <div style={{ marginTop: 8 }}>
           <Text bold style={{ marginBottom: 4, display: 'block' }}>未解决的检查发现</Text>
-          {unresolvedFindings.slice(0, 5).map((f) => (
-            <div key={f.id} style={{ padding: '4px 0', fontSize: 12 }}>
+          {unresolvedFindings.slice(0, 5).map((f, i) => (
+            <div key={f.id || `finding-${i}`} style={{ padding: '4px 0', fontSize: 12 }}>
               <Tag
                 color={f.severity === 'critical' ? 'red' : f.severity === 'warning' ? 'orange' : 'blue'}
                 size="small"
@@ -99,8 +99,8 @@ export const OpsMonitorPanel: React.FC = () => {
       {overview.heartbeats.length > 0 && (
         <div style={{ marginTop: 8 }}>
           <Text bold style={{ marginBottom: 4, display: 'block' }}>最近心跳</Text>
-          {overview.heartbeats.slice(0, 3).map((h) => (
-            <div key={h.id} style={{ padding: '2px 0', fontSize: 12 }}>
+          {overview.heartbeats.slice(0, 3).map((h, i) => (
+            <div key={h.id || `heartbeat-${i}`} style={{ padding: '2px 0', fontSize: 12 }}>
               <Tag color={h.status === 'healthy' ? 'green' : 'red'} size="small">
                 {h.status}
               </Tag>

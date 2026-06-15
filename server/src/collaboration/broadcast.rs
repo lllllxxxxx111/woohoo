@@ -24,7 +24,12 @@ impl CollaborationBroadcaster {
     }
 
     /// 广播协同事件
-    pub fn broadcast(&self, session_id: String, event_type: &str, payload: Option<serde_json::Value>) {
+    pub fn broadcast(
+        &self,
+        session_id: String,
+        event_type: &str,
+        payload: Option<serde_json::Value>,
+    ) {
         let envelope = CollaborationEventEnvelope {
             session_id,
             event_type: event_type.to_string(),

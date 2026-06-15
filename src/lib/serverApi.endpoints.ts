@@ -50,6 +50,17 @@ export type UpsertEndpointCapabilityInput = {
   configJson?: string;
 };
 
+export type ListEndpointModelsInput = {
+  endpointId?: string | null;
+  provider?: string;
+  baseUrl?: string;
+  apiKey?: string;
+};
+
+export type ListEndpointModelsResult = {
+  models: string[];
+};
+
 type CreateEndpointApiInput = {
   requestApi: RequestApi;
   readCachedApi: ReadCachedApi;
@@ -141,6 +152,18 @@ export function createEndpointApi({
     invalidateApiCache(cacheKeys.aiEndpoints);
   };
 
+  const listServerAiEndpointModels = async (input: ListEndpointModelsInput) => {
+    return requestApi<ListEndpointModelsResult>('/api/ai/endpoints/models', {
+      method: 'POST',
+      body: JSON.stringify({
+        endpointId: input.endpointId || undefined,
+        provider: input.provider?.trim() || undefined,
+        baseUrl: input.baseUrl?.trim() || undefined,
+        apiKey: input.apiKey?.trim() || undefined,
+      }),
+    });
+  };
+
   const listServerAiEndpointCapabilities = async (endpointId: string) => {
     return requestApi<ServerAiEndpointCapability[]>(
       `/api/ai/endpoints/${endpointId}/capabilities`,
@@ -168,6 +191,7 @@ export function createEndpointApi({
     createServerAiEndpoint,
     updateServerAiEndpoint,
     deleteServerAiEndpoint,
+    listServerAiEndpointModels,
     listServerAiEndpointCapabilities,
     upsertServerAiEndpointCapability,
   };

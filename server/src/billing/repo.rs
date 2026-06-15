@@ -73,13 +73,12 @@ pub async fn check_and_deduct(
     .await?;
 
     if result.rows_affected() == 0 {
-        let current = sqlx::query_scalar::<_, f64>(
-            "SELECT balance FROM user_credits WHERE user_id = ?",
-        )
-        .bind(user_id)
-        .fetch_one(&mut *tx)
-        .await
-        .unwrap_or(0.0);
+        let current =
+            sqlx::query_scalar::<_, f64>("SELECT balance FROM user_credits WHERE user_id = ?")
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap_or(0.0);
 
         tx.rollback().await?;
         return Err(anyhow!(

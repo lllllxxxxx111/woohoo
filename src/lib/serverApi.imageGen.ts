@@ -33,7 +33,7 @@ export type UserCredits = {
   balance: number;
   totalEarned: number;
   totalSpent: number;
-  updatedAt: string;
+  updatedAt?: string;
   createdAt: string;
 };
 
@@ -51,15 +51,6 @@ export type CreditTransaction = {
 
 type RequestApi = <T>(path: string, init?: RequestInit, retry?: boolean) => Promise<T>;
 
-function withTimeout(ms: number) {
-  const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), ms);
-  return {
-    signal: controller.signal,
-    clear: () => window.clearTimeout(timeoutId),
-  };
-}
-
 type ImageGenApiDeps = {
   invalidateWorkspaceCache?: () => void;
 };
@@ -75,18 +66,13 @@ export function createImageGenApi(requestApi: RequestApi, deps: ImageGenApiDeps 
     },
 
     async createGeneration(input: CreateImageGenerationInput) {
-      const timeout = withTimeout(120_000);
-      try {
-        const generation = await requestApi<ImageGeneration>('/api/image-gen/generations', {
-          method: 'POST',
-          body: JSON.stringify(input),
-          signal: timeout.signal,
-        });
-        deps.invalidateWorkspaceCache?.();
-        return generation;
-      } finally {
-        timeout.clear();
-      }
+      const generation = await requestApi<ImageGeneration>('/api/image-gen/generations', {
+        method: 'POST',
+        body: JSON.stringify(input),
+        signal: new AbortController().signal,
+      });
+      deps.invalidateWorkspaceCache?.();
+      return generation;
     },
 
     getCredits() {

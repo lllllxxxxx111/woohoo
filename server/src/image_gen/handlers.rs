@@ -2,9 +2,13 @@ use axum::{
     extract::{Path, State},
     Json,
 };
+use base64::{engine::general_purpose, Engine as _};
+use chrono::{SecondsFormat, Utc};
 use sqlx::SqlitePool;
 use std::env;
+use std::path::PathBuf;
 use std::time::Duration;
+use tokio::fs;
 
 use crate::auth::middleware::UserId;
 use crate::error::AppError;
@@ -13,13 +17,8 @@ use crate::AppState;
 use super::model::*;
 use super::repo;
 
-/// 图片生成 API 调用超时时间（秒）
-const IMAGE_GEN_TIMEOUT_SECS: u64 = 120;
+const IMAGE_GEN_TIMEOUT_SECS: u64 = 3600;
 
-/// 创建图片生成任务
-///
-/// 执行顺序：校验 → 扣费 → 创建记录 → 调用 API → 更新状态
-/// 先扣费再创建记录，避免崩溃后产生未扣费的 pending 记录导致误退款
 pub async fn create_generation(
     State(state): State<AppState>,
     axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
@@ -35,9 +34,36 @@ pub async fn create_generation(
         ));
     }
 
-    let cost = calculate_cost(&req.model, &req.size, req.n);
+    let project_id = normalize_project_id(req.project_id.as_deref());
+    if let Some(project_id) = project_id.as_deref() {
+        ensure_project_access(&state.db, &user_id.0, project_id).await?;
+    }
 
-    // 先扣费，避免创建记录后崩溃导致非原子问题
+    let resolved = crate::ai::capabilities::resolve_image_generation_capability(
+        &state,
+        &user_id.0,
+        req.endpoint_id.as_deref(),
+        Some(&req.model),
+    )
+    .await
+    .map_err(|error| {
+        tracing::warn!(error = %error, "image generation endpoint resolution failed");
+        let api_key = env::var("AI_API_KEY").unwrap_or_default();
+        if api_key.is_empty() {
+            return AppError::Validation(
+                "Please enable an image generation API channel in settings or configure AI_API_KEY."
+                    .into(),
+            );
+        }
+        AppError::Internal(format!(
+            "image generation endpoint resolution failed: {}",
+            error
+        ))
+    })?;
+
+    let resolved_model = resolved.model.clone();
+    let cost = calculate_cost(&resolved_model, &req.size, req.n);
+
     crate::billing::repo::check_and_deduct(
         &state.db,
         &user_id.0,
@@ -49,39 +75,36 @@ pub async fn create_generation(
     .await
     .map_err(|error| AppError::PaymentRequired(error.to_string()))?;
 
-    // 扣费成功后创建 generation 记录
-    let generation = repo::create_generation(
+    let generation = match repo::create_generation(
         &state.db,
         &user_id.0,
+        project_id.as_deref(),
         &req.prompt,
-        &req.model,
+        &resolved_model,
         &req.size,
         req.n,
         cost,
     )
     .await
-    .map_err(|error| {
-        // 创建记录失败，立即退款
-        let user_id_clone = user_id.0.clone();
-        let db_clone = state.db.clone();
-        tokio::spawn(async move {
-            if let Err(e) = crate::billing::repo::refund(
-                &db_clone,
-                &user_id_clone,
+    {
+        Ok(generation) => generation,
+        Err(error) => {
+            if let Err(refund_error) = crate::billing::repo::refund(
+                &state.db,
+                &user_id.0,
                 cost,
                 "image_generation_record_create_failed",
                 None,
             )
             .await
             {
-                tracing::error!(error = %e, "创建记录失败后退款也失败");
+                tracing::error!(error = %refund_error, "failed to refund after image generation record creation failed");
             }
-        });
-        AppError::Internal(error.to_string())
-    })?;
+            return Err(AppError::Internal(error.to_string()));
+        }
+    };
 
-    // 更新扣费记录的 ref_id 为 generation id
-    if let Err(e) = crate::billing::repo::update_spent_ref_id(
+    if let Err(error) = crate::billing::repo::update_spent_ref_id(
         &state.db,
         &user_id.0,
         "image_generation",
@@ -89,54 +112,69 @@ pub async fn create_generation(
     )
     .await
     {
-        tracing::warn!(generation_id = %generation.id, error = %e, "更新扣费记录 ref_id 失败，不影响主流程");
+        tracing::warn!(generation_id = %generation.id, error = %error, "failed to update image generation billing ref_id");
     }
 
-    repo::set_processing(&state.db, &generation.id)
-        .await
-        .map_err(|error| {
-            tracing::error!(generation_id = %generation.id, error = %error, "set_processing 失败，积分已扣");
-            AppError::Internal(error.to_string())
-        })?;
-
-    // 从数据库端点配置解析图片生成能力，支持用户在前端设置页面配置
-    let resolved = crate::ai::capabilities::resolve_image_generation_capability(
-        &state,
-        &user_id.0,
-        None,
-        Some(&req.model),
-    )
-    .await
-    .map_err(|error| {
-        tracing::warn!(error = %error, "图片生成端点解析失败，回退到环境变量");
-        let _base_url = env::var("AI_BASE_URL")
-            .unwrap_or_else(|_| "https://api.openai.com".to_string());
-        let api_key = env::var("AI_API_KEY").unwrap_or_default();
-        if api_key.is_empty() {
-            return AppError::Validation(
-                "请先在设置里为 API 通道启用图片生成能力，或配置 AI_API_KEY 环境变量".into(),
-            );
-        }
-        AppError::Internal(format!("图片生成端点解析失败: {}", error))
-    })?;
+    if let Err(error) = repo::set_processing(&state.db, &generation.id).await {
+        refund_and_fail(&state, &user_id.0, &generation.id, cost, &error.to_string()).await?;
+        return Err(AppError::Internal(error.to_string()));
+    }
 
     let base_url = resolved.endpoint.base_url.clone();
     let api_key = resolved.endpoint.api_key.clone();
-    let model = resolved.model.clone();
+    let model = resolved_model;
+    let task_state = state.clone();
+    let task_user_id = user_id.0.clone();
+    let task_generation_id = generation.id.clone();
+    let task_project_id = project_id.clone();
+    let task_prompt = req.prompt.clone();
+    let task_size = req.size.clone();
+    let task_n = req.n;
 
-    let client = &state.ai_client;
+    tokio::spawn(async move {
+        if let Err(error) = run_generation_task(
+            task_state,
+            task_user_id,
+            task_generation_id.clone(),
+            task_project_id,
+            base_url,
+            api_key,
+            model,
+            task_prompt,
+            task_size,
+            task_n,
+            cost,
+        )
+        .await
+        {
+            tracing::error!(
+                generation_id = %task_generation_id,
+                error = %error,
+                "background image generation task failed"
+            );
+        }
+    });
 
-    // 带超时的 API 调用，防止长时间阻塞
+    build_generation_response(&state.db, &generation.id, &user_id.0).await
+}
+
+async fn run_generation_task(
+    state: AppState,
+    user_id: String,
+    generation_id: String,
+    project_id: Option<String>,
+    base_url: String,
+    api_key: String,
+    model: String,
+    prompt: String,
+    size: String,
+    n: i64,
+    cost: f64,
+) -> Result<(), AppError> {
     let generate_result = tokio::time::timeout(
         Duration::from_secs(IMAGE_GEN_TIMEOUT_SECS),
-        client.generate_image(
-            &base_url,
-            &api_key,
-            &model,
-            &req.prompt,
-            &req.size,
-            req.n as u32,
-            "b64_json",
+        state.ai_client.generate_image(
+            &base_url, &api_key, &model, &prompt, &size, n as u32, "b64_json",
         ),
     )
     .await;
@@ -159,38 +197,303 @@ pub async fn create_generation(
                 }
             }
 
-            repo::set_completed(
+            let asset_ids = match persist_generated_assets(
+                &state,
+                project_id.as_deref(),
+                &generation_id,
+                &prompt,
+                &model,
+                &size,
+                &response.data,
+            )
+            .await
+            {
+                Ok(asset_ids) => asset_ids,
+                Err(error) => {
+                    refund_and_fail(&state, &user_id, &generation_id, cost, &error.to_string())
+                        .await?;
+                    return Ok(());
+                }
+            };
+
+            if let Err(error) = repo::set_completed(
                 &state.db,
-                &generation.id,
+                &generation_id,
                 &urls,
                 b64_data.first().map(|value| value.as_str()),
+                &asset_ids,
                 revised_prompt.as_deref(),
                 cost,
             )
             .await
-            .map_err(|error| AppError::Internal(error.to_string()))?;
+            {
+                refund_and_fail(&state, &user_id, &generation_id, cost, &error.to_string()).await?;
+                return Err(AppError::Internal(error.to_string()));
+            }
         }
         Ok(Err(error)) => {
-            refund_and_fail(&state, &user_id.0, &generation.id, cost, &error.to_string()).await?;
-            return Err(AppError::Internal(format!(
-                "image generation failed: {}",
-                error
-            )));
+            refund_and_fail(&state, &user_id, &generation_id, cost, &error.to_string()).await?;
         }
         Err(_) => {
             let timeout_msg = format!(
                 "image generation timed out after {}s",
                 IMAGE_GEN_TIMEOUT_SECS
             );
-            refund_and_fail(&state, &user_id.0, &generation.id, cost, &timeout_msg).await?;
-            return Err(AppError::Internal(timeout_msg));
+            refund_and_fail(&state, &user_id, &generation_id, cost, &timeout_msg).await?;
         }
     }
 
-    build_generation_response(&state.db, &generation.id, &user_id.0).await
+    Ok(())
 }
 
-/// 退款并标记 generation 为失败
+async fn ensure_project_access(
+    db: &SqlitePool,
+    user_id: &str,
+    project_id: &str,
+) -> Result<(), AppError> {
+    let project = crate::project::repo::find_by_id(db, project_id).await?;
+    let project = project.ok_or_else(|| AppError::NotFound("project not found".to_string()))?;
+    if project.user_id != user_id {
+        return Err(AppError::Forbidden(
+            "not allowed to use this project for image generation".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn persist_generated_assets(
+    state: &AppState,
+    project_id: Option<&str>,
+    generation_id: &str,
+    prompt: &str,
+    model: &str,
+    size: &str,
+    items: &[crate::ai::client::ImageDataItem],
+) -> Result<Vec<String>, AppError> {
+    let Some(project_id) = project_id else {
+        return Ok(Vec::new());
+    };
+
+    let mut asset_ids = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let asset = if let Some(b64_json) = item.b64_json.as_deref() {
+            persist_b64_image_asset(
+                state,
+                project_id,
+                generation_id,
+                index,
+                prompt,
+                model,
+                size,
+                b64_json,
+                item.revised_prompt.as_deref(),
+            )
+            .await?
+        } else if let Some(url) = item.url.as_deref() {
+            persist_remote_image_asset(
+                state,
+                project_id,
+                generation_id,
+                index,
+                prompt,
+                model,
+                size,
+                url,
+                item.revised_prompt.as_deref(),
+            )
+            .await?
+        } else {
+            continue;
+        };
+        asset_ids.push(asset.id);
+    }
+
+    Ok(asset_ids)
+}
+
+async fn persist_b64_image_asset(
+    state: &AppState,
+    project_id: &str,
+    generation_id: &str,
+    index: usize,
+    prompt: &str,
+    model: &str,
+    size: &str,
+    b64_json: &str,
+    revised_prompt: Option<&str>,
+) -> Result<crate::asset::model::Asset, AppError> {
+    let extension = image_extension_from_b64(b64_json);
+    let bytes = decode_image_b64(b64_json)?;
+    let assets_root = resolve_assets_root(state).await?;
+    let filename = format!(
+        "image-generation-{}-{}.{}",
+        generation_id,
+        index + 1,
+        extension
+    );
+    let file_path = assets_root.join(&filename);
+    if !file_path.starts_with(&assets_root) {
+        return Err(AppError::Forbidden(
+            "invalid generated image path".to_string(),
+        ));
+    }
+
+    fs::write(&file_path, &bytes)
+        .await
+        .map_err(|error| AppError::Internal(format!("failed to write generated image: {error}")))?;
+
+    let asset_url = format!("/uploads/{filename}");
+    let metadata = generated_asset_metadata(
+        generation_id,
+        index,
+        prompt,
+        model,
+        size,
+        revised_prompt,
+        Some(bytes.len()),
+        None,
+    );
+
+    crate::asset::repo::create_asset(
+        &state.db,
+        project_id,
+        &generated_asset_name(index),
+        "image",
+        &asset_url,
+        Some(&metadata),
+    )
+    .await
+}
+
+async fn persist_remote_image_asset(
+    state: &AppState,
+    project_id: &str,
+    generation_id: &str,
+    index: usize,
+    prompt: &str,
+    model: &str,
+    size: &str,
+    url: &str,
+    revised_prompt: Option<&str>,
+) -> Result<crate::asset::model::Asset, AppError> {
+    let metadata = generated_asset_metadata(
+        generation_id,
+        index,
+        prompt,
+        model,
+        size,
+        revised_prompt,
+        None,
+        Some(url),
+    );
+
+    crate::asset::repo::create_asset(
+        &state.db,
+        project_id,
+        &generated_asset_name(index),
+        "image",
+        url,
+        Some(&metadata),
+    )
+    .await
+}
+
+async fn resolve_assets_root(state: &AppState) -> Result<PathBuf, AppError> {
+    fs::create_dir_all(&state.config.assets_dir)
+        .await
+        .map_err(|error| AppError::Internal(format!("failed to create assets dir: {error}")))?;
+    fs::canonicalize(&state.config.assets_dir)
+        .await
+        .map_err(|error| AppError::Internal(format!("failed to resolve assets dir: {error}")))
+}
+
+fn normalize_project_id(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn decode_image_b64(value: &str) -> Result<Vec<u8>, AppError> {
+    let raw = strip_data_url_prefix(value);
+    let cleaned: String = raw.chars().filter(|ch| !ch.is_whitespace()).collect();
+    general_purpose::STANDARD
+        .decode(cleaned)
+        .map_err(|error| AppError::Internal(format!("failed to decode generated image: {error}")))
+}
+
+fn strip_data_url_prefix(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.starts_with("data:") {
+        return trimmed
+            .split_once(',')
+            .map(|(_, data)| data)
+            .unwrap_or(trimmed);
+    }
+    trimmed
+}
+
+fn image_extension_from_b64(value: &str) -> &'static str {
+    let lower_prefix = value
+        .get(..value.len().min(32))
+        .unwrap_or(value)
+        .to_ascii_lowercase();
+    if lower_prefix.starts_with("data:image/jpeg") || lower_prefix.starts_with("data:image/jpg") {
+        "jpg"
+    } else if lower_prefix.starts_with("data:image/webp") {
+        "webp"
+    } else {
+        "png"
+    }
+}
+
+fn generated_asset_name(index: usize) -> String {
+    format!(
+        "AI Image {} {}",
+        Utc::now().format("%Y-%m-%d %H-%M-%S"),
+        index + 1
+    )
+}
+
+fn generated_asset_metadata(
+    generation_id: &str,
+    index: usize,
+    prompt: &str,
+    model: &str,
+    size: &str,
+    revised_prompt: Option<&str>,
+    size_bytes: Option<usize>,
+    source_url: Option<&str>,
+) -> String {
+    let mut metadata = serde_json::json!({
+        "origin": "image_generation",
+        "source": "image_generation",
+        "generationId": generation_id,
+        "generationIndex": index,
+        "prompt": prompt,
+        "model": model,
+        "size": size,
+        "generatedAt": Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+    });
+
+    if let Some(map) = metadata.as_object_mut() {
+        if let Some(revised_prompt) = revised_prompt {
+            map.insert(
+                "revisedPrompt".to_string(),
+                serde_json::json!(revised_prompt),
+            );
+        }
+        if let Some(size_bytes) = size_bytes {
+            map.insert("sizeBytes".to_string(), serde_json::json!(size_bytes));
+        }
+        if let Some(source_url) = source_url {
+            map.insert("sourceUrl".to_string(), serde_json::json!(source_url));
+        }
+    }
+
+    metadata.to_string()
+}
+
 async fn refund_and_fail(
     state: &AppState,
     user_id: &str,
@@ -198,7 +501,7 @@ async fn refund_and_fail(
     cost: f64,
     error_msg: &str,
 ) -> Result<(), AppError> {
-    if let Err(refund_err) = crate::billing::repo::refund(
+    if let Err(refund_error) = crate::billing::repo::refund(
         &state.db,
         user_id,
         cost,
@@ -209,8 +512,8 @@ async fn refund_and_fail(
     {
         tracing::error!(
             generation_id = %generation_id,
-            error = %refund_err,
-            "退款失败，用户积分可能丢失"
+            error = %refund_error,
+            "failed to refund image generation charge"
         );
     }
 
@@ -221,7 +524,6 @@ async fn refund_and_fail(
     Ok(())
 }
 
-/// 查询单个图片生成结果（含用户归属校验）
 pub async fn get_generation(
     State(state): State<AppState>,
     axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
@@ -230,7 +532,6 @@ pub async fn get_generation(
     build_generation_response(&state.db, &generation_id, &user_id.0).await
 }
 
-/// 列出当前用户的图片生成记录
 pub async fn list_generations(
     State(state): State<AppState>,
     axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
@@ -247,7 +548,6 @@ pub async fn list_generations(
     ))
 }
 
-/// 构建图片生成响应，校验用户归属
 async fn build_generation_response(
     db: &SqlitePool,
     generation_id: &str,
@@ -258,13 +558,17 @@ async fn build_generation_response(
         .map_err(|error| AppError::NotFound(format!("image generation not found: {}", error)))?;
 
     if generation.user_id != user_id {
-        return Err(AppError::Forbidden("无权访问此图片生成记录".to_string()));
+        return Err(AppError::Forbidden(
+            "not allowed to access this image generation".to_string(),
+        ));
     }
 
     Ok(Json(generation_to_response(generation)))
 }
 
-fn generation_to_response(row: crate::image_gen::model::ImageGeneration) -> ImageGenerationResponse {
+fn generation_to_response(
+    row: crate::image_gen::model::ImageGeneration,
+) -> ImageGenerationResponse {
     let urls: Vec<String> = row
         .result_urls
         .as_ref()
@@ -280,13 +584,16 @@ fn generation_to_response(row: crate::image_gen::model::ImageGeneration) -> Imag
 
     ImageGenerationResponse {
         id: row.id,
+        project_id: row.project_id,
         prompt: row.prompt,
         model: row.model,
         size: row.size,
+        n: row.n,
         status: row.status,
         error_message: row.error_message,
         urls,
         b64_data,
+        asset_ids: parse_json_string_list(row.asset_ids.as_deref()),
         revised_prompt: row.revised_prompt,
         cost_credits: row.cost_credits,
         created_at: row.created_at,
@@ -294,7 +601,12 @@ fn generation_to_response(row: crate::image_gen::model::ImageGeneration) -> Imag
     }
 }
 
-/// 根据模型、尺寸、数量计算积分消耗
+fn parse_json_string_list(value: Option<&str>) -> Vec<String> {
+    value
+        .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+        .unwrap_or_default()
+}
+
 fn calculate_cost(model: &str, size: &str, n: i64) -> f64 {
     let base_cost = match model {
         "dall-e-3" => 5.0,

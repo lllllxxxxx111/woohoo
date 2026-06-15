@@ -100,19 +100,27 @@ const RUN_ERROR_LABELS: Record<string, { label: string; hint: string }> = {
 const EMPTY_PIPELINE_STEPS: PipelineRunSummary['steps'] = [];
 const EMPTY_PIPELINE_OUTPUTS: PipelineRunSummary['outputs'] = [];
 
-const extractOutlineTextCandidate = (value: unknown): string => {
+const extractOutlineTextCandidate = (value: unknown, allowSummary = true): string => {
   if (typeof value === 'string') {
     return value.trim();
   }
 
   if (Array.isArray(value)) {
-    return value.map(extractOutlineTextCandidate).filter(Boolean).join('\n\n');
+    return value.map((v) => extractOutlineTextCandidate(v, allowSummary)).filter(Boolean).join('\n\n');
   }
 
   if (value && typeof value === 'object') {
     const record = value as Record<string, unknown>;
-    for (const key of ['outline', 'content', 'text', 'result', 'draft', 'body', 'summary']) {
-      const candidate = extractOutlineTextCandidate(record[key]);
+    // 检测审核 JSON 格式（包含 decision + issues 字段），不应作为大纲内容
+    if ('decision' in record && 'issues' in record) {
+      return '';
+    }
+    // summary 字段优先级最低，避免审核摘要被误提取
+    const keys = allowSummary
+      ? ['outline', 'content', 'text', 'result', 'draft', 'body', 'summary']
+      : ['outline', 'content', 'text', 'result', 'draft', 'body'];
+    for (const key of keys) {
+      const candidate = extractOutlineTextCandidate(record[key], key !== 'summary');
       if (candidate) {
         return candidate;
       }
@@ -122,9 +130,28 @@ const extractOutlineTextCandidate = (value: unknown): string => {
   return '';
 };
 
+/** 判断 AI Task 结果是否为审核格式（包含 decision/issues 字段的 JSON） */
+const isReviewResult = (result: string | null | undefined): boolean => {
+  const raw = result?.trim();
+  if (!raw || !raw.startsWith('{') || !raw.endsWith('}')) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return 'decision' in parsed && 'issues' in parsed;
+  } catch {
+    return false;
+  }
+};
+
 const normalizeOutlineTaskResult = (result: string | null | undefined): string => {
   const raw = result?.trim();
   if (!raw) {
+    return '';
+  }
+
+  // 审核结果不应作为大纲内容
+  if (isReviewResult(result)) {
     return '';
   }
 
@@ -784,7 +811,10 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
         }
         if (!nextOutline && outlineDocumentSource.taskId) {
           const task = await getAiTask(outlineDocumentSource.taskId);
-          nextOutline = normalizeOutlineTaskResult(task.result);
+          // 校验：只有非审核结果才同步到大纲内容，避免审核 JSON 被写入 outlineDraft
+          if (!isReviewResult(task.result)) {
+            nextOutline = normalizeOutlineTaskResult(task.result);
+          }
         }
         if (cancelled) {
           return;

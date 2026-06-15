@@ -203,21 +203,43 @@ fn extract_client_ip(request: &Request) -> String {
 }
 
 fn should_skip_rate_limit(request: &Request) -> bool {
+    let path = request.uri().path();
+
     request.method() == Method::OPTIONS
-        || request.uri().path() == "/health"
+        || path == "/health"
+        || is_generation_rate_limit_exempt(request.method(), path)
+        // SSE 长连接流端点不受限流
+        || path.starts_with("/api/ai/tasks/stream")
+        || path.starts_with("/api/collaboration/events/stream")
+        || path.contains("/stream") && path.starts_with("/api/pipelines/runs/")
         || (request.method() == Method::GET
             && matches!(
-                request.uri().path(),
+                path,
                 "/api/auth/me"
                     | "/api/workspace/bootstrap"
                     | "/api/ai/endpoints"
                     | "/api/ai/usage/summary"
                     | "/api/ai/usage/records"
                     | "/api/notifications/channels"
-                    | "/api/image-gen/generations"
                     | "/api/billing/credits"
                     | "/api/billing/transactions"
             ))
+}
+
+fn is_generation_rate_limit_exempt(method: &Method, path: &str) -> bool {
+    if method == Method::POST {
+        return matches!(
+            path,
+            "/api/image-gen/generations" | "/api/video-gen/generations"
+        );
+    }
+
+    method == Method::GET
+        && (matches!(
+            path,
+            "/api/image-gen/generations" | "/api/video-gen/generations"
+        ) || path.starts_with("/api/image-gen/generations/")
+            || path.starts_with("/api/video-gen/generations/"))
 }
 
 /**
@@ -248,5 +270,43 @@ pub async fn rate_limit_middleware(
         Err(AppError::TooManyRequests(
             "请求过于频繁，请稍后重试".to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+
+    fn request(method: Method, path: &str) -> Request {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[test]
+    fn skips_rate_limit_for_generation_submission() {
+        assert!(should_skip_rate_limit(&request(
+            Method::POST,
+            "/api/image-gen/generations"
+        )));
+        assert!(should_skip_rate_limit(&request(
+            Method::POST,
+            "/api/video-gen/generations"
+        )));
+    }
+
+    #[test]
+    fn skips_rate_limit_for_generation_status_polling() {
+        assert!(should_skip_rate_limit(&request(
+            Method::GET,
+            "/api/image-gen/generations/image-123"
+        )));
+        assert!(should_skip_rate_limit(&request(
+            Method::GET,
+            "/api/video-gen/generations/video-123"
+        )));
     }
 }

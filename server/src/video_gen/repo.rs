@@ -96,11 +96,7 @@ pub async fn set_completed(
 }
 
 /// 标记为失败
-pub async fn set_failed(
-    pool: &SqlitePool,
-    generation_id: &str,
-    error_message: &str,
-) -> Result<()> {
+pub async fn set_failed(pool: &SqlitePool, generation_id: &str, error_message: &str) -> Result<()> {
     let now = now_rfc3339();
 
     sqlx::query(

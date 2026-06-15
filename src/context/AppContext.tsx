@@ -112,9 +112,13 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   }, []);
 
   const setAssets = useCallback((updater: SetStateAction<Asset[]>) => {
-    useAppStore.setState((state) => ({
-      assets: resolveStateUpdate(updater, state.assets),
-    }));
+    useAppStore.setState((state) => {
+      const nextAssets = resolveStateUpdate(updater, state.assets);
+      return {
+        assets: nextAssets,
+        activeAssets: nextAssets.filter((asset) => asset.projectId === state.activeState.projectId),
+      };
+    });
   }, []);
 
   const setScripts = useCallback((updater: SetStateAction<Script[]>) => {

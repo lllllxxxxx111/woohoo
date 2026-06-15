@@ -215,39 +215,113 @@ async fn resolve_capability(
         updated_at: row.capability_updated_at.unwrap_or_default(),
     });
 
-    let model = requested_model
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            capability_record
-                .as_ref()
-                .and_then(|item| item.model.as_deref())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-        })
-        .or_else(|| {
-            endpoint
-                .default_model
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-        })
-        .or_else(|| fallback_model.map(str::to_owned))
-        .ok_or_else(|| {
-            let label = match capability {
-                "image_generation" => "图片生成",
-                "video_generation" => "视频生成",
-                other => other,
-            };
-            AppError::Validation(format!("{}模型未配置", label))
-        })?;
+    let model = select_capability_model(
+        capability,
+        requested_model,
+        capability_record
+            .as_ref()
+            .and_then(|item| item.model.as_deref()),
+        endpoint.default_model.as_deref(),
+        fallback_model,
+    )
+    .ok_or_else(|| {
+        let label = match capability {
+            "image_generation" => "图片生成",
+            "video_generation" => "视频生成",
+            other => other,
+        };
+        AppError::Validation(format!("{}模型未配置", label))
+    })?;
 
     Ok(ResolvedAiCapability {
         endpoint,
         capability: capability_record,
         model,
     })
+}
+
+fn normalize_model_name(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn select_capability_model(
+    capability: &str,
+    requested_model: Option<&str>,
+    capability_model: Option<&str>,
+    endpoint_default_model: Option<&str>,
+    fallback_model: Option<&str>,
+) -> Option<String> {
+    let requested_model = normalize_model_name(requested_model);
+    let capability_model = normalize_model_name(capability_model);
+    let endpoint_default_model = normalize_model_name(endpoint_default_model);
+    let fallback_model = normalize_model_name(fallback_model);
+
+    let requested_is_endpoint_default = requested_model
+        .as_deref()
+        .zip(endpoint_default_model.as_deref())
+        .map(|(requested, default_model)| requested.eq_ignore_ascii_case(default_model))
+        .unwrap_or(false);
+    let should_prefer_capability_model =
+        matches!(capability, "image_generation" | "video_generation")
+            && capability_model.is_some()
+            && (requested_model.is_none() || requested_is_endpoint_default);
+
+    if should_prefer_capability_model {
+        capability_model
+            .or(requested_model)
+            .or(endpoint_default_model)
+            .or(fallback_model)
+    } else {
+        requested_model
+            .or(capability_model)
+            .or(endpoint_default_model)
+            .or(fallback_model)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_capability_model;
+
+    #[test]
+    fn image_generation_prefers_capability_model_over_endpoint_default_request() {
+        let selected = select_capability_model(
+            "image_generation",
+            Some("gpt-5.5"),
+            Some("gpt-image-2"),
+            Some("gpt-5.5"),
+            Some("gpt-image-1"),
+        );
+
+        assert_eq!(selected.as_deref(), Some("gpt-image-2"));
+    }
+
+    #[test]
+    fn image_generation_respects_explicit_non_default_model() {
+        let selected = select_capability_model(
+            "image_generation",
+            Some("dall-e-3"),
+            Some("gpt-image-2"),
+            Some("gpt-5.5"),
+            Some("gpt-image-1"),
+        );
+
+        assert_eq!(selected.as_deref(), Some("dall-e-3"));
+    }
+
+    #[test]
+    fn chat_keeps_requested_model_first() {
+        let selected = select_capability_model(
+            "chat",
+            Some("gpt-5.5"),
+            Some("gpt-4.1"),
+            Some("gpt-5.5"),
+            None,
+        );
+
+        assert_eq!(selected.as_deref(), Some("gpt-5.5"));
+    }
 }

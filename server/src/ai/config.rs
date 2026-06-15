@@ -333,6 +333,21 @@ pub struct AiEndpointTestReq {
     pub output_items: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiEndpointModelsReq {
+    pub endpoint_id: Option<String>,
+    pub provider: Option<String>,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiEndpointModelsResp {
+    pub models: Vec<String>,
+}
+
 /// AI 聊天请求（服务器端调用）
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

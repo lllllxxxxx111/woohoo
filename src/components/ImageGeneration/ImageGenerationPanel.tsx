@@ -38,7 +38,7 @@ import { useAppActions } from '../../context/useAppActions';
 import { formatCreditAmount } from '../../lib/credits';
 import styles from './ImageGenerationPanel.module.css';
 
-type ImageSize = '1024x1024' | '1024x1536' | '1536x1024';
+type ImageSize = string;
 type ImageGenerationTurnStatus = 'generating' | 'completed' | 'failed';
 
 type ImageGenerationTurnParams = {
@@ -73,11 +73,101 @@ type PreviewImage = {
   caption?: string;
 };
 
-const SIZE_OPTIONS: Array<{ value: ImageSize; ratio: string; label: string }> = [
+type ImageSizeOption = { value: ImageSize; ratio: string; label: string };
+
+const SIZE_OPTIONS: ImageSizeOption[] = [
+  { value: '512x512', ratio: '1:1', label: '小方图' },
+  { value: '768x768', ratio: '1:1', label: '中方图' },
   { value: '1024x1024', ratio: '1:1', label: '方图' },
+  { value: '1536x1536', ratio: '1:1', label: '高清方图' },
+  { value: '768x1024', ratio: '3:4', label: '竖版' },
   { value: '1024x1536', ratio: '2:3', label: '竖图' },
+  { value: '1080x1920', ratio: '9:16', label: '手机竖版' },
+  { value: '1024x1792', ratio: '4:7', label: '长竖图' },
+  { value: '1024x768', ratio: '4:3', label: '横版' },
   { value: '1536x1024', ratio: '3:2', label: '横图' },
+  { value: '1792x1024', ratio: '7:4', label: '宽横图' },
+  { value: '1920x1080', ratio: '16:9', label: '视频横版' },
 ];
+
+const QUICK_SIZE_OPTIONS = SIZE_OPTIONS.filter((option) =>
+  ['1024x1024', '1024x1536', '1536x1024', '1080x1920', '1920x1080'].includes(option.value),
+);
+
+const DEFAULT_IMAGE_SIZE = '1024x1024';
+
+const CUSTOM_SIZE_PATTERN = /^(\d{2,5})x(\d{2,5})$/i;
+const MIN_CUSTOM_IMAGE_SIDE = 256;
+const MAX_CUSTOM_IMAGE_SIDE = 4096;
+const LARGE_SIZE_PIXEL_THRESHOLD = 1792 * 1024;
+
+const gcd = (left: number, right: number): number => {
+  let a = Math.abs(left);
+  let b = Math.abs(right);
+  while (b > 0) {
+    const next = a % b;
+    a = b;
+    b = next;
+  }
+  return a || 1;
+};
+
+function parseImageSize(value: string): { width: number; height: number } | null {
+  const match = value.trim().toLowerCase().match(CUSTOM_SIZE_PATTERN);
+  if (!match) {
+    return null;
+  }
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height)) {
+    return null;
+  }
+  return { width, height };
+}
+
+function isValidImageSize(value: string): boolean {
+  const parsed = parseImageSize(value);
+  if (!parsed) {
+    return false;
+  }
+  return (
+    parsed.width >= MIN_CUSTOM_IMAGE_SIDE &&
+    parsed.width <= MAX_CUSTOM_IMAGE_SIDE &&
+    parsed.height >= MIN_CUSTOM_IMAGE_SIDE &&
+    parsed.height <= MAX_CUSTOM_IMAGE_SIDE
+  );
+}
+
+function getImageSizeRatio(value: string): string {
+  const parsed = parseImageSize(value);
+  if (!parsed) {
+    return '1:1';
+  }
+  const divisor = gcd(parsed.width, parsed.height);
+  return `${parsed.width / divisor}:${parsed.height / divisor}`;
+}
+
+function getImageSizeMultiplier(size: string): number {
+  const parsed = parseImageSize(size);
+  if (!parsed) {
+    return 1;
+  }
+  const pixels = parsed.width * parsed.height;
+  return pixels > LARGE_SIZE_PIXEL_THRESHOLD ? 2 : pixels > 1024 * 1024 ? 1.5 : 1;
+}
+
+function normalizeImageSizeInput(value: string): ImageSize {
+  const normalized = value.trim().toLowerCase();
+  return isValidImageSize(normalized) ? normalized : DEFAULT_IMAGE_SIZE;
+}
+
+function createCustomSizeOption(size: string): ImageSizeOption {
+  return {
+    value: size,
+    ratio: getImageSizeRatio(size),
+    label: '自定义',
+  };
+}
 
 const MODEL_OPTIONS = ['gpt-image-1', 'dall-e-3'];
 const DEFAULT_IMAGE_MODEL = 'gpt-image-1';
@@ -95,7 +185,20 @@ function isImageGenerationAsset(asset: Asset) {
 }
 
 function getImageGenerationModel(endpoint?: ServerAiEndpoint | null) {
-  return endpoint?.defaultModel?.trim() || DEFAULT_IMAGE_MODEL;
+  const capabilityModel = endpoint?.capabilities
+    ?.find((capability) => capability.capability === 'image_generation' && capability.enabled)
+    ?.model?.trim();
+  return capabilityModel || endpoint?.defaultModel?.trim() || DEFAULT_IMAGE_MODEL;
+}
+
+function getEndpointModelOptions(endpoint?: ServerAiEndpoint | null) {
+  return uniq([
+    getImageGenerationModel(endpoint),
+    ...(endpoint?.capabilities || [])
+      .filter((capability) => capability.enabled)
+      .map((capability) => capability.model || ''),
+    endpoint?.defaultModel || '',
+  ]);
 }
 
 function normalizeBaseUrl(value: string) {
@@ -125,16 +228,16 @@ function clampImageCount(value: number) {
 
 function calculateCost(model: string, size: ImageSize, count: number) {
   const baseCost = model === 'dall-e-3' ? 5 : 3;
-  const sizeMultiplier = size === '1024x1536' || size === '1536x1024' ? 1.5 : 1;
+  const sizeMultiplier = getImageSizeMultiplier(size);
   return baseCost * sizeMultiplier * count;
 }
 
 function getSizeOption(size: ImageSize) {
-  return SIZE_OPTIONS.find((option) => option.value === size) ?? SIZE_OPTIONS[0];
+  return SIZE_OPTIONS.find((option) => option.value === size) ?? createCustomSizeOption(size);
 }
 
 function normalizeImageSize(value: string): ImageSize {
-  return value === '1024x1536' || value === '1536x1024' ? value : '1024x1024';
+  return normalizeImageSizeInput(value);
 }
 
 function parseServerTime(value?: string | null, fallback = Date.now()) {
@@ -443,13 +546,14 @@ export const ImageGenerationPanel: React.FC = () => {
   );
 
   const modelOptions = useMemo(
-    () => uniq([getImageGenerationModel(selectedEndpoint), selectedEndpoint?.defaultModel || '', model, ...MODEL_OPTIONS]),
+    () => uniq([...getEndpointModelOptions(selectedEndpoint), model, ...MODEL_OPTIONS]),
     [model, selectedEndpoint],
   );
 
   const estimatedCost = calculateCost(model, size, count);
   const hasProject = Boolean(activeState.projectId);
   const trimmedPrompt = prompt.trim();
+  const sizeIsValid = isValidImageSize(size);
   const hasImageEndpoint = endpoints.length > 0;
   const isGenerating = turns.some((turn) => turn.status === 'generating');
   const missingCompletedAssetIds = useMemo(() => {
@@ -496,10 +600,15 @@ export const ImageGenerationPanel: React.FC = () => {
     if (!defaultModel) {
       return;
     }
+    const endpointDefaults = endpoints
+      .map((endpoint) => getImageGenerationModel(endpoint))
+      .filter(Boolean);
     setModel((currentModel) =>
-      !currentModel || MODEL_OPTIONS.includes(currentModel) ? defaultModel : currentModel,
+      !currentModel || MODEL_OPTIONS.includes(currentModel) || endpointDefaults.includes(currentModel)
+        ? defaultModel
+        : currentModel,
     );
-  }, [selectedEndpoint]);
+  }, [endpoints, selectedEndpoint]);
 
   const refreshWorkspace = useCallback(async () => {
     setIsRefreshing(true);
@@ -969,7 +1078,13 @@ export const ImageGenerationPanel: React.FC = () => {
         isGenerating={isGenerating}
         hasProject={hasProject}
         projectCount={projects.length}
-        canGenerate={hasProject && Boolean(trimmedPrompt) && Boolean(selectedEndpoint) && !isGenerating}
+        canGenerate={
+          hasProject &&
+          Boolean(trimmedPrompt) &&
+          Boolean(selectedEndpoint) &&
+          sizeIsValid &&
+          !isGenerating
+        }
         parameterSheetOpen={parameterSheetOpen}
         onParameterSheetOpenChange={setParameterSheetOpen}
         onGenerate={handleGenerate}
@@ -1433,6 +1548,7 @@ const PromptComposer: React.FC<PromptComposerProps> = ({
   onOpenSettings,
 }) => {
   const currentSize = getSizeOption(size);
+  const sizeIsValid = isValidImageSize(size);
   const selectedEndpoint = endpoints.find((endpoint) => endpoint.id === endpointId) ?? endpoints[0] ?? null;
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1490,7 +1606,7 @@ const PromptComposer: React.FC<PromptComposerProps> = ({
         <div className={styles.composerControls}>
           <div className={styles.inlineControls}>
             <div className={styles.sizeSegment} aria-label="图片比例">
-              {SIZE_OPTIONS.map((option) => (
+              {QUICK_SIZE_OPTIONS.map((option) => (
                 <button
                   key={option.value}
                   type="button"
@@ -1545,7 +1661,7 @@ const PromptComposer: React.FC<PromptComposerProps> = ({
               </button>
             )}
             {selectedEndpoint && <span>{selectedEndpoint.name}</span>}
-            {currentSize && <span>{currentSize.label}</span>}
+            {currentSize && <span>{sizeIsValid ? `${currentSize.label} ${size}` : '尺寸无效'}</span>}
           </div>
         </div>
 
@@ -1606,6 +1722,19 @@ const ComposerParameterSheet: React.FC<{
   onClose,
   onOpenSettings,
 }) => {
+  const [customSize, setCustomSize] = useState(size);
+  const customSizeValid = isValidImageSize(customSize);
+
+  useEffect(() => {
+    setCustomSize(size);
+  }, [size]);
+
+  const applyCustomSize = () => {
+    if (customSizeValid) {
+      onSizeChange(customSize.trim().toLowerCase());
+    }
+  };
+
   return (
     <div className={styles.parameterSheet}>
       <div className={styles.sheetHeader}>
@@ -1654,7 +1783,7 @@ const ComposerParameterSheet: React.FC<{
         </label>
 
         <div className={styles.sheetField}>
-          <span>比例</span>
+          <span>尺寸</span>
           <div className={styles.sheetSegments}>
             {SIZE_OPTIONS.map((option) => (
               <button
@@ -1665,9 +1794,31 @@ const ComposerParameterSheet: React.FC<{
               >
                 {option.ratio}
                 <small>{option.label}</small>
+                <small>{option.value}</small>
               </button>
             ))}
           </div>
+          <div className={styles.customSizeRow}>
+            <input
+              value={customSize}
+              onChange={(event) => setCustomSize(event.target.value)}
+              onBlur={applyCustomSize}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  applyCustomSize();
+                }
+              }}
+              placeholder="1920x1080"
+              aria-invalid={!customSizeValid}
+            />
+            <button type="button" onClick={applyCustomSize} disabled={!customSizeValid}>
+              应用
+            </button>
+          </div>
+          <small className={styles.sheetHint}>
+            支持 {MIN_CUSTOM_IMAGE_SIDE}-{MAX_CUSTOM_IMAGE_SIDE}px，格式如 1920x1080
+          </small>
         </div>
 
         <div className={styles.sheetField}>

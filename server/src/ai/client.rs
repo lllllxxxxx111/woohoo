@@ -9,7 +9,7 @@ use std::error::Error as StdError;
 use std::sync::{Arc, Mutex};
 
 const STREAM_FALLBACK_TRIGGER_THRESHOLD: u32 = 3;
-const IMAGE_GENERATION_REQUEST_TIMEOUT_SECS: u64 = 600;
+const IMAGE_GENERATION_REQUEST_TIMEOUT_SECS: u64 = 3600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamFallbackMode {
@@ -215,9 +215,10 @@ fn parse_image_generate_response(body: &str) -> AppResult<ImageGenerateResponse>
     collect_image_data_items(&value, &mut data);
 
     if data.is_empty() {
-        return Err(AppError::Internal(
-            "图片生成响应未包含可保存的 base64 或 URL 图片数据".into(),
-        ));
+        return Err(AppError::Internal(format!(
+            "图片生成响应未包含可保存的 base64 或 URL 图片数据；响应摘要: {}",
+            summarize_json_for_error(&value)
+        )));
     }
 
     Ok(ImageGenerateResponse {
@@ -232,57 +233,92 @@ fn parse_image_generate_response(body: &str) -> AppResult<ImageGenerateResponse>
 fn collect_image_data_items(value: &Value, data: &mut Vec<ImageDataItem>) {
     match value {
         Value::Object(map) => {
-            if let Some(base64) = map
-                .get("b64_json")
-                .or_else(|| map.get("b64"))
-                .or_else(|| map.get("base64"))
-                .or_else(|| map.get("image_base64"))
-                .or_else(|| map.get("result"))
+            let revised_prompt = map
+                .get("revised_prompt")
+                .or_else(|| map.get("revisedPrompt"))
                 .and_then(Value::as_str)
-                .and_then(normalize_base64_image_text)
-            {
-                data.push(ImageDataItem {
-                    b64_json: Some(base64),
-                    url: None,
-                    revised_prompt: map
-                        .get("revised_prompt")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                });
-                return;
+                .map(str::to_owned);
+
+            for key in [
+                "b64_json",
+                "b64",
+                "base64",
+                "base64_json",
+                "image",
+                "image_base64",
+                "imageData",
+                "image_data",
+                "data_url",
+                "dataUrl",
+                "result",
+            ] {
+                if let Some(base64) = map
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .and_then(normalize_base64_image_text)
+                {
+                    push_image_data_item(
+                        data,
+                        ImageDataItem {
+                            b64_json: Some(base64),
+                            url: None,
+                            revised_prompt: revised_prompt.clone(),
+                        },
+                    );
+                }
             }
 
-            if let Some(url) = map.get("url").and_then(Value::as_str).filter(|url| {
-                url.starts_with("http://") || url.starts_with("https://") || url.starts_with("/")
-            }) {
-                data.push(ImageDataItem {
-                    b64_json: None,
-                    url: Some(url.to_string()),
-                    revised_prompt: map
-                        .get("revised_prompt")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                });
-                return;
+            for key in [
+                "url",
+                "image_url",
+                "imageUrl",
+                "output_url",
+                "outputUrl",
+                "src",
+                "file_url",
+                "fileUrl",
+            ] {
+                if let Some(url) = map
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .and_then(extract_image_url_text)
+                {
+                    push_image_data_item(
+                        data,
+                        ImageDataItem {
+                            b64_json: None,
+                            url: Some(url),
+                            revised_prompt: revised_prompt.clone(),
+                        },
+                    );
+                }
             }
 
-            for key in ["data", "output", "content", "message", "choices"] {
+            for key in [
+                "data",
+                "output",
+                "content",
+                "message",
+                "choices",
+                "result",
+                "results",
+                "images",
+                "items",
+                "files",
+                "attachments",
+                "artifacts",
+                "image_url",
+                "imageUrl",
+            ] {
                 if let Some(child) = map.get(key) {
                     collect_image_data_items(child, data);
                 }
             }
 
-            if let Some(text) = map
-                .get("text")
-                .or_else(|| map.get("content"))
-                .and_then(Value::as_str)
-                .and_then(normalize_base64_image_text)
-            {
-                data.push(ImageDataItem {
-                    b64_json: Some(text),
-                    url: None,
-                    revised_prompt: None,
-                });
+            for key in ["text", "content", "output_text"] {
+                if let Some(text) = map.get(key).and_then(Value::as_str) {
+                    collect_image_data_items(&Value::String(text.to_string()), data);
+                }
             }
         }
         Value::Array(items) => {
@@ -297,15 +333,65 @@ fn collect_image_data_items(value: &Value, data: &mut Vec<ImageDataItem>) {
             }
 
             if let Some(base64) = normalize_base64_image_text(text) {
-                data.push(ImageDataItem {
-                    b64_json: Some(base64),
-                    url: None,
-                    revised_prompt: None,
-                });
+                push_image_data_item(
+                    data,
+                    ImageDataItem {
+                        b64_json: Some(base64),
+                        url: None,
+                        revised_prompt: None,
+                    },
+                );
+            } else if let Some(url) = extract_image_url_text(text) {
+                push_image_data_item(
+                    data,
+                    ImageDataItem {
+                        b64_json: None,
+                        url: Some(url),
+                        revised_prompt: None,
+                    },
+                );
             }
         }
         _ => {}
     }
+}
+
+fn push_image_data_item(data: &mut Vec<ImageDataItem>, item: ImageDataItem) {
+    let exists = data.iter().any(|existing| {
+        item.b64_json
+            .as_ref()
+            .zip(existing.b64_json.as_ref())
+            .map(|(left, right)| left == right)
+            .unwrap_or(false)
+            || item
+                .url
+                .as_ref()
+                .zip(existing.url.as_ref())
+                .map(|(left, right)| left == right)
+                .unwrap_or(false)
+    });
+
+    if !exists {
+        data.push(item);
+    }
+}
+
+fn summarize_json_for_error(value: &Value) -> String {
+    let serialized =
+        serde_json::to_string(value).unwrap_or_else(|_| "<unserializable>".to_string());
+    truncate_for_error(&serialized, 1200)
+}
+
+fn truncate_for_error(value: &str, max_chars: usize) -> String {
+    let mut output = String::new();
+    for (index, char) in value.chars().enumerate() {
+        if index >= max_chars {
+            output.push_str("...");
+            return output;
+        }
+        output.push(char);
+    }
+    output
 }
 
 fn normalize_base64_image_text(value: &str) -> Option<String> {
@@ -340,6 +426,30 @@ fn normalize_base64_image_text(value: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn extract_image_url_text(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") || trimmed.starts_with("/")
+    {
+        return Some(trim_url_delimiters(trimmed).to_string());
+    }
+
+    for marker in ["https://", "http://", "/assets/", "/api/"] {
+        if let Some(start) = trimmed.find(marker) {
+            let candidate = &trimmed[start..];
+            return Some(trim_url_delimiters(candidate).to_string());
+        }
+    }
+
+    None
+}
+
+fn trim_url_delimiters(value: &str) -> &str {
+    value.trim_matches(|char: char| {
+        char.is_ascii_whitespace()
+            || matches!(char, '"' | '\'' | ')' | ']' | '}' | '<' | '>' | ',' | ';')
+    })
 }
 
 fn extract_data_url_base64(value: &str) -> Option<&str> {
@@ -399,6 +509,37 @@ fn build_chat_url(base_url: &str) -> String {
     format!("{}/chat/completions", normalized)
 }
 
+fn build_models_url(base_url: &str) -> String {
+    let normalized = base_url.trim().trim_end_matches('/');
+    let normalized_lower = normalized.to_ascii_lowercase();
+
+    for suffix in [
+        "/chat/completions",
+        "/images/generations",
+        "/videos/generations",
+        "/responses",
+        "/models",
+    ] {
+        if normalized_lower.ends_with(suffix) {
+            return build_models_url(&normalized[..normalized.len() - suffix.len()]);
+        }
+    }
+
+    if normalized_lower.ends_with("/v1") || normalized_lower.ends_with("/v2") {
+        return format!("{}/models", normalized);
+    }
+
+    if normalized_lower.contains("/v1/") || normalized_lower.contains("/v2/") {
+        return normalized.to_string();
+    }
+
+    if normalized_lower.contains("api.openai.com") && !normalized_lower.contains("/v1") {
+        return format!("{}/v1/models", normalized);
+    }
+
+    format!("{}/v1/models", normalized)
+}
+
 /// OpenAI 兼容的 AI 客户端
 /// 所有 AI 提供商（OpenAI/Claude/DeepSeek/Ollama）都走这个格式
 #[derive(Clone)]
@@ -451,6 +592,49 @@ impl AiClient {
                 .expect("Failed to create HTTP client"),
             fallback_state: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub async fn list_models(&self, base_url: &str, api_key: &str) -> AppResult<Vec<String>> {
+        let url = build_models_url(base_url);
+        let mut request = self
+            .http
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(45))
+            .header("Accept", "application/json")
+            .header("Accept-Encoding", "identity");
+
+        if !api_key.trim().is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", api_key.trim()));
+        }
+
+        let resp = request.send().await.map_err(|e| {
+            AppError::Internal(format!("模型列表获取失败: {}", summarize_reqwest_error(&e)))
+        })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(AppError::Internal(format!(
+                "模型列表接口返回错误 {}: {}",
+                status,
+                summarize_response_body(&body)
+            )));
+        }
+
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Internal(format!("模型列表响应解析失败: {}", e)))?;
+        let models = extract_model_ids(&value);
+
+        if models.is_empty() {
+            return Err(AppError::Internal(format!(
+                "模型列表响应未包含模型 ID；响应摘要: {}",
+                summarize_response_body(&value.to_string())
+            )));
+        }
+
+        Ok(models)
     }
 
     /// 非流式调用（用于后台任务）
@@ -548,13 +732,9 @@ impl AiClient {
             request = request.header("Authorization", format!("Bearer {}", api_key.trim()));
         }
 
-        let resp = request
-            .json(&req)
-            .send()
-            .await
-            .map_err(|e| {
-                AppError::Internal(format!("AI 调用失败: {}", summarize_reqwest_error(&e)))
-            })?;
+        let resp = request.json(&req).send().await.map_err(|e| {
+            AppError::Internal(format!("AI 调用失败: {}", summarize_reqwest_error(&e)))
+        })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -811,13 +991,9 @@ impl AiClient {
             request = request.header("Authorization", format!("Bearer {}", api_key.trim()));
         }
 
-        let resp = request
-            .json(&req)
-            .send()
-            .await
-            .map_err(|e| {
-                AppError::Internal(format!("AI 调用失败: {}", summarize_reqwest_error(&e)))
-            })?;
+        let resp = request.json(&req).send().await.map_err(|e| {
+            AppError::Internal(format!("AI 调用失败: {}", summarize_reqwest_error(&e)))
+        })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -933,6 +1109,54 @@ fn summarize_response_body(body: &str) -> String {
     } else {
         preview
     }
+}
+
+fn extract_model_ids(value: &Value) -> Vec<String> {
+    let mut models = Vec::new();
+    collect_model_ids(value, &mut models);
+    models
+}
+
+fn collect_model_ids(value: &Value, models: &mut Vec<String>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                collect_model_ids(item, models);
+            }
+        }
+        Value::Object(map) => {
+            for key in ["data", "models"] {
+                if let Some(child) = map.get(key) {
+                    collect_model_ids(child, models);
+                }
+            }
+
+            for key in ["id", "name", "model"] {
+                if let Some(model) = map.get(key).and_then(Value::as_str) {
+                    push_model_id(models, model);
+                    break;
+                }
+            }
+        }
+        Value::String(model) => {
+            push_model_id(models, model);
+        }
+        _ => {}
+    }
+}
+
+fn push_model_id(models: &mut Vec<String>, value: &str) {
+    let model = value.trim();
+    if model.is_empty()
+        || model.len() > 160
+        || model.chars().any(char::is_whitespace)
+        || matches!(model, "list" | "model")
+        || models.iter().any(|item| item.eq_ignore_ascii_case(model))
+    {
+        return;
+    }
+
+    models.push(model.to_string());
 }
 
 fn summarize_reqwest_error(error: &reqwest::Error) -> String {
@@ -1322,7 +1546,8 @@ fn classify_stream_error(error: &reqwest::Error) -> &'static str {
 mod tests {
     use super::{
         build_image_generation_url, build_stream_fallback_cache_key, extract_api_error_message,
-        extract_completion_text, should_retry_with_stream, ImageGenerationApiKind,
+        extract_completion_text, parse_image_generate_response, should_retry_with_stream,
+        ImageGenerationApiKind,
     };
     use serde_json::json;
 
@@ -1358,6 +1583,66 @@ mod tests {
 
         assert_eq!(kind, ImageGenerationApiKind::Chat);
         assert_eq!(url, "https://gateway.example.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn image_generation_response_extracts_responses_result_base64() {
+        let base64 = "A".repeat(80);
+        let payload = json!({
+            "created": 1,
+            "output": [{
+                "type": "image_generation_call",
+                "result": base64
+            }]
+        });
+
+        let response = parse_image_generate_response(&payload.to_string()).unwrap();
+
+        assert_eq!(response.data.len(), 1);
+        assert_eq!(response.data[0].b64_json.as_deref(), Some(base64.as_str()));
+    }
+
+    #[test]
+    fn image_generation_response_extracts_nested_image_url() {
+        let payload = json!({
+            "choices": [{
+                "message": {
+                    "content": [{
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "https://cdn.example.com/generated.png"
+                        }
+                    }]
+                }
+            }]
+        });
+
+        let response = parse_image_generate_response(&payload.to_string()).unwrap();
+
+        assert_eq!(response.data.len(), 1);
+        assert_eq!(
+            response.data[0].url.as_deref(),
+            Some("https://cdn.example.com/generated.png")
+        );
+    }
+
+    #[test]
+    fn image_generation_response_extracts_markdown_image_url() {
+        let payload = json!({
+            "choices": [{
+                "message": {
+                    "content": "![result](https://cdn.example.com/generated.webp)"
+                }
+            }]
+        });
+
+        let response = parse_image_generate_response(&payload.to_string()).unwrap();
+
+        assert_eq!(response.data.len(), 1);
+        assert_eq!(
+            response.data[0].url.as_deref(),
+            Some("https://cdn.example.com/generated.webp")
+        );
     }
 
     #[test]

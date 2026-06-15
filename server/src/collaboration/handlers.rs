@@ -76,7 +76,12 @@ pub async fn create_session(
     )
     .await;
 
-    broadcast_collaboration_event(&state, &session.id, "collaboration_session_created", Some(payload));
+    broadcast_collaboration_event(
+        &state,
+        &session.id,
+        "collaboration_session_created",
+        Some(payload),
+    );
 
     Ok(Json(session))
 }
@@ -105,9 +110,10 @@ pub async fn get_active_session(
     axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
     Query(params): Query<ActiveSessionQuery>,
 ) -> Result<Json<Option<SessionSummary>>, AppError> {
-    let sessions = repo::list_active_sessions_for_project(&state.db, &user_id.0, &params.project_id)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let sessions =
+        repo::list_active_sessions_for_project(&state.db, &user_id.0, &params.project_id)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let session = match sessions.into_iter().next() {
         Some(s) => s,
@@ -154,7 +160,12 @@ pub async fn dispatch(
         "sessionId": session_id
     });
 
-    broadcast_collaboration_event(&state, &session_id, "collaboration_dispatched", Some(payload));
+    broadcast_collaboration_event(
+        &state,
+        &session_id,
+        "collaboration_dispatched",
+        Some(payload),
+    );
 
     Ok(Json(DispatchResponse {
         dispatched_count: result.dispatched_count as i64,
@@ -172,30 +183,26 @@ pub async fn send_message(
     verify_session_owner(&state, &session_id, &user_id).await?;
 
     let message = match req.message_kind.as_str() {
-        "question" => {
-            dispatcher::Dispatcher::handle_question(
-                &state.db,
-                &session_id,
-                req.source_agent_id.as_deref().unwrap_or(""),
-                req.target_agent_id.as_deref().unwrap_or(""),
-                &req.content,
-                req.question_fingerprint.as_deref(),
-            )
-            .await
-            .map_err(|e| AppError::Internal(e.to_string()))?
-        }
-        "answer" => {
-            dispatcher::Dispatcher::handle_answer(
-                &state.db,
-                &session_id,
-                req.source_agent_id.as_deref().unwrap_or(""),
-                req.target_agent_id.as_deref().unwrap_or(""),
-                &req.content,
-                req.reply_to_message_id.as_deref(),
-            )
-            .await
-            .map_err(|e| AppError::Internal(e.to_string()))?
-        }
+        "question" => dispatcher::Dispatcher::handle_question(
+            &state.db,
+            &session_id,
+            req.source_agent_id.as_deref().unwrap_or(""),
+            req.target_agent_id.as_deref().unwrap_or(""),
+            &req.content,
+            req.question_fingerprint.as_deref(),
+        )
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?,
+        "answer" => dispatcher::Dispatcher::handle_answer(
+            &state.db,
+            &session_id,
+            req.source_agent_id.as_deref().unwrap_or(""),
+            req.target_agent_id.as_deref().unwrap_or(""),
+            &req.content,
+            req.reply_to_message_id.as_deref(),
+        )
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?,
         _ => {
             let next_order = repo::get_next_queue_order(&state.db, &session_id)
                 .await
@@ -227,7 +234,12 @@ pub async fn send_message(
         "targetAgentId": message.target_agent_id,
     });
 
-    broadcast_collaboration_event(&state, &session_id, "collaboration_message_sent", Some(payload));
+    broadcast_collaboration_event(
+        &state,
+        &session_id,
+        "collaboration_message_sent",
+        Some(payload),
+    );
 
     Ok(Json(message))
 }
@@ -292,10 +304,7 @@ pub async fn loop_check(
             "halt_session".to_string(),
             "协同会话已暂停：达到自动讨论轮数上限".to_string(),
         ),
-        _ => (
-            "unknown".to_string(),
-            "未知循环风险等级".to_string(),
-        ),
+        _ => ("unknown".to_string(), "未知循环风险等级".to_string()),
     };
 
     let signal_strings: Vec<String> = signals.iter().map(|s| s.as_str().to_string()).collect();
@@ -318,7 +327,12 @@ pub async fn loop_check(
     )
     .await;
 
-    broadcast_collaboration_event(&state, &session_id, "collaboration_loop_warning", Some(payload));
+    broadcast_collaboration_event(
+        &state,
+        &session_id,
+        "collaboration_loop_warning",
+        Some(payload),
+    );
 
     Ok(Json(LoopCheckResponse {
         loop_detected: true,
@@ -337,8 +351,8 @@ pub async fn admit(
 ) -> Result<Json<AdmitResponse>, AppError> {
     let session = verify_session_owner(&state, &session_id, &user_id).await?;
 
-    let current_state = SessionState::try_from(session.state.as_str())
-        .map_err(|e| AppError::BadRequest(e))?;
+    let current_state =
+        SessionState::try_from(session.state.as_str()).map_err(|e| AppError::BadRequest(e))?;
 
     if current_state != SessionState::ResolvingQuestions
         && current_state != SessionState::WorkspaceAdmission
@@ -424,7 +438,12 @@ pub async fn admit(
         tracing::warn!(session_id = %session_id, error = %e, "创建入场事件记录失败");
     }
 
-    broadcast_collaboration_event(&state, &session_id, "collaboration_admission_changed", Some(payload));
+    broadcast_collaboration_event(
+        &state,
+        &session_id,
+        "collaboration_admission_changed",
+        Some(payload),
+    );
 
     if pipeline_run_id.is_some() {
         let workspace_payload = json!({
@@ -432,7 +451,12 @@ pub async fn admit(
             "pipelineRunId": pipeline_run_id,
             "state": "workspace_execution"
         });
-        broadcast_collaboration_event(&state, &session_id, "collaboration_workspace_started", Some(workspace_payload));
+        broadcast_collaboration_event(
+            &state,
+            &session_id,
+            "collaboration_workspace_started",
+            Some(workspace_payload),
+        );
     }
 
     Ok(Json(AdmitResponse {
@@ -452,8 +476,8 @@ pub async fn halt(
 ) -> Result<Json<CollaborationSession>, AppError> {
     let session = verify_session_owner(&state, &session_id, &user_id).await?;
 
-    let current_state = SessionState::try_from(session.state.as_str())
-        .map_err(|e| AppError::BadRequest(e))?;
+    let current_state =
+        SessionState::try_from(session.state.as_str()).map_err(|e| AppError::BadRequest(e))?;
 
     if current_state == SessionState::Completed || current_state == SessionState::Halted {
         return Err(AppError::BadRequest(format!(
@@ -482,7 +506,12 @@ pub async fn halt(
         tracing::warn!(session_id = %session_id, error = %e, "创建暂停事件记录失败");
     }
 
-    broadcast_collaboration_event(&state, &session_id, "collaboration_session_halted", Some(payload));
+    broadcast_collaboration_event(
+        &state,
+        &session_id,
+        "collaboration_session_halted",
+        Some(payload),
+    );
 
     Ok(Json(session))
 }
@@ -587,7 +616,8 @@ async fn create_pipeline_from_collaboration(
             step_name: a.goal.clone(),
             step_order: i as i64,
             step_type: a.task_type.clone(),
-            depends_on: a.depends_on_json
+            depends_on: a
+                .depends_on_json
                 .as_ref()
                 .and_then(|v| serde_json::from_str(v).ok())
                 .unwrap_or_default(),

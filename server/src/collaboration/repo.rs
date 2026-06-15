@@ -66,14 +66,12 @@ pub async fn update_session_state(
 ) -> Result<CollaborationSession> {
     let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true) + "Z";
 
-    sqlx::query(
-        "UPDATE collaboration_sessions SET state = ?, updated_at = ? WHERE id = ?",
-    )
-    .bind(new_state)
-    .bind(&now)
-    .bind(session_id)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE collaboration_sessions SET state = ?, updated_at = ? WHERE id = ?")
+        .bind(new_state)
+        .bind(&now)
+        .bind(session_id)
+        .execute(pool)
+        .await?;
 
     get_session(pool, session_id).await
 }
@@ -225,14 +223,12 @@ pub async fn update_assignment_status(
 ) -> Result<CollaborationAssignment> {
     let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true) + "Z";
 
-    sqlx::query(
-        "UPDATE collaboration_assignments SET status = ?, updated_at = ? WHERE id = ?",
-    )
-    .bind(new_status)
-    .bind(&now)
-    .bind(assignment_id)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE collaboration_assignments SET status = ?, updated_at = ? WHERE id = ?")
+        .bind(new_status)
+        .bind(&now)
+        .bind(assignment_id)
+        .execute(pool)
+        .await?;
 
     let assignment = sqlx::query_as::<_, CollaborationAssignment>(
         "SELECT * FROM collaboration_assignments WHERE id = ?",
@@ -389,21 +385,17 @@ pub async fn create_event(
     .execute(pool)
     .await?;
 
-    let event = sqlx::query_as::<_, CollaborationEvent>(
-        "SELECT * FROM collaboration_events WHERE id = ?",
-    )
-    .bind(&id)
-    .fetch_one(pool)
-    .await?;
+    let event =
+        sqlx::query_as::<_, CollaborationEvent>("SELECT * FROM collaboration_events WHERE id = ?")
+            .bind(&id)
+            .fetch_one(pool)
+            .await?;
 
     Ok(event)
 }
 
 /// 查询会话下所有事件
-pub async fn list_events(
-    pool: &SqlitePool,
-    session_id: &str,
-) -> Result<Vec<CollaborationEvent>> {
+pub async fn list_events(pool: &SqlitePool, session_id: &str) -> Result<Vec<CollaborationEvent>> {
     let events = sqlx::query_as::<_, CollaborationEvent>(
         "SELECT * FROM collaboration_events WHERE session_id = ? ORDER BY created_at ASC",
     )

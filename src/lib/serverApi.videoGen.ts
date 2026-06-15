@@ -26,15 +26,6 @@ export type CreateVideoGenerationInput = {
 
 type RequestApi = <T>(path: string, init?: RequestInit, retry?: boolean) => Promise<T>;
 
-function withTimeout(ms: number) {
-  const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), ms);
-  return {
-    signal: controller.signal,
-    clear: () => window.clearTimeout(timeoutId),
-  };
-}
-
 type VideoGenApiDeps = {
   invalidateWorkspaceCache?: () => void;
 };
@@ -54,18 +45,13 @@ export function createVideoGenApi(requestApi: RequestApi, deps: VideoGenApiDeps 
 
     /** 创建视频生成任务（含 300s 超时） */
     async createGeneration(input: CreateVideoGenerationInput) {
-      const timeout = withTimeout(300_000);
-      try {
-        const generation = await requestApi<VideoGeneration>('/api/video-gen/generations', {
-          method: 'POST',
-          body: JSON.stringify(input),
-          signal: timeout.signal,
-        });
-        deps.invalidateWorkspaceCache?.();
-        return generation;
-      } finally {
-        timeout.clear();
-      }
+      const generation = await requestApi<VideoGeneration>('/api/video-gen/generations', {
+        method: 'POST',
+        body: JSON.stringify(input),
+        signal: new AbortController().signal,
+      });
+      deps.invalidateWorkspaceCache?.();
+      return generation;
     },
   };
 }

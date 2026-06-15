@@ -138,6 +138,18 @@ async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<String>, sqlx::E
             "013_image_studio",
             include_str!("../migrations/013_image_studio.sql"),
         ),
+        (
+            "014_image_generation_assets",
+            include_str!("../migrations/014_image_generation_assets.sql"),
+        ),
+        (
+            "015_ai_endpoint_capabilities",
+            include_str!("../migrations/015_ai_endpoint_capabilities.sql"),
+        ),
+        (
+            "017_video_gen",
+            include_str!("../migrations/017_video_gen.sql"),
+        ),
     ] {
         if run_sql_migration(pool, version, migration_sql).await? {
             applied_versions.push(version.to_string());
@@ -160,6 +172,15 @@ async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<String>, sqlx::E
         applied_versions.push(version);
     }
     if let Some(version) = run_updated_at_column_backfill_migration(pool).await? {
+        applied_versions.push(version);
+    }
+    if let Some(version) = run_collaboration_pipeline_run_id_backfill_migration(pool).await? {
+        applied_versions.push(version);
+    }
+    if let Some(version) = run_image_generation_project_backfill_migration(pool).await? {
+        applied_versions.push(version);
+    }
+    if let Some(version) = run_image_generation_asset_ids_backfill_migration(pool).await? {
         applied_versions.push(version);
     }
 
@@ -277,6 +298,106 @@ async fn run_updated_at_column_backfill_migration(
     backfill_generic_updated_at_columns(pool).await?;
     record_schema_migration(pool, VERSION, "rust").await?;
     Ok(Some(VERSION.to_string()))
+}
+
+/** 安全地为 collaboration_sessions 表添加 pipeline_run_id 列 */
+async fn run_collaboration_pipeline_run_id_backfill_migration(
+    pool: &SqlitePool,
+) -> Result<Option<String>, sqlx::Error> {
+    const VERSION: &str = "016_collaboration_pipeline_run_id";
+
+    if has_schema_migration(pool, VERSION).await? {
+        return Ok(None);
+    }
+
+    tracing::info!(
+        version = VERSION,
+        "执行 collaboration_sessions.pipeline_run_id 列回填"
+    );
+    let columns = list_table_columns(pool, "collaboration_sessions").await?;
+    if !columns.is_empty() && !columns.contains("pipeline_run_id") {
+        sqlx::query("ALTER TABLE collaboration_sessions ADD COLUMN pipeline_run_id TEXT REFERENCES pipeline_runs(id) ON DELETE SET NULL")
+            .execute(pool)
+            .await?;
+    }
+    // 确保索引存在
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_collab_sessions_pipeline_run ON collaboration_sessions(pipeline_run_id)")
+        .execute(pool)
+        .await?;
+    record_schema_migration(pool, VERSION, "rust").await?;
+    Ok(Some(VERSION.to_string()))
+}
+
+async fn run_image_generation_project_backfill_migration(
+    pool: &SqlitePool,
+) -> Result<Option<String>, sqlx::Error> {
+    const VERSION: &str = "018_image_generation_project_id";
+
+    if has_schema_migration(pool, VERSION).await? {
+        return Ok(None);
+    }
+
+    ensure_image_generation_project_schema(pool).await?;
+    record_schema_migration(pool, VERSION, "rust").await?;
+    Ok(Some(VERSION.to_string()))
+}
+
+async fn ensure_image_generation_project_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let mut columns = list_table_columns(pool, "image_generations").await?;
+    if columns.is_empty() {
+        return Ok(());
+    }
+
+    if !columns.contains("project_id") {
+        sqlx::query(
+            "ALTER TABLE image_generations ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL",
+        )
+        .execute(pool)
+        .await?;
+        columns.insert("project_id".to_string());
+    }
+
+    if !columns.contains("asset_ids") {
+        sqlx::query("ALTER TABLE image_generations ADD COLUMN asset_ids TEXT")
+            .execute(pool)
+            .await?;
+        columns.insert("asset_ids".to_string());
+    }
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_image_gen_project ON image_generations(project_id, created_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+async fn run_image_generation_asset_ids_backfill_migration(
+    pool: &SqlitePool,
+) -> Result<Option<String>, sqlx::Error> {
+    const VERSION: &str = "019_image_generation_asset_ids";
+
+    if has_schema_migration(pool, VERSION).await? {
+        return Ok(None);
+    }
+
+    ensure_image_generation_asset_ids_schema(pool).await?;
+    record_schema_migration(pool, VERSION, "rust").await?;
+    Ok(Some(VERSION.to_string()))
+}
+
+async fn ensure_image_generation_asset_ids_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let columns = list_table_columns(pool, "image_generations").await?;
+    if columns.is_empty() || columns.contains("asset_ids") {
+        return Ok(());
+    }
+
+    sqlx::query("ALTER TABLE image_generations ADD COLUMN asset_ids TEXT")
+        .execute(pool)
+        .await?;
+
+    Ok(())
 }
 
 async fn has_schema_migration(pool: &SqlitePool, version: &str) -> Result<bool, sqlx::Error> {
