@@ -462,6 +462,9 @@ export function useAiMessageRuntime({
         },
       });
 
+      let persistedUserMessageId = userMessageId;
+      let persistedPlaceholderMessageId = placeholderMessageId;
+
       try {
         if (isServerWorkspaceReady) {
           const endpoint = await ensureServerAiEndpoint(normalizedSettings);
@@ -494,6 +497,8 @@ export function useAiMessageRuntime({
             typeof task.assistantMessageId === 'string' && task.assistantMessageId.trim()
               ? task.assistantMessageId.trim()
               : placeholderMessageId;
+          persistedUserMessageId = effectiveUserMessageId;
+          persistedPlaceholderMessageId = effectivePlaceholderMessageId;
 
           if (effectiveUserMessageId !== userMessageId) {
             replaceMessageIdLocally(
@@ -613,13 +618,13 @@ export function useAiMessageRuntime({
         const message = error instanceof Error ? error.message : '未知错误';
 
         if (options?.confirmedWorkflowGuardMessageId) {
-          removeMessageLocally(targetProjectId, targetChatId, userMessageId);
+          removeMessageLocally(targetProjectId, targetChatId, persistedUserMessageId);
         }
 
         updateMessageLocally(
           targetProjectId,
           targetChatId,
-          placeholderMessageId,
+          persistedPlaceholderMessageId,
           (currentMessage) => ({
             ...currentMessage,
             role: 'system',
