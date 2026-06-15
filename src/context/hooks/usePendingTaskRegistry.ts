@@ -1,5 +1,5 @@
 import { useCallback, useRef, type MutableRefObject, type SetStateAction } from 'react';
-import type { Project } from '../../types';
+import type { Message, Project } from '../../types';
 import type { PendingAiTask } from './usePendingTaskSse';
 
 type UsePendingTaskRegistryOptions = {
@@ -17,6 +17,17 @@ type UsePendingTaskRegistryResult = {
   recoverPendingTasksFromProjects: (projects: Project[]) => number;
   syncPendingTaskCount: () => void;
 };
+
+export function getRecoverableTaskId(message: Message) {
+  const taskId = typeof message.meta?.taskId === 'string' ? message.meta.taskId.trim() : '';
+  if (!taskId) {
+    return '';
+  }
+
+  const taskStatus = message.meta?.taskStatus;
+  const hasActiveTaskStatus = taskStatus === 'queued' || taskStatus === 'running';
+  return message.status === 'pending' || hasActiveTaskStatus ? taskId : '';
+}
 
 export function usePendingTaskRegistry({
   setPendingTaskCount,
@@ -93,9 +104,8 @@ export function usePendingTaskRegistry({
       projects.forEach((project) => {
         project.chatSessions.forEach((chat) => {
           chat.messages.forEach((message) => {
-            const taskId =
-              typeof message.meta?.taskId === 'string' ? message.meta.taskId.trim() : '';
-            if (!taskId || message.status !== 'pending') {
+            const taskId = getRecoverableTaskId(message);
+            if (!taskId) {
               return;
             }
 

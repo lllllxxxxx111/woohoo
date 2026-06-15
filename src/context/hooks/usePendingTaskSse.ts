@@ -89,6 +89,29 @@ function isGenericTaskPlaceholder(content: string) {
   );
 }
 
+export function collectStalePendingTaskIds(
+  pendingTasks: Map<string, PendingAiTask>,
+  lastEventTimes: Map<string, number>,
+  now: number,
+  timeoutMs: number,
+) {
+  const staleIds: string[] = [];
+
+  pendingTasks.forEach((_pendingTask, taskId) => {
+    const lastEventTime = lastEventTimes.get(taskId);
+    if (lastEventTime === undefined) {
+      lastEventTimes.set(taskId, now);
+      return;
+    }
+
+    if (now - lastEventTime > timeoutMs) {
+      staleIds.push(taskId);
+    }
+  });
+
+  return staleIds;
+}
+
 export function usePendingTaskSse({
   isServerWorkspaceReady,
   isAuthenticated,
@@ -147,13 +170,12 @@ export function usePendingTaskSse({
       }
 
       const now = Date.now();
-      const staleIds: string[] = [];
-
-      lastEventTimeRef.forEach((lastTime, id) => {
-        if (now - lastTime > MISSING_TASK_TIMEOUT_MS && pendingTaskMapRef.current.has(id)) {
-          staleIds.push(id);
-        }
-      });
+      const staleIds = collectStalePendingTaskIds(
+        pendingTaskMapRef.current,
+        lastEventTimeRef,
+        now,
+        MISSING_TASK_TIMEOUT_MS,
+      );
 
       if (staleIds.length === 0) {
         return;
