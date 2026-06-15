@@ -17,9 +17,9 @@ use crate::{
 use super::{
     config::{
         Agent, AgentContact, AiEndpoint, AiEndpointCapability, AiEndpointCapabilityView,
-        AiEndpointView, AssignProjectAgentReq, CreateAgentReq, CreateEndpointReq,
-        CreateProjectAgentReq, ProjectRoleCounts, ProjectWorkflowSummary, UpdateAgentReq,
-        UpdateEndpointReq, UpsertEndpointCapabilityReq,
+        AiEndpointModelsReq, AiEndpointModelsResp, AiEndpointView, AssignProjectAgentReq,
+        CreateAgentReq, CreateEndpointReq, CreateProjectAgentReq, ProjectRoleCounts,
+        ProjectWorkflowSummary, UpdateAgentReq, UpdateEndpointReq, UpsertEndpointCapabilityReq,
     },
     handlers::{
         default_pass_rate, ensure_agent_access, ensure_project_access,
@@ -237,6 +237,49 @@ pub async fn list_endpoint_capabilities(
 
     let capabilities = load_capabilities_for_endpoint(&state.db, &id).await?;
     Ok(Json(capabilities.into_iter().map(Into::into).collect()))
+}
+
+pub async fn list_endpoint_models(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Json(req): Json<AiEndpointModelsReq>,
+) -> AppResult<Json<AiEndpointModelsResp>> {
+    let endpoint = if let Some(endpoint_id) = req
+        .endpoint_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        sqlx::query_as::<_, AiEndpoint>("SELECT * FROM ai_endpoints WHERE id = ? AND user_id = ?")
+            .bind(endpoint_id)
+            .bind(&user_id.0)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("AI 通道不存在".into()))?
+    } else {
+        AiEndpoint {
+            id: String::new(),
+            user_id: user_id.0.clone(),
+            name: "draft".to_string(),
+            provider: normalize_optional(req.provider.clone()).unwrap_or_default(),
+            base_url: normalize_optional(req.base_url.clone()).unwrap_or_default(),
+            api_key: String::new(),
+            default_model: None,
+            is_active: true,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    };
+
+    let provider = normalize_optional(req.provider).unwrap_or(endpoint.provider);
+    let base_url = normalize_optional(req.base_url).unwrap_or(endpoint.base_url);
+    let api_key = normalize_optional(req.api_key).unwrap_or(endpoint.api_key);
+
+    validate_connection_fields(&provider, &base_url, &api_key)?;
+
+    let models = state.ai_client.list_models(&base_url, &api_key).await?;
+
+    Ok(Json(AiEndpointModelsResp { models }))
 }
 
 async fn ensure_endpoint_owner(

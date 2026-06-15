@@ -8,13 +8,13 @@ use tokio::time::{interval, MissedTickBehavior};
 use uuid::Uuid;
 
 use crate::{
-    asset::{self, generated_document::GeneratedMarkdownDocument},
     ai::{
         client::StreamFallbackMode,
         config::{AiChatReq, AiTaskStatus},
         handlers::enqueue_ai_task_for_request,
         usage::AiUsageOperation,
     },
+    asset::{self, generated_document::GeneratedMarkdownDocument},
     error::AppError,
     AppState,
 };
@@ -221,7 +221,10 @@ pub async fn reconcile_pipeline_document_assets(state: &AppState) {
     {
         Ok(rows) => rows,
         Err(error) => {
-            tracing::warn!("failed to list pipeline document outputs for repair: {}", error);
+            tracing::warn!(
+                "failed to list pipeline document outputs for repair: {}",
+                error
+            );
             return;
         }
     };
@@ -244,8 +247,10 @@ pub async fn reconcile_pipeline_document_assets(state: &AppState) {
             match asset::repo::find_by_id(&state.db, &asset_id).await {
                 Ok(Some(asset)) => {
                     skipped += 1;
-                    if let Err(error) =
-                        backfill_existing_pipeline_design_asset_metadata(state, &output, content, &asset).await
+                    if let Err(error) = backfill_existing_pipeline_design_asset_metadata(
+                        state, &output, content, &asset,
+                    )
+                    .await
                     {
                         tracing::warn!(
                             output_id = %output.id,
@@ -307,20 +312,20 @@ pub async fn reconcile_pipeline_document_assets(state: &AppState) {
             })
             .unwrap_or(output.id.as_str());
 
-        let asset = match persist_pipeline_document_asset(state, &run, &step, task_id, content).await
-        {
-            Ok(asset) => asset,
-            Err(error) => {
-                tracing::warn!(
-                    output_id = %output.id,
-                    run_id = %output.run_id,
-                    step_id = %output.step_id,
-                    "failed to persist pipeline document asset during repair: {}",
-                    error
-                );
-                continue;
-            }
-        };
+        let asset =
+            match persist_pipeline_document_asset(state, &run, &step, task_id, content).await {
+                Ok(asset) => asset,
+                Err(error) => {
+                    tracing::warn!(
+                        output_id = %output.id,
+                        run_id = %output.run_id,
+                        step_id = %output.step_id,
+                        "failed to persist pipeline document asset during repair: {}",
+                        error
+                    );
+                    continue;
+                }
+            };
 
         let output_json = build_pipeline_document_output_json(
             output.output_json.as_deref(),
@@ -374,7 +379,10 @@ async fn reconcile_pipeline_document_asset_metadata(state: &AppState) {
     {
         Ok(rows) => rows,
         Err(error) => {
-            tracing::warn!("failed to list pipeline review outputs for asset metadata repair: {}", error);
+            tracing::warn!(
+                "failed to list pipeline review outputs for asset metadata repair: {}",
+                error
+            );
             return;
         }
     };
@@ -1153,7 +1161,8 @@ async fn update_reviewed_asset_metadata(
     let Some(design_step) = find_retry_design_step(review_step, steps) else {
         return Ok(false);
     };
-    let Some(asset_id) = latest_design_asset_id_for_step(pool, &run.id, &design_step.id).await? else {
+    let Some(asset_id) = latest_design_asset_id_for_step(pool, &run.id, &design_step.id).await?
+    else {
         return Ok(false);
     };
     let Some(asset) = asset::repo::find_by_id(pool, &asset_id).await? else {

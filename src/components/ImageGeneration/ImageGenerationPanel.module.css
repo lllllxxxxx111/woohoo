@@ -1132,12 +1132,12 @@
 
 .sheetSegments {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 
 .sheetSegments button {
-  min-height: 48px;
+  min-height: 62px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1152,6 +1152,39 @@
 .sheetSegments small {
   font-size: 11px;
   font-weight: 600;
+}
+
+.customSizeRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.customSizeRow input[aria-invalid='true'] {
+  border-color: color-mix(in srgb, #ef4444 72%, var(--border-soft) 28%);
+}
+
+.customSizeRow button {
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, #14b8a6 42%, var(--border-soft) 58%);
+  border-radius: 8px;
+  color: var(--text-primary);
+  background: color-mix(in srgb, #0f766e 18%, transparent 82%);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.customSizeRow button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.sheetHint {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .sheetCount {

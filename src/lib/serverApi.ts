@@ -43,6 +43,8 @@ export type {
   ConsumeTokenInput,
 } from './serverApi.policy';
 export type {
+  ListEndpointModelsInput,
+  ListEndpointModelsResult,
   ServerAiEndpoint,
   ServerAiEndpointCapability,
   UpsertEndpointCapabilityInput,
@@ -453,12 +455,15 @@ function loadStoredServerBaseUrl() {
     return null;
   }
 
-  resolvedServerBaseUrl = normalizeServerBaseUrl(value);
+  // Windows 上 localhost 可能解析到 IPv6 ::1，统一替换为 127.0.0.1
+  resolvedServerBaseUrl = normalizeServerBaseUrl(value).replace('//localhost:', '//127.0.0.1:');
   return resolvedServerBaseUrl;
 }
 
 function persistServerBaseUrl(baseUrl: string) {
-  resolvedServerBaseUrl = normalizeServerBaseUrl(baseUrl);
+  // Windows 上 localhost 可能解析到 IPv6 ::1，统一替换为 127.0.0.1
+  const safeUrl = normalizeServerBaseUrl(baseUrl).replace('//localhost:', '//127.0.0.1:');
+  resolvedServerBaseUrl = safeUrl;
   serverBaseUrlDiscoveryFailureUntil = 0;
   serverBaseUrlDiscoveryFailureMessage = null;
 
@@ -501,31 +506,42 @@ function getRecentServerBaseUrlDiscoveryFailureMessage() {
 }
 
 function getServerBaseUrlCandidates() {
-  const candidates = new Set<string>();
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+
+  /** 添加候选 URL，去重并优先使用 127.0.0.1 而非 localhost（避免 Windows IPv6 解析问题） */
+  const addCandidate = (url: string) => {
+    const normalized = normalizeServerBaseUrl(url);
+    // Windows 上 localhost 可能解析到 IPv6 ::1，导致连接失败，统一替换为 127.0.0.1
+    const safeUrl = normalized.replace('//localhost:', '//127.0.0.1:');
+    if (!seen.has(safeUrl)) {
+      seen.add(safeUrl);
+      candidates.push(safeUrl);
+    }
+  };
+
   const envBaseUrl = import.meta.env.VITE_SERVER_BASE_URL?.trim();
   if (envBaseUrl) {
-    candidates.add(normalizeServerBaseUrl(envBaseUrl));
+    addCandidate(envBaseUrl);
   }
 
   const storedBaseUrl = loadStoredServerBaseUrl();
   if (storedBaseUrl) {
-    candidates.add(storedBaseUrl);
+    addCandidate(storedBaseUrl);
   }
 
-  candidates.add(DEFAULT_SERVER_BASE_URL);
+  addCandidate(DEFAULT_SERVER_BASE_URL);
 
   for (let offset = 0; offset <= SERVER_PORT_SEARCH_LIMIT; offset += 1) {
     const port = DEFAULT_SERVER_PORT + offset;
-    candidates.add(`http://127.0.0.1:${port}`);
-    candidates.add(`http://localhost:${port}`);
+    addCandidate(`http://127.0.0.1:${port}`);
   }
 
   for (const port of COMMON_SERVER_PORTS) {
-    candidates.add(`http://127.0.0.1:${port}`);
-    candidates.add(`http://localhost:${port}`);
+    addCandidate(`http://127.0.0.1:${port}`);
   }
 
-  return Array.from(candidates);
+  return candidates;
 }
 
 function getLoopbackFallbackBaseUrls(baseUrl: string) {
@@ -534,13 +550,13 @@ function getLoopbackFallbackBaseUrls(baseUrl: string) {
     const host = parsed.hostname.toLowerCase();
     const fallbacks: string[] = [];
 
+    // 只做 localhost → 127.0.0.1 的 fallback，不做反向
+    // Windows 上 localhost 可能解析到 IPv6 ::1，导致连接失败
     if (host === 'localhost') {
       parsed.hostname = '127.0.0.1';
       fallbacks.push(normalizeServerBaseUrl(parsed.toString()));
-    } else if (host === '127.0.0.1') {
-      parsed.hostname = 'localhost';
-      fallbacks.push(normalizeServerBaseUrl(parsed.toString()));
     }
+    // 不再将 127.0.0.1 转为 localhost，避免 IPv6 解析问题
 
     return fallbacks;
   } catch {
@@ -1861,6 +1877,7 @@ export const listServerAiEndpoints = endpointApi.listServerAiEndpoints;
 export const createServerAiEndpoint = endpointApi.createServerAiEndpoint;
 export const updateServerAiEndpoint = endpointApi.updateServerAiEndpoint;
 export const deleteServerAiEndpoint = endpointApi.deleteServerAiEndpoint;
+export const listServerAiEndpointModels = endpointApi.listServerAiEndpointModels;
 export const listServerAiEndpointCapabilities = endpointApi.listServerAiEndpointCapabilities;
 export const upsertServerAiEndpointCapability = endpointApi.upsertServerAiEndpointCapability;
 

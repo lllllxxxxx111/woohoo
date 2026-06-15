@@ -3,7 +3,6 @@ import { isProtectedAssetUrl } from '../../../../hooks/useAssetPreviewUrl';
 import type {
   Asset,
   ChatSession,
-  Message,
   Project,
   Script,
   Storyboard,
@@ -522,7 +521,7 @@ function deriveCharacters(
 
 function deriveScenes(storyboard: Storyboard | null) {
   const lines = storyboard?.lines ?? [];
-  return lines.map((line, index) => ({
+  return lines.map((line, _index) => ({
     id: line.id,
     name: `场景 ${String(line.sceneNumber).padStart(2, '0')}`,
     summary: firstSentence(line.description) || `围绕分镜 ${line.sceneNumber} 展开`,

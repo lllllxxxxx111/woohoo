@@ -12,6 +12,7 @@ fn now_rfc3339() -> String {
 pub async fn create_generation(
     pool: &SqlitePool,
     user_id: &str,
+    project_id: Option<&str>,
     prompt: &str,
     model: &str,
     size: &str,
@@ -22,11 +23,12 @@ pub async fn create_generation(
     let now = now_rfc3339();
 
     sqlx::query(
-        "INSERT INTO image_generations (id, user_id, prompt, model, size, n, status, cost_credits, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+        "INSERT INTO image_generations (id, user_id, project_id, prompt, model, size, n, status, cost_credits, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
     )
     .bind(&id)
     .bind(user_id)
+    .bind(project_id)
     .bind(prompt)
     .bind(model)
     .bind(size)
@@ -65,17 +67,20 @@ pub async fn set_completed(
     generation_id: &str,
     result_urls: &[String],
     result_b64_json: Option<&str>,
+    asset_ids: &[String],
     revised_prompt: Option<&str>,
     cost_credits: f64,
 ) -> Result<()> {
     let now = now_rfc3339();
     let urls_json = serde_json::to_string(result_urls)?;
+    let asset_ids_json = serde_json::to_string(asset_ids)?;
 
     sqlx::query(
         "UPDATE image_generations
          SET status = 'completed',
              result_urls = ?,
              result_b64_json = ?,
+             asset_ids = ?,
              revised_prompt = ?,
              cost_credits = ?,
              completed_at = ?
@@ -83,6 +88,7 @@ pub async fn set_completed(
     )
     .bind(&urls_json)
     .bind(result_b64_json)
+    .bind(&asset_ids_json)
     .bind(revised_prompt)
     .bind(cost_credits)
     .bind(&now)
@@ -93,11 +99,7 @@ pub async fn set_completed(
     Ok(())
 }
 
-pub async fn set_failed(
-    pool: &SqlitePool,
-    generation_id: &str,
-    error_message: &str,
-) -> Result<()> {
+pub async fn set_failed(pool: &SqlitePool, generation_id: &str, error_message: &str) -> Result<()> {
     let now = now_rfc3339();
 
     sqlx::query(

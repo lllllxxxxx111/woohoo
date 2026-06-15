@@ -118,7 +118,8 @@ async fn persist_storyboard_document_asset(
 }
 
 fn render_storyboard_markdown(storyboard: &Storyboard) -> String {
-    let mut content = String::from("# Storyboard\n\n| Scene | Duration | Description |\n| --- | ---: | --- |\n");
+    let mut content =
+        String::from("# Storyboard\n\n| Scene | Duration | Description |\n| --- | ---: | --- |\n");
     for line in &storyboard.lines {
         content.push_str(&format!(
             "| {} | {}s | {} |\n",

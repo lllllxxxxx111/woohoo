@@ -19,15 +19,40 @@ import {
   createServerAiEndpoint,
   updateServerAiEndpoint,
   deleteServerAiEndpoint,
+  listServerAiEndpointModels,
   testServerAiCompletionByEndpoint,
   testServerAiCompletion,
+  listServerAiEndpointCapabilities,
+  upsertServerAiEndpointCapability,
 } from '../../lib/serverApi';
+import type { ServerAiEndpointCapability, UpsertEndpointCapabilityInput } from '../../lib/serverApi';
 import { useToast } from '../../context/useToast';
 import { AI_PROVIDER_OPTIONS, AI_PROVIDER_PRESETS, normalizeAiBaseUrl } from '../../lib/ai';
 import type { AiProvider, AiSettings } from '../../types';
 import styles from './SettingsSection.module.css';
 
 const { Text, Paragraph } = Typography;
+
+/** 能力类型定义，包含标识、显示名称和是否需要模型输入 */
+const CAPABILITY_DEFINITIONS = [
+  { key: 'chat', label: '对话', needsModel: false },
+  { key: 'image_generation', label: '图片生成', needsModel: true },
+  { key: 'video_generation', label: '视频生成', needsModel: true },
+  { key: 'embedding', label: '向量化', needsModel: false },
+] as const;
+
+/** 能力类型到显示名称的映射 */
+const CAPABILITY_LABEL_MAP: Record<string, string> = Object.fromEntries(
+  CAPABILITY_DEFINITIONS.map((c) => [c.key, c.label]),
+);
+
+/** 能力类型到标签颜色的映射 */
+const CAPABILITY_COLOR_MAP: Record<string, string> = {
+  chat: 'blue',
+  image_generation: 'orangered',
+  video_generation: 'purple',
+  embedding: 'cyan',
+};
 
 type ServerAiEndpoint = Awaited<ReturnType<typeof listServerAiEndpoints>>[number];
 
@@ -50,6 +75,16 @@ function endpointMatchesSettings(endpoint: ServerAiEndpoint, settings: AiSetting
   );
 }
 
+function uniqModels(values: Array<string | undefined | null>) {
+  return Array.from(
+    new Set(
+      values
+        .map((value) => value?.trim())
+        .filter((value): value is string => Boolean(value)),
+    ),
+  );
+}
+
 export const EndpointManagement: React.FC<EndpointManagementProps> = ({
   currentSettings,
   currentEndpointId,
@@ -64,6 +99,10 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
   const [verifiedConfigSignature, setVerifiedConfigSignature] = useState<string | null>(null);
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [, setStoredApiKey] = useState('');
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [capabilities, setCapabilities] = useState<ServerAiEndpointCapability[]>([]);
+  const [capabilitiesLoading, setCapabilitiesLoading] = useState(false);
   const { showToast } = useToast();
   const [form] = Form.useForm();
 
@@ -117,6 +156,133 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
     }
   }, [showToast]);
 
+  /** 加载指定端点的能力配置列表 */
+  const fetchCapabilities = useCallback(async (endpointId: string) => {
+    setCapabilitiesLoading(true);
+    try {
+      const data = await listServerAiEndpointCapabilities(endpointId);
+      setCapabilities(data);
+    } catch (error) {
+      showToast({ type: 'error', title: '加载能力配置失败', message: String(error) });
+      setCapabilities([]);
+    } finally {
+      setCapabilitiesLoading(false);
+    }
+  }, [showToast]);
+
+  /** 切换能力启用/禁用状态，并同步到服务端 */
+  const handleCapabilityToggle = async (capabilityKey: string, enabled: boolean, model?: string) => {
+    if (!editingId) return;
+    const input: UpsertEndpointCapabilityInput = {
+      capability: capabilityKey,
+      enabled,
+      ...(model ? { model } : {}),
+    };
+    try {
+      const updated = await upsertServerAiEndpointCapability(editingId, input);
+      setCapabilities((prev) => {
+        const index = prev.findIndex((c) => c.capability === capabilityKey);
+        if (index >= 0) {
+          const next = [...prev];
+          next[index] = updated;
+          return next;
+        }
+        return [...prev, updated];
+      });
+      showToast({
+        type: 'success',
+        title: enabled ? `已启用${CAPABILITY_LABEL_MAP[capabilityKey] || capabilityKey}` : `已禁用${CAPABILITY_LABEL_MAP[capabilityKey] || capabilityKey}`,
+      });
+    } catch (error) {
+      showToast({ type: 'error', title: '更新能力配置失败', message: String(error) });
+    }
+  };
+
+  /** 更新能力的模型字段并同步到服务端 */
+  const handleCapabilityModelChange = async (capabilityKey: string, model: string) => {
+    if (!editingId) return;
+    const existing = capabilities.find((c) => c.capability === capabilityKey);
+    const input: UpsertEndpointCapabilityInput = {
+      capability: capabilityKey,
+      enabled: existing?.enabled ?? true,
+      model: model || undefined,
+    };
+    try {
+      const updated = await upsertServerAiEndpointCapability(editingId, input);
+      setCapabilities((prev) => {
+        const index = prev.findIndex((c) => c.capability === capabilityKey);
+        if (index >= 0) {
+          const next = [...prev];
+          next[index] = updated;
+          return next;
+        }
+        return [...prev, updated];
+      });
+    } catch (error) {
+      showToast({ type: 'error', title: '更新模型配置失败', message: String(error) });
+    }
+  };
+
+  const handleFetchModels = async () => {
+    try {
+      const values = form.getFieldsValue();
+      const provider = values.provider as AiProvider | undefined;
+      const rawApiKey = (values.apiKey || '').trim();
+      const editingRecord = editingId
+        ? endpoints.find((endpoint) => endpoint.id === editingId)
+        : undefined;
+      const providerPreset = provider ? AI_PROVIDER_PRESETS[provider] : undefined;
+
+      if (!provider || !providerPreset) {
+        showToast({ type: 'warning', title: '请先选择服务商' });
+        return;
+      }
+
+      if (!values.baseUrl?.trim()) {
+        showToast({ type: 'warning', title: '请先填写通道接口地址' });
+        return;
+      }
+
+      if (providerPreset.requiresApiKey && !rawApiKey && !editingRecord?.hasApiKey) {
+        showToast({
+          type: 'warning',
+          title: '缺少 API Key',
+          message: '新建通道需要先输入 API Key；编辑已保存通道时可留空复用服务端密钥。',
+        });
+        return;
+      }
+
+      setFetchingModels(true);
+      const result = await listServerAiEndpointModels({
+        endpointId: editingRecord?.id ?? null,
+        provider,
+        baseUrl: normalizeAiBaseUrl(provider, values.baseUrl || ''),
+        apiKey: rawApiKey || undefined,
+      });
+      const currentModel = (values.model || '').trim();
+      const nextModels = uniqModels([currentModel, ...result.models]);
+      setModelOptions(nextModels);
+
+      if (!currentModel && nextModels[0]) {
+        form.setFieldValue('model', nextModels[0]);
+      }
+
+      showToast({
+        type: 'success',
+        title: '模型列表已获取',
+        message: `从 /v1/models 读取到 ${result.models.length} 个模型。`,
+      });
+    } catch (error) {
+      showToast({
+        type: 'error',
+        title: '获取模型列表失败',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setFetchingModels(false);
+    }
+  };
+
   useEffect(() => {
     void fetchEndpoints();
   }, [fetchEndpoints]);
@@ -127,6 +293,8 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
     setVerifiedConfigSignature(null);
     setApiKeyVisible(false);
     setStoredApiKey('');
+    setCapabilities([]);
+    setModelOptions([]);
     form.resetFields();
     form.setFieldsValue({
       ...AI_PROVIDER_PRESETS['openai'],
@@ -136,12 +304,16 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
     setVisible(true);
   };
 
-  /** 打开编辑指定端点的弹窗，填充表单初始值 */
+  /** 打开编辑指定端点的弹窗，填充表单初始值并加载能力配置 */
   const handleEdit = (record: ServerAiEndpoint) => {
     setEditingId(record.id);
     setVerifiedConfigSignature(null);
     setApiKeyVisible(false);
     setStoredApiKey('');
+    setModelOptions(uniqModels([
+      record.defaultModel,
+      ...(record.capabilities || []).map((capability) => capability.model),
+    ]));
     form.setFieldsValue({
       name: record.name,
       provider: record.provider,
@@ -151,6 +323,7 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
       forceStreamFallback: true,
     });
     setVisible(true);
+    void fetchCapabilities(record.id);
   };
 
   /** 删除指定端点并刷新列表 */
@@ -168,6 +341,7 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
   const handleProviderChange = (provider: AiProvider) => {
     const preset = AI_PROVIDER_PRESETS[provider];
     setVerifiedConfigSignature(null);
+    setModelOptions([]);
     if (preset) {
       form.setFieldsValue({
         provider: provider,
@@ -467,6 +641,25 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
       ),
     },
     {
+      title: '已启用能力',
+      dataIndex: 'capabilities',
+      render: (_col: ServerAiEndpointCapability[], record: ServerAiEndpoint) => {
+        const enabledCapabilities = (record.capabilities || []).filter((c) => c.enabled);
+        if (enabledCapabilities.length === 0) {
+          return <Text type="secondary">未配置</Text>;
+        }
+        return (
+          <Space wrap size="mini">
+            {enabledCapabilities.map((c) => (
+              <Tag key={c.capability} color={CAPABILITY_COLOR_MAP[c.capability] || 'gray'} bordered size="small">
+                {CAPABILITY_LABEL_MAP[c.capability] || c.capability}
+              </Tag>
+            ))}
+          </Space>
+        );
+      },
+    },
+    {
       title: '认证状态',
       dataIndex: 'hasApiKey',
       render: (hasApiKey: boolean) =>
@@ -573,13 +766,13 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
         <Form form={form} layout="vertical">
           <div className={styles.formGrid}>
             <Form.Item label="服务商类型" field="provider" rules={[{ required: true }]}>
-            <Select onChange={(val) => handleProviderChange(val as AiProvider)}>
-              {AI_PROVIDER_OPTIONS.map((opt) => (
-                <Select.Option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </Select.Option>
-              ))}
-            </Select>
+              <Select onChange={(val) => handleProviderChange(val as AiProvider)}>
+                {AI_PROVIDER_OPTIONS.map((opt) => (
+                  <Select.Option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </Select.Option>
+                ))}
+              </Select>
             </Form.Item>
             <Form.Item label="通道接口地址" field="baseUrl" rules={[{ required: true }]}>
               <Input placeholder="https://..." />
@@ -588,7 +781,23 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
 
           <div className={styles.formGrid}>
             <Form.Item label="缺省首选模型" field="model">
-              <Input placeholder="例如: gpt-4o" />
+              <Space style={{ width: '100%' }}>
+                <Select
+                  allowCreate
+                  showSearch
+                  placeholder="例如: gpt-4o"
+                  style={{ flex: 1, minWidth: 0 }}
+                >
+                  {modelOptions.map((modelName) => (
+                    <Select.Option key={modelName} value={modelName}>
+                      {modelName}
+                    </Select.Option>
+                  ))}
+                </Select>
+                <Button loading={fetchingModels} onClick={handleFetchModels}>
+                  获取模型
+                </Button>
+              </Space>
             </Form.Item>
             <Form.Item label="授权密钥" field="apiKey" extra={editingId ? '留空将保留原密钥不变' : ''}>
               <Input
@@ -624,6 +833,68 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
               <Switch checkedText="流式" uncheckedText="非流式" />
             </Form.Item>
           </div>
+
+          {/* 能力配置区域，仅编辑模式下显示 */}
+          {editingId && (
+            <div style={{ marginTop: 16, borderTop: '1px solid var(--color-border-2)', paddingTop: 16 }}>
+              <Text bold style={{ display: 'block', marginBottom: 12 }}>
+                能力配置
+              </Text>
+              <Text type="secondary" style={{ display: 'block', marginBottom: 12, fontSize: 12 }}>
+                启用或禁用该端点支持的 AI 能力，生图和生视频能力可单独指定模型。
+              </Text>
+              {capabilitiesLoading ? (
+                <Text type="secondary">加载中...</Text>
+              ) : (
+                <Space direction="vertical" size="medium" style={{ width: '100%' }}>
+                  {CAPABILITY_DEFINITIONS.map((capDef) => {
+                    const existingCap = capabilities.find((c) => c.capability === capDef.key);
+                    const isEnabled = existingCap?.enabled ?? false;
+                    const currentModel = existingCap?.model || '';
+                    return (
+                      <div key={capDef.key} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <Space>
+                            <Tag color={CAPABILITY_COLOR_MAP[capDef.key] || 'gray'} bordered size="small">
+                              {capDef.label}
+                            </Tag>
+                            {existingCap?.model && (
+                              <Text type="secondary" style={{ fontSize: 12 }}>
+                                模型: {existingCap.model}
+                              </Text>
+                            )}
+                          </Space>
+                          <Switch
+                            checked={isEnabled}
+                            checkedText="开"
+                            uncheckedText="关"
+                            onChange={(val: boolean) => handleCapabilityToggle(capDef.key, val, currentModel || undefined)}
+                          />
+                        </div>
+                        {capDef.needsModel && isEnabled && (
+                          <Select
+                            allowCreate
+                            showSearch
+                            placeholder={`指定${capDef.label}使用的模型，如 dall-e-3`}
+                            value={currentModel || undefined}
+                            onChange={(val) => handleCapabilityModelChange(capDef.key, String(val || ''))}
+                            style={{ marginLeft: 0, width: '100%' }}
+                            size="small"
+                          >
+                            {uniqModels([currentModel, ...modelOptions]).map((modelName) => (
+                              <Select.Option key={modelName} value={modelName}>
+                                {modelName}
+                              </Select.Option>
+                            ))}
+                          </Select>
+                        )}
+                      </div>
+                    );
+                  })}
+                </Space>
+              )}
+            </div>
+          )}
         </Form>
       </Modal>
     </>

@@ -25,7 +25,9 @@ pub async fn persist_markdown_document(
     input: GeneratedMarkdownDocument<'_>,
 ) -> AppResult<Asset> {
     if input.content.trim().is_empty() {
-        return Err(AppError::Validation("document content cannot be empty".into()));
+        return Err(AppError::Validation(
+            "document content cannot be empty".into(),
+        ));
     }
 
     let assets_root = resolve_assets_root(state).await?;
@@ -94,11 +96,9 @@ async fn find_by_project_url(
     .map_err(Into::into)
 }
 
-fn merge_document_metadata(
-    existing: Option<&str>,
-    next: &serde_json::Value,
-) -> serde_json::Value {
-    let existing_value = existing.and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok());
+fn merge_document_metadata(existing: Option<&str>, next: &serde_json::Value) -> serde_json::Value {
+    let existing_value =
+        existing.and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok());
     let existing_change_count = existing_value
         .as_ref()
         .and_then(|value| metadata_i64(value, &["changeCount", "change_count", "revisionCount"]));
@@ -129,7 +129,8 @@ fn with_document_tracking_metadata(mut metadata: Value) -> Value {
 
     if let Some(map) = metadata.as_object_mut() {
         map.entry("changeCount".to_string()).or_insert(json!(0));
-        map.entry("createdAt".to_string()).or_insert(json!(now_iso()));
+        map.entry("createdAt".to_string())
+            .or_insert(json!(now_iso()));
     }
 
     metadata

@@ -524,7 +524,7 @@ export const AssetLibrary: React.FC = () => {
       isAuthenticated: state.isAuthenticated,
     })),
   );
-  const { uploadAssets, deleteAsset, updateAsset } = useAppActions();
+  const { uploadAssets, deleteAsset, updateAsset, refreshWorkspace } = useAppActions();
   const { showToast } = useToast();
 
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
@@ -563,6 +563,10 @@ export const AssetLibrary: React.FC = () => {
       setSelectedAsset(null);
     }
   }, [assets, selectedAsset]);
+
+  useEffect(() => {
+    void refreshWorkspace('asset library open', 1);
+  }, [activeState.projectId, refreshWorkspace]);
 
   const projectNameById = useMemo(() => {
     const nextMap = new Map<string, string>();
@@ -897,10 +901,10 @@ export const AssetLibrary: React.FC = () => {
 
   const scopedAssets = useMemo(() => {
     if (libraryScope === 'current' && activeState.projectId) {
-      return activeAssets;
+      return assets.filter((asset) => asset.projectId === activeState.projectId);
     }
     return assets;
-  }, [activeAssets, activeState.projectId, assets, libraryScope]);
+  }, [activeState.projectId, assets, libraryScope]);
 
   const activeProjectName = activeState.projectId
     ? projectNameById.get(activeState.projectId) || '当前项目'

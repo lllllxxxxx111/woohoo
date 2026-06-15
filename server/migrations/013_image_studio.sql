@@ -4,6 +4,7 @@
 CREATE TABLE IF NOT EXISTS image_generations (
     id              TEXT PRIMARY KEY,
     user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    project_id      TEXT REFERENCES projects(id) ON DELETE SET NULL,
     prompt          TEXT NOT NULL,
     model           TEXT NOT NULL DEFAULT 'dall-e-3',
     size            TEXT NOT NULL DEFAULT '1024x1024',
@@ -12,6 +13,7 @@ CREATE TABLE IF NOT EXISTS image_generations (
     error_message   TEXT,
     result_urls     TEXT,
     result_b64_json TEXT,
+    asset_ids       TEXT,
     revised_prompt  TEXT,
     cost_credits   REAL NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
@@ -19,6 +21,7 @@ CREATE TABLE IF NOT EXISTS image_generations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_image_gen_user ON image_generations(user_id);
+CREATE INDEX IF NOT EXISTS idx_image_gen_project ON image_generations(project_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_image_gen_status ON image_generations(status);
 CREATE INDEX IF NOT EXISTS idx_image_gen_created ON image_generations(created_at DESC);
 

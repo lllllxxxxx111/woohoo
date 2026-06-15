@@ -376,6 +376,10 @@ async fn main() {
             get(ai::catalog_handlers::list_endpoints).post(ai::catalog_handlers::create_endpoint),
         )
         .route(
+            "/api/ai/endpoints/models",
+            post(ai::catalog_handlers::list_endpoint_models),
+        )
+        .route(
             "/api/ai/endpoints/{id}",
             axum::routing::put(ai::catalog_handlers::update_endpoint)
                 .delete(ai::catalog_handlers::delete_endpoint),

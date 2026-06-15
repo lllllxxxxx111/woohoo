@@ -109,7 +109,9 @@ pub(super) fn parse_review_decision(raw: &str) -> ReviewDecision {
             decision: "fail",
             score: None,
             issues: json!([fallback_issue]),
-            retry_hints: json!(["请根据上述评语修订大纲，并确保审核输出包含 decision、score、issues、retryHints。"]),
+            retry_hints: json!([
+                "请根据上述评语修订大纲，并确保审核输出包含 decision、score、issues、retryHints。"
+            ]),
             parse_error: Some("review_parse_error".to_string()),
         };
     };
@@ -587,9 +589,7 @@ mod tests {
         assert!(issues
             .first()
             .is_some_and(|item| item.contains("缺少结尾反转")));
-        assert!(hints
-            .first()
-            .is_some_and(|item| item.contains("decision")));
+        assert!(hints.first().is_some_and(|item| item.contains("decision")));
     }
 
     #[test]
