@@ -3,11 +3,16 @@ import {
   FolderPlus,
   ChevronDown,
   ChevronRight,
+  MessageSquare,
   MessageSquarePlus,
   Trash2,
   Database,
   Bot,
   Zap,
+  Image,
+  Video,
+  Music,
+  File,
   LayoutDashboard,
   PanelLeftClose,
   PanelLeftOpen,
@@ -21,27 +26,64 @@ import { useShallow } from 'zustand/react/shallow';
 
 import { useAppActions } from '../../../../context/useAppActions';
 import { useToast } from '../../../../context/useToast';
+import type { Asset } from '../../../../types';
+import { useAssetPreviewUrl } from '../../../../hooks/useAssetPreviewUrl';
+import {
+  ASSET_TYPE_LABELS,
+  type AssetLibraryFilterType,
+} from '../../../../lib/assetLibraryView';
 import styles from './Sidebar.module.css';
 import { SettingsMenu } from './SettingsMenu';
+
+const ASSET_CATEGORY_OPTIONS: Array<{ type: AssetLibraryFilterType; icon: React.ReactNode }> = [
+  { type: 'all', icon: <Database size={13} /> },
+  { type: 'image', icon: <Image size={13} /> },
+  { type: 'video', icon: <Video size={13} /> },
+  { type: 'audio', icon: <Music size={13} /> },
+  { type: 'document', icon: <File size={13} /> },
+];
+
+const SidebarAssetThumb: React.FC<{ asset: Asset }> = ({ asset }) => {
+  const { previewUrl, status } = useAssetPreviewUrl(asset);
+
+  if (asset.type === 'image' && status === 'ready' && previewUrl) {
+    return <img src={previewUrl} alt={asset.name} loading="lazy" />;
+  }
+
+  if (asset.type === 'video') {
+    return <Video size={16} />;
+  }
+  if (asset.type === 'audio') {
+    return <Music size={16} />;
+  }
+  if (asset.type === 'document') {
+    return <File size={16} />;
+  }
+  return <Image size={16} />;
+};
 
 export const Sidebar: React.FC = () => {
   const {
     projects,
+    assets,
     activeState,
     isSidebarCollapsed,
     setSidebarCollapsed,
     setActiveProject,
     setActiveChat,
     switchTab,
+    setAssetLibraryView,
   } = useAppStore(
     useShallow((state) => ({
       projects: state.projects,
+      assets: state.assets,
       activeState: state.activeState,
       isSidebarCollapsed: state.isSidebarCollapsed,
       setSidebarCollapsed: state.setSidebarCollapsed,
       setActiveProject: state.setActiveProject,
       setActiveChat: state.setActiveChat,
       switchTab: state.switchTab,
+      setAssetLibraryView: state.setAssetLibraryView,
     })),
   );
   const {
@@ -55,6 +97,7 @@ export const Sidebar: React.FC = () => {
   const { showToast } = useToast();
 
   const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({});
+  const [expandedAssetProjects, setExpandedAssetProjects] = useState<Record<string, boolean>>({});
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [projectFilter, setProjectFilter] = useState('');
@@ -125,9 +168,51 @@ export const Sidebar: React.FC = () => {
       );
   }, [projects, normalizedFilter]);
 
+  const projectAssetsById = useMemo(() => {
+    const nextMap = new Map<string, Asset[]>();
+    for (const asset of assets) {
+      const projectAssets = nextMap.get(asset.projectId) ?? [];
+      projectAssets.push(asset);
+      nextMap.set(asset.projectId, projectAssets);
+    }
+
+    for (const projectAssets of nextMap.values()) {
+      projectAssets.sort((left, right) => right.createdAt - left.createdAt);
+    }
+
+    return nextMap;
+  }, [assets]);
+
   const toggleProject = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     setExpandedProjects((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const openProjectAssets = (projectId: string, filterType: AssetLibraryFilterType) => {
+    setActiveProject(projectId);
+    switchTab('assets');
+    setAssetLibraryView({
+      projectId,
+      scope: 'current',
+      filterType,
+      groupMode: filterType === 'all' ? 'type' : 'none',
+    });
+  };
+
+  const toggleProjectAssets = (projectId: string, event: React.MouseEvent) => {
+    event.stopPropagation();
+    setExpandedProjects((prev) => ({ ...prev, [projectId]: true }));
+    setExpandedAssetProjects((prev) => ({ ...prev, [projectId]: !prev[projectId] }));
+    openProjectAssets(projectId, 'all');
+  };
+
+  const openProjectAssetCategory = (
+    projectId: string,
+    filterType: AssetLibraryFilterType,
+    event: React.MouseEvent,
+  ) => {
+    event.stopPropagation();
+    openProjectAssets(projectId, filterType);
   };
 
   /**
@@ -297,11 +382,18 @@ export const Sidebar: React.FC = () => {
 
         <div className={styles.topMenu}>
           <div
+            className={`${styles.menuItem} ${activeState.currentTab === 'chat' ? styles.activeTab : ''}`}
+            onClick={() => switchTab('chat')}
+          >
+            <MessageSquare size={18} />
+            <span>创意对话</span>
+          </div>
+          <div
             className={`${styles.menuItem} ${activeState.currentTab === 'pipeline' ? styles.activeTab : ''}`}
             onClick={() => switchTab('pipeline')}
           >
             <LayoutDashboard size={18} />
-            <span>工作区</span>
+            <span>制作流程</span>
           </div>
           <div
             className={`${styles.menuItem} ${activeState.currentTab === 'assets' ? styles.activeTab : ''}`}
@@ -309,6 +401,13 @@ export const Sidebar: React.FC = () => {
           >
             <Database size={18} />
             <span>资产库</span>
+          </div>
+          <div
+            className={`${styles.menuItem} ${activeState.currentTab === 'imageGeneration' ? styles.activeTab : ''}`}
+            onClick={() => switchTab('imageGeneration')}
+          >
+            <Image size={18} />
+            <span>图片生成</span>
           </div>
           <div
             className={`${styles.menuItem} ${activeState.currentTab === 'automation' ? styles.activeTab : ''}`}
@@ -347,6 +446,12 @@ export const Sidebar: React.FC = () => {
           <div className={styles.projectList}>
             {filteredProjects.map(({ project, visibleChats }) => {
               const isExpanded = normalizedFilter ? true : Boolean(expandedProjects[project.id]);
+              const isAssetExpanded = Boolean(expandedAssetProjects[project.id]);
+              const projectAssets = projectAssetsById.get(project.id) ?? [];
+              const getAssetCategoryCount = (type: AssetLibraryFilterType) =>
+                type === 'all'
+                  ? projectAssets.length
+                  : projectAssets.filter((asset) => asset.type === type).length;
               return (
                 <div key={project.id} className={styles.projectGroup}>
                   <div
@@ -401,7 +506,57 @@ export const Sidebar: React.FC = () => {
 
                   {isExpanded && (
                     <div className={styles.projectContent}>
-                      <div className={styles.subItem}>项目资产库 ({project.assetsCount})</div>
+                      <button
+                        type="button"
+                        className={styles.assetLibraryToggle}
+                        onClick={(event) => toggleProjectAssets(project.id, event)}
+                        title="打开项目资产库"
+                      >
+                        {isAssetExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                        <Database size={14} />
+                        <span className={styles.truncate}>项目资产库</span>
+                        <span>{projectAssets.length || project.assetsCount}</span>
+                      </button>
+                      {isAssetExpanded && (
+                        <div className={styles.assetCategoryList}>
+                          {ASSET_CATEGORY_OPTIONS.map((category) => {
+                            const categoryAssets =
+                              category.type === 'all'
+                                ? projectAssets
+                                : projectAssets.filter((asset) => asset.type === category.type);
+                            const count = getAssetCategoryCount(category.type);
+                            return (
+                              <button
+                                key={category.type}
+                                type="button"
+                                className={styles.assetCategoryItem}
+                                onClick={(event) =>
+                                  openProjectAssetCategory(project.id, category.type, event)
+                                }
+                                disabled={count === 0}
+                              >
+                                {category.icon}
+                                <span>{ASSET_TYPE_LABELS[category.type]}</span>
+                                <strong>{count}</strong>
+                                <div className={styles.assetCategoryPreview}>
+                                  <span>{ASSET_TYPE_LABELS[category.type]}资产预览</span>
+                                  {categoryAssets.length > 0 ? (
+                                    <div className={styles.assetThumbGrid}>
+                                      {categoryAssets.slice(0, 4).map((asset) => (
+                                        <div key={asset.id} className={styles.assetThumb}>
+                                          <SidebarAssetThumb asset={asset} />
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <p>暂无资产</p>
+                                  )}
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
                       <div className={styles.chatList}>
                         {visibleChats.map((chat) => (
                           <div

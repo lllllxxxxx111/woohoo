@@ -9,6 +9,7 @@ import type {
   AiSettings,
   Asset,
   ChatSession,
+  ExecutionMode,
   Message,
   MessageAttachment,
   Project,
@@ -21,15 +22,15 @@ import {
   buildProjectContextPrompt,
   buildSystemPrompt,
   createId,
-  endpointMatchesAiSettings,
+  endpointMatchesAiProvider,
   extractAgent,
   formatAssetTypeLabel,
   getChatSession,
   inferProjectNameFromConversation,
   normalizeResourceMentions,
+  resolveAiTaskRequestModel,
+  selectAiEndpointForSettings,
 } from '../utils/appContextHelpers';
-
-type ExecutionMode = 'task' | 'sync' | 'direct';
 
 type SendMessageResult = {
   mode: ExecutionMode;
@@ -190,24 +191,23 @@ export function useAiMessageRuntime({
   const ensureServerAiEndpoint = useCallback(
     async (settings: AiSettings) => {
       const endpoints = await listServerAiEndpoints();
-      const cachedEndpoint = serverAiEndpointId
-        ? endpoints.find((endpoint) => endpoint.id === serverAiEndpointId)
-        : undefined;
-
-      if (cachedEndpoint && endpointMatchesAiSettings(cachedEndpoint, settings)) {
-        return cachedEndpoint.id;
-      }
-
-      const matchedEndpoint = endpoints.find((endpoint) =>
-        endpointMatchesAiSettings(endpoint, settings),
-      );
+      const matchedEndpoint = selectAiEndpointForSettings(endpoints, settings, serverAiEndpointId);
       if (matchedEndpoint) {
         setServerAiEndpointId(matchedEndpoint.id);
-        return matchedEndpoint.id;
+        return matchedEndpoint;
+      }
+
+      const disabledOrMissingKeyEndpoint = endpoints.find((endpoint) =>
+        endpointMatchesAiProvider(endpoint, settings),
+      );
+      if (disabledOrMissingKeyEndpoint) {
+        throw new Error(
+          `匹配的 AI 端点未启用或没有保存 API Key（provider=${settings.provider}）。请前往“设置 > API 通道”启用端点并保存密钥。`,
+        );
       }
 
       throw new Error(
-        `未找到匹配的 AI 端点（provider=${settings.provider}, model=${settings.model || '未设置'}）。请前往“设置 > 模型与提供商”手动创建或调整端点。`,
+        `未找到可用的 AI 端点（provider=${settings.provider}, model=${settings.model || '未设置'}）。请前往“设置 > API 通道”手动创建或调整通道。`,
       );
     },
     [serverAiEndpointId, setServerAiEndpointId],
@@ -464,14 +464,17 @@ export function useAiMessageRuntime({
 
       try {
         if (isServerWorkspaceReady) {
-          const endpointId = await ensureServerAiEndpoint(normalizedSettings);
+          const endpoint = await ensureServerAiEndpoint(normalizedSettings);
+          const requestModel = resolveAiTaskRequestModel(endpoint, normalizedSettings);
+          const displayModel =
+            requestModel || endpoint.defaultModel?.trim() || normalizedSettings.model;
           const task = await createAiTask({
             conversationId: targetChatId,
             content: normalizedContent,
             resourceRefs,
             agentId: agent?.id,
-            endpointId,
-            model: normalizedSettings.model,
+            endpointId: endpoint.id,
+            model: requestModel,
             systemPrompt: normalizedSettings.systemPrompt,
             temperature: normalizedSettings.temperature,
             maxTokens: normalizedSettings.maxTokens,
@@ -518,7 +521,7 @@ export function useAiMessageRuntime({
             chatId: targetChatId,
             conversationId: targetChatId,
             placeholderMessageId: effectivePlaceholderMessageId,
-            requestedModel: normalizedSettings.model,
+            requestedModel: displayModel,
             provider: normalizedSettings.provider,
           });
 
@@ -530,7 +533,7 @@ export function useAiMessageRuntime({
               ...message,
               content: task.status === 'running' ? 'AI 正在处理中...' : '任务已提交，排队中...',
               status: 'pending',
-              model: task.model || normalizedSettings.model,
+              model: task.model || displayModel,
               meta: {
                 ...mergeTaskMessageMeta(message.meta, task, normalizedSettings.provider),
                 operation: 'task',

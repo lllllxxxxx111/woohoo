@@ -23,6 +23,12 @@ pub enum AppError {
     #[error("参数错误: {0}")]
     Validation(String),
 
+    #[error("请求错误: {0}")]
+    BadRequest(String),
+
+    #[error("积分不足: {0}")]
+    PaymentRequired(String),
+
     #[error("冲突: {0}")]
     Conflict(String),
 
@@ -80,6 +86,24 @@ impl IntoResponse for AppError {
                 msg.clone(),
                 "info",
                 "VALIDATION_ERROR",
+                false,
+            ),
+
+            // 请求错误 - 业务逻辑层面的请求不合法
+            AppError::BadRequest(msg) => (
+                StatusCode::BAD_REQUEST,
+                msg.clone(),
+                "info",
+                "BAD_REQUEST",
+                false,
+            ),
+
+            // 积分不足
+            AppError::PaymentRequired(msg) => (
+                StatusCode::PAYMENT_REQUIRED,
+                msg.clone(),
+                "warning",
+                "INSUFFICIENT_CREDITS",
                 false,
             ),
 

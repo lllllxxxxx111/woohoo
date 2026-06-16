@@ -27,9 +27,11 @@ export type AppActions = {
   ) => Promise<void>;
   addMessage: (projectId: string | null, chatId: string | null, message: Message) => void;
   uploadAssets: (projectId: string, files: File[]) => Promise<Asset[]>;
+  updateAsset: (assetId: string, input: Partial<Pick<Asset, 'name' | 'type' | 'url' | 'metadata'>>) => Promise<Asset>;
   deleteAsset: (assetId: string) => Promise<void>;
   saveScript: (projectId: string, content: string, title?: string) => Promise<Script>;
   saveStoryboard: (projectId: string, lines: Storyboard['lines']) => Promise<Storyboard>;
+  refreshWorkspace: (reason?: string, maxAttempts?: number) => Promise<unknown>;
   suggestProjectName: (seedContent?: string) => string;
   sendAiMessage: (content: string, options?: SendAiMessageOptions) => Promise<SendMessageResult>;
 };

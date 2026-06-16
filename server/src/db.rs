@@ -130,6 +130,14 @@ async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<String>, sqlx::E
             "008_ai_tasks_persistence",
             include_str!("../migrations/008_ai_tasks_persistence.sql"),
         ),
+        (
+            "012_collaboration",
+            include_str!("../migrations/012_collaboration.sql"),
+        ),
+        (
+            "013_image_studio",
+            include_str!("../migrations/013_image_studio.sql"),
+        ),
     ] {
         if run_sql_migration(pool, version, migration_sql).await? {
             applied_versions.push(version.to_string());

@@ -4,11 +4,18 @@ import type {
   AgentContact,
   AiSettings,
   Asset,
+  CollaborationAssignment,
+  CollaborationSession,
+  LoopCheckResponse,
   Message,
   Project,
   Script,
   Storyboard,
 } from '../../types';
+import {
+  buildCollaborationStorageKey,
+  type StoredCollaborationSnapshotMap,
+} from '../utils/storageHelpers';
 
 type WorkspaceStorageKeys = {
   projects: string;
@@ -22,6 +29,7 @@ type WorkspaceStorageKeys = {
   autoSave: string;
   aiSettings: string;
   aiEndpointId: string;
+  collaborationSessions: string;
 };
 
 type UseWorkspacePersistenceOptions = {
@@ -33,6 +41,9 @@ type UseWorkspacePersistenceOptions = {
   storyboards: Storyboard[];
   allAgentContacts: AgentContact[];
   activeState: ActiveState;
+  activeCollaborationSession: CollaborationSession | null;
+  activeCollaborationAssignments: CollaborationAssignment[];
+  collaborationLoopCheckResult: LoopCheckResponse | null;
   theme: 'dark' | 'light';
   autoSaveEnabled: boolean;
   aiSettings: AiSettings;
@@ -51,6 +62,9 @@ export function useWorkspacePersistence({
   storyboards,
   allAgentContacts,
   activeState,
+  activeCollaborationSession,
+  activeCollaborationAssignments,
+  collaborationLoopCheckResult,
   theme,
   autoSaveEnabled,
   aiSettings,
@@ -137,6 +151,44 @@ export function useWorkspacePersistence({
   useEffect(() => {
     persistStorage(storageKeys.aiEndpointId, serverAiEndpointId);
   }, [persistStorage, serverAiEndpointId, storageKeys.aiEndpointId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !activeCollaborationSession?.projectId || !activeCollaborationSession.conversationId) {
+      return;
+    }
+
+    const storageKey = storageKeys.collaborationSessions;
+    const conversationKey = buildCollaborationStorageKey(
+      activeCollaborationSession.projectId,
+      activeCollaborationSession.conversationId,
+    );
+
+    let nextSnapshotMap: StoredCollaborationSnapshotMap = {};
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      if (raw) {
+        const parsed = JSON.parse(raw) as unknown;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          nextSnapshotMap = parsed as StoredCollaborationSnapshotMap;
+        }
+      }
+    } catch {
+      nextSnapshotMap = {};
+    }
+
+    nextSnapshotMap[conversationKey] = {
+      session: activeCollaborationSession,
+      assignments: activeCollaborationAssignments,
+      loopCheckResult: collaborationLoopCheckResult,
+    };
+    persistStorage(storageKey, nextSnapshotMap);
+  }, [
+    activeCollaborationAssignments,
+    activeCollaborationSession,
+    collaborationLoopCheckResult,
+    persistStorage,
+    storageKeys.collaborationSessions,
+  ]);
 
   useEffect(() => {
     setActiveState((prev) => {

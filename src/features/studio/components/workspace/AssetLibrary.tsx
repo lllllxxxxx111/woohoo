@@ -4,6 +4,7 @@ import {
   Video,
   Music,
   File,
+  FileText,
   Upload,
   Search,
   Filter,
@@ -12,17 +13,36 @@ import {
   Grid,
   List,
   Star,
+  FolderOpen,
+  Layers,
   MoreVertical,
   Download,
   Trash2,
+  ImageOff,
+  Loader2,
+  ZoomIn,
+  Minus,
+  Plus,
+  Maximize2,
+  ArrowLeft,
 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useAppStore } from '../../../../store';
 import { useShallow } from 'zustand/react/shallow';
 
 import { Asset } from '../../../../types';
 import { useAppActions } from '../../../../context/useAppActions';
 import { useToast } from '../../../../context/useToast';
-import { getServerAssetBlob } from '../../../../lib/serverApi';
+import { getServerAssetBlob, getStoredServerProfile } from '../../../../lib/serverApi';
+import { formatCreditAmount, TOKENS_PER_CREDIT } from '../../../../lib/credits';
+import { isProtectedAssetUrl, useAssetPreviewUrl } from '../../../../hooks/useAssetPreviewUrl';
+import {
+  ASSET_TYPE_LABELS,
+  type AssetLibraryFilterType,
+  type AssetLibraryGroupMode,
+  type AssetLibraryScope,
+} from '../../../../lib/assetLibraryView';
 import styles from './AssetLibrary.module.css';
 
 interface UploadingFile {
@@ -32,55 +52,479 @@ interface UploadingFile {
   size: number;
 }
 
-type FilterType = 'all' | 'image' | 'video' | 'audio' | 'document';
+type FilterType = AssetLibraryFilterType;
+type RatingFilter = 0 | 1 | 2 | 3 | 4 | 5;
 type ViewMode = 'grid' | 'list';
 
-function shouldLoadProtectedAsset(assetId: string, assetUrl: string) {
-  return assetUrl.includes(`/api/assets/${assetId}/file`) || assetUrl.includes('/uploads/');
+type PreviewImage = {
+  src: string;
+  name: string;
+  asset: Asset;
+};
+
+type DetailInfoRow = {
+  label: string;
+  value: string;
+};
+
+function isFavoriteAsset(asset: Asset): boolean {
+  return asset.metadata?.favorite === true;
 }
 
-const AssetPreviewImage: React.FC<{ asset: Asset }> = ({ asset }) => {
-  const [previewUrl, setPreviewUrl] = useState(asset.url);
+function getAssetRating(asset: Asset): number {
+  const rating = Number(asset.metadata?.rating ?? 0);
+  if (!Number.isFinite(rating)) {
+    return 0;
+  }
 
-  useEffect(() => {
-    if (!shouldLoadProtectedAsset(asset.id, asset.url)) {
-      setPreviewUrl(asset.url);
-      return;
+  return Math.min(5, Math.max(0, Math.round(rating)));
+}
+
+function normalizeAssetMetadata(metadata: Asset['metadata']): Record<string, unknown> {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    return {};
+  }
+
+  return metadata;
+}
+
+function getMetadataNumber(metadata: Record<string, unknown>, keys: string[]): number | null {
+  for (const key of keys) {
+    const value = metadata[key];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
     }
+    if (typeof value === 'string' && value.trim() !== '') {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
 
-    let cancelled = false;
-    let objectUrl: string | null = null;
+  return null;
+}
 
-    void getServerAssetBlob(asset.id)
-      .then((blob) => {
-        if (cancelled) {
+function getMetadataText(metadata: Record<string, unknown>, key: string): string {
+  const value = metadata[key];
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+  return '';
+}
+
+function getMetadataTextFromKeys(metadata: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = metadata[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
+  return '';
+}
+
+function getMetadataNumberFromKeys(metadata: Record<string, unknown>, keys: string[]): number | null {
+  for (const key of keys) {
+    const value = getMetadataNumber(metadata, [key]);
+    if (value !== null) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function getMetadataTextListFromKeys(metadata: Record<string, unknown>, keys: string[]): string[] {
+  for (const key of keys) {
+    const value = metadata[key];
+    if (Array.isArray(value)) {
+      const items = value
+        .map((item) => (typeof item === 'string' ? item.trim() : String(item ?? '').trim()))
+        .filter(Boolean);
+      if (items.length > 0) {
+        return items;
+      }
+    }
+    if (typeof value === 'string' && value.trim()) {
+      return value
+        .split(/\n|；|;/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+  }
+  return [];
+}
+
+function formatReviewStatus(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (['approved', 'pass', 'passed', 'success'].includes(normalized)) {
+    return '已通过';
+  }
+  if (['rejected', 'fail', 'failed', 'blocked'].includes(normalized)) {
+    return '未通过';
+  }
+  if (['pending', 'queued', 'running'].includes(normalized)) {
+    return '审核中';
+  }
+  return value;
+}
+
+function getAssetCreditCost(metadata: Record<string, unknown>): number | null {
+  const explicitCost = getMetadataNumberFromKeys(metadata, [
+    'costCredits',
+    'creditsCost',
+    'creditCost',
+    'credits',
+    'spentCredits',
+    'totalCredits',
+  ]);
+  if (explicitCost !== null) {
+    return explicitCost;
+  }
+
+  const totalTokens = getMetadataNumberFromKeys(metadata, ['totalTokens', 'total_tokens']);
+  if (totalTokens !== null) {
+    return totalTokens / TOKENS_PER_CREDIT;
+  }
+
+  const usage = metadata.usage;
+  if (usage && typeof usage === 'object' && !Array.isArray(usage)) {
+    const usageTokens = getMetadataNumberFromKeys(usage as Record<string, unknown>, [
+      'totalTokens',
+      'total_tokens',
+    ]);
+    if (usageTokens !== null) {
+      return usageTokens / TOKENS_PER_CREDIT;
+    }
+  }
+
+  return null;
+}
+
+function formatAssetCreditCost(value: number | null): string {
+  if (value === null) {
+    return '未记录';
+  }
+  return `${formatCreditAmount(value)} 积分`;
+}
+
+function isMarkdownDocumentAsset(asset: Asset, metadata: Record<string, unknown>): boolean {
+  const format = getMetadataText(metadata, 'format').toLowerCase();
+  const mimeType = getMetadataText(metadata, 'mimeType').toLowerCase();
+  const name = asset.name.toLowerCase();
+
+  return (
+    format === 'markdown' ||
+    format === 'md' ||
+    mimeType.includes('markdown') ||
+    name.endsWith('.md') ||
+    name.endsWith('.markdown')
+  );
+}
+
+function getMetadataDocumentText(metadata: Record<string, unknown>): string | null {
+  const directKeys = ['content', 'text', 'markdown', 'body', 'document'];
+
+  for (const key of directKeys) {
+    const value = metadata[key];
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value;
+    }
+  }
+
+  const output = metadata.output;
+  if (typeof output === 'string' && output.trim().length > 0) {
+    return output;
+  }
+
+  if (output && typeof output === 'object' && !Array.isArray(output)) {
+    return getMetadataDocumentText(output as Record<string, unknown>);
+  }
+
+  return null;
+}
+
+function formatBytesToMb(bytes: number | null | undefined): string {
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) {
+    return '未填写';
+  }
+
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function formatDurationSeconds(value: number | null | undefined): string {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return '未填写';
+  }
+
+  const totalSeconds = Math.max(0, Math.round(value));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function countDocumentCharacters(text: string): number {
+  const cleaned = text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`]*`/g, ' ')
+    .replace(/\[[^\]]*\]\([^)]+\)/g, ' ')
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, ' ')
+    .replace(/[#>*_~|[\]{}()-]/g, ' ')
+    .replace(/\s+/g, '');
+
+  return cleaned.length;
+}
+
+function stripDocumentPreviewText(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, ' ')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^[\s#>*+-]+/gm, '')
+    .replace(/[`*_~|[\]{}]/g, '')
+    .replace(/\r/g, '')
+    .trim();
+}
+
+function getDocumentThumbnailLines(text: string | null, fallbackName: string): string[] {
+  const source = text ? stripDocumentPreviewText(text) : '';
+  const lines = source
+    .split('\n')
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .slice(0, 5);
+
+  if (lines.length > 0) {
+    return lines;
+  }
+
+  return [fallbackName.replace(/\.[^.]+$/, ''), '打开详情查看完整内容'];
+}
+
+function getAssetMetricLabel(type: Asset['type']): string {
+  switch (type) {
+    case 'image':
+      return '大小';
+    case 'video':
+    case 'audio':
+      return '时长';
+    case 'document':
+      return '字数';
+    default:
+      return '尺寸';
+  }
+}
+
+async function loadAssetBlob(asset: Pick<Asset, 'id' | 'url'>): Promise<Blob> {
+  if (isProtectedAssetUrl(asset.id, asset.url)) {
+    return getServerAssetBlob(asset.id);
+  }
+
+  const response = await fetch(asset.url);
+  if (!response.ok) {
+    throw new Error(`无法读取资产文件: ${response.status}`);
+  }
+
+  return response.blob();
+}
+
+async function resolveAssetMediaDuration(asset: Pick<Asset, 'id' | 'url' | 'type'>): Promise<number | null> {
+  try {
+    const blob = await loadAssetBlob(asset);
+    const objectUrl = window.URL.createObjectURL(blob);
+
+    return await new Promise<number | null>((resolve) => {
+      const media = window.document.createElement(asset.type === 'audio' ? 'audio' : 'video');
+      let settled = false;
+
+      const finish = (value: number | null) => {
+        if (settled) {
           return;
         }
-        objectUrl = window.URL.createObjectURL(blob);
-        setPreviewUrl(objectUrl);
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setPreviewUrl(asset.url);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-      if (objectUrl) {
+        settled = true;
+        media.removeAttribute('src');
+        media.load();
         window.URL.revokeObjectURL(objectUrl);
-      }
-    };
-  }, [asset.id, asset.url]);
+        resolve(value);
+      };
 
-  return <img src={previewUrl} alt={asset.name} loading="lazy" />;
+      media.preload = 'metadata';
+      media.onloadedmetadata = () => {
+        const duration = Number.isFinite(media.duration) ? media.duration : null;
+        finish(duration);
+      };
+      media.onerror = () => finish(null);
+      media.src = objectUrl;
+      media.load();
+    });
+  } catch {
+    return null;
+  }
+}
+
+function isTextLikeDocument(asset: Pick<Asset, 'name' | 'url' | 'metadata'>, blob: Blob): boolean {
+  const metadata = normalizeAssetMetadata(asset.metadata);
+  const format = getMetadataText(metadata, 'format').toLowerCase();
+  const mimeType = (getMetadataText(metadata, 'mimeType') || blob.type).toLowerCase();
+  const sourceName = `${asset.name} ${asset.url}`.toLowerCase();
+
+  return (
+    format === 'markdown' ||
+    format === 'md' ||
+    format === 'text' ||
+    mimeType.startsWith('text/') ||
+    mimeType.includes('json') ||
+    mimeType.includes('xml') ||
+    mimeType.includes('markdown') ||
+    /\.(md|markdown|txt|json|csv|log|yaml|yml)$/i.test(sourceName)
+  );
+}
+
+async function resolveDocumentText(asset: Pick<Asset, 'id' | 'name' | 'url' | 'metadata'>): Promise<string | null> {
+  const inlineText = getMetadataDocumentText(normalizeAssetMetadata(asset.metadata));
+  if (inlineText !== null) {
+    return inlineText;
+  }
+
+  try {
+    const blob = await loadAssetBlob(asset);
+    if (!isTextLikeDocument(asset, blob)) {
+      return null;
+    }
+    return await blob.text();
+  } catch {
+    return null;
+  }
+}
+
+function formatAssetDate(value: string | number | undefined): string {
+  if (value === undefined || value === null) {
+    return '未填写';
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+
+  return date.toLocaleString('zh-CN');
+}
+
+const AssetPreviewImage: React.FC<{
+  asset: Asset;
+  onPreview: (preview: PreviewImage) => void;
+}> = ({ asset, onPreview }) => {
+  const { previewUrl, status, error } = useAssetPreviewUrl(asset);
+
+  if (status === 'ready' && previewUrl) {
+    return (
+      <button
+        type="button"
+        className={styles.previewButton}
+        onClick={(event) => {
+          event.stopPropagation();
+          onPreview({ src: previewUrl, name: asset.name, asset });
+        }}
+        title="放大预览"
+      >
+        <img src={previewUrl} alt={asset.name} loading="lazy" />
+        <span className={styles.zoomHint}>
+          <ZoomIn size={16} />
+        </span>
+      </button>
+    );
+  }
+
+  if (status === 'error') {
+    return (
+      <div className={styles.previewState} title={error ?? '资产文件无法预览'}>
+        <ImageOff size={24} />
+        <span>无法预览</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className={styles.previewState} aria-label={`${asset.name} 正在加载预览`}>
+      <Loader2 size={22} className={styles.previewSpinner} />
+    </div>
+  );
+};
+
+const DocumentAssetThumbnail: React.FC<{
+  asset: Asset;
+}> = ({ asset }) => {
+  const metadata = normalizeAssetMetadata(asset.metadata);
+  const inlineText = getMetadataDocumentText(metadata);
+  const summaryText = getMetadataTextFromKeys(metadata, [
+    'summary',
+    'description',
+    'abstract',
+    'reviewSummary',
+    'reviewOpinion',
+    'prompt',
+  ]);
+  const previewText = inlineText ?? summaryText;
+  const previewLines = getDocumentThumbnailLines(previewText, asset.name);
+  const title =
+    getMetadataTextFromKeys(metadata, ['title', 'documentTitle', 'name']) ||
+    asset.name.replace(/\.[^.]+$/, '');
+  const metadataWordCount = getMetadataNumberFromKeys(metadata, [
+    'wordCount',
+    'characterCount',
+    'charCount',
+    'characters',
+  ]);
+  const characterCount = inlineText ? countDocumentCharacters(inlineText) : metadataWordCount;
+  const formatLabel = isMarkdownDocumentAsset(asset, metadata)
+    ? 'Markdown'
+    : getMetadataTextFromKeys(metadata, ['format', 'mimeType']) || '文档';
+
+  return (
+    <div className={styles.documentThumbnail} aria-label={`${asset.name} 文档缩略图`}>
+      <div className={styles.documentThumbPaper}>
+        <div className={styles.documentThumbHeader}>
+          <span className={styles.documentThumbFormat}>
+            <FileText size={13} />
+            {formatLabel}
+          </span>
+          <span className={styles.documentThumbMetric}>
+            {characterCount ? `${characterCount.toLocaleString('zh-CN')} 字` : '预览'}
+          </span>
+        </div>
+        <strong className={styles.documentThumbTitle}>{title}</strong>
+        <div className={styles.documentThumbBody}>
+          {previewLines.map((line, lineIndex) => (
+            <span key={`${asset.id}-doc-line-${lineIndex}`}>{line}</span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 };
 
 export const AssetLibrary: React.FC = () => {
-  const { activeAssets, activeState } = useAppStore(
-    useShallow((state) => ({ activeAssets: state.activeAssets, activeState: state.activeState })),
+  const { activeAssets, activeState, assets, projects, assetLibraryView, setAssetLibraryView, isAuthenticated } =
+    useAppStore(
+    useShallow((state) => ({
+      activeAssets: state.activeAssets,
+      activeState: state.activeState,
+      assets: state.assets,
+      projects: state.projects,
+      assetLibraryView: state.assetLibraryView,
+      setAssetLibraryView: state.setAssetLibraryView,
+      isAuthenticated: state.isAuthenticated,
+    })),
   );
-  const { uploadAssets, deleteAsset } = useAppActions();
+  const { uploadAssets, deleteAsset, updateAsset } = useAppActions();
   const { showToast } = useToast();
 
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
@@ -88,12 +532,355 @@ export const AssetLibrary: React.FC = () => {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadingFiles, setUploadingFiles] = useState<UploadingFile[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
-  const [filterType, setFilterType] = useState<FilterType>('all');
+  const filterType = assetLibraryView.filterType;
+  const libraryScope = assetLibraryView.scope;
+  const groupMode = assetLibraryView.groupMode;
+  const [favoriteOnly, setFavoriteOnly] = useState(false);
+  const [ratingFilter, setRatingFilter] = useState<RatingFilter>(0);
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [showFilterDropdown, setShowFilterDropdown] = useState(false);
+  const [showRatingDropdown, setShowRatingDropdown] = useState(false);
   const [selectedAsset, setSelectedAsset] = useState<string | null>(null);
+  const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null);
+  const [resolvedMediaDurationSeconds, setResolvedMediaDurationSeconds] = useState<number | null>(
+    null,
+  );
+  const [resolvedDocumentText, setResolvedDocumentText] = useState<string | null>(null);
+  const [resolvedDocumentCharacterCount, setResolvedDocumentCharacterCount] = useState<
+    number | null
+  >(null);
+  const [detailResolveStatus, setDetailResolveStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>(
+    'idle',
+  );
+  const [isDetailInfoCollapsed, setIsDetailInfoCollapsed] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const metadataUpdateQueuesRef = useRef(new Map<string, Promise<Asset>>());
+  const currentProfile = useMemo(() => getStoredServerProfile(), [isAuthenticated]);
+
+  useEffect(() => {
+    if (selectedAsset && !assets.some((asset) => asset.id === selectedAsset)) {
+      setSelectedAsset(null);
+    }
+  }, [assets, selectedAsset]);
+
+  const projectNameById = useMemo(() => {
+    const nextMap = new Map<string, string>();
+    for (const project of projects) {
+      nextMap.set(project.id, project.name);
+    }
+    return nextMap;
+  }, [projects]);
+  const selectedAssetData = useMemo(
+    () => assets.find((asset) => asset.id === selectedAsset) ?? null,
+    [assets, selectedAsset],
+  );
+  const selectedAssetMetadata = useMemo(
+    () => normalizeAssetMetadata(selectedAssetData?.metadata),
+    [selectedAssetData],
+  );
+  const selectedAssetProjectName = selectedAssetData
+    ? projectNameById.get(selectedAssetData.projectId) || '未命名项目'
+    : null;
+  const selectedAssetOwnerUserId =
+    selectedAssetData?.ownerUserId ||
+    getMetadataTextFromKeys(selectedAssetMetadata, [
+      'ownerUserId',
+      'userId',
+      'createdByUserId',
+      'created_by_user_id',
+    ]) ||
+    '';
+  const selectedAssetOwnerLabel =
+    selectedAssetOwnerUserId && selectedAssetOwnerUserId === currentProfile?.id
+      ? currentProfile.username || currentProfile.email || selectedAssetOwnerUserId
+      : selectedAssetOwnerUserId;
+  const selectedAssetFavorite = selectedAssetData ? isFavoriteAsset(selectedAssetData) : false;
+  const selectedAssetPrompt = selectedAssetData?.type === 'image'
+    ? getMetadataText(selectedAssetMetadata, 'prompt')
+    : '';
+  const selectedAssetRevisedPrompt = selectedAssetData?.type === 'image'
+    ? getMetadataText(selectedAssetMetadata, 'revisedPrompt')
+    : '';
+  const selectedAssetIsMarkdownDocument =
+    selectedAssetData?.type === 'document'
+      ? isMarkdownDocumentAsset(selectedAssetData, selectedAssetMetadata)
+      : false;
+  const selectedAssetSizeBytes = getMetadataNumber(selectedAssetMetadata, ['sizeBytes']);
+  const selectedAssetInlineDurationSeconds = getMetadataNumber(selectedAssetMetadata, [
+    'durationSeconds',
+    'durationSec',
+    'duration',
+    'length',
+  ]);
+  const selectedAssetInlineDurationMs = getMetadataNumber(selectedAssetMetadata, [
+    'durationMs',
+    'durationMillis',
+    'durationMilliseconds',
+  ]);
+  const selectedAssetInlineWordCount = getMetadataNumber(selectedAssetMetadata, [
+    'wordCount',
+    'word_count',
+    'characters',
+    'charCount',
+  ]);
+  const selectedAssetMetric = useMemo(() => {
+    if (!selectedAssetData) {
+      return null;
+    }
+
+    if (selectedAssetData.type === 'image') {
+      return {
+        label: getAssetMetricLabel(selectedAssetData.type),
+        value: formatBytesToMb(selectedAssetSizeBytes),
+      };
+    }
+
+    if (selectedAssetData.type === 'video' || selectedAssetData.type === 'audio') {
+      const durationSeconds = resolvedMediaDurationSeconds ?? selectedAssetInlineDurationSeconds;
+      const normalizedDuration =
+        durationSeconds ?? (selectedAssetInlineDurationMs !== null ? selectedAssetInlineDurationMs / 1000 : null);
+      return {
+        label: getAssetMetricLabel(selectedAssetData.type),
+        value: formatDurationSeconds(normalizedDuration),
+      };
+    }
+
+    if (selectedAssetData.type === 'document') {
+      const wordCount = resolvedDocumentCharacterCount ?? selectedAssetInlineWordCount;
+      return {
+        label: getAssetMetricLabel(selectedAssetData.type),
+        value:
+          typeof wordCount === 'number' && Number.isFinite(wordCount)
+            ? `${Math.max(0, Math.round(wordCount)).toLocaleString('zh-CN')} 字`
+            : detailResolveStatus === 'loading'
+              ? '加载中'
+              : '未填写',
+      };
+    }
+
+    return {
+      label: getAssetMetricLabel(selectedAssetData.type),
+      value: formatBytesToMb(selectedAssetSizeBytes),
+    };
+  }, [
+    detailResolveStatus,
+    resolvedDocumentCharacterCount,
+    resolvedMediaDurationSeconds,
+    selectedAssetData,
+    selectedAssetInlineDurationMs,
+    selectedAssetInlineDurationSeconds,
+    selectedAssetInlineWordCount,
+    selectedAssetSizeBytes,
+  ]);
+  const selectedAssetSourceAgent = getMetadataTextFromKeys(selectedAssetMetadata, [
+    'agentName',
+    'agent_name',
+    'createdByAgentName',
+    'created_by_agent_name',
+    'creatorAgentName',
+    'creator',
+    'createdBy',
+    'sourceAgent',
+  ]);
+  const selectedAssetReviewSummary = getMetadataTextFromKeys(selectedAssetMetadata, [
+    'reviewSummary',
+    'review_summary',
+    'reviewComment',
+    'review_comment',
+    'reviewOpinion',
+    'review_opinion',
+    'reviewNotes',
+    'review_notes',
+  ]);
+  const selectedAssetReviewIssues = getMetadataTextListFromKeys(selectedAssetMetadata, [
+    'reviewIssues',
+    'review_issues',
+    'issues',
+  ]);
+  const selectedAssetRetryHints = getMetadataTextListFromKeys(selectedAssetMetadata, [
+    'retryHints',
+    'retry_hints',
+  ]);
+  const selectedAssetReviewer = getMetadataTextFromKeys(selectedAssetMetadata, [
+    'reviewerAgentName',
+    'reviewer_agent_name',
+    'reviewer',
+  ]);
+  const selectedAssetReviewStatus = getMetadataTextFromKeys(selectedAssetMetadata, [
+    'reviewStatus',
+    'review_status',
+    'reviewDecision',
+    'review_decision',
+  ]);
+  const selectedAssetChangeCount = getMetadataNumberFromKeys(selectedAssetMetadata, [
+    'changeCount',
+    'change_count',
+    'revisionCount',
+    'revision_count',
+    'editCount',
+    'edit_count',
+    'modificationCount',
+    'modification_count',
+  ]);
+  const selectedAssetCreditCost = getAssetCreditCost(selectedAssetMetadata);
+  const selectedAssetInfoRows = useMemo<DetailInfoRow[]>(() => {
+    if (!selectedAssetData) {
+      return [];
+    }
+
+    return [
+      { label: '资产 UUID', value: selectedAssetData.id },
+      { label: '项目', value: selectedAssetProjectName ?? '未命名项目' },
+      { label: '项目 UUID', value: selectedAssetData.projectId },
+      { label: '所属用户', value: selectedAssetOwnerLabel || '未记录' },
+      { label: '类型', value: ASSET_TYPE_LABELS[selectedAssetData.type] },
+      { label: selectedAssetMetric?.label ?? '尺寸', value: selectedAssetMetric?.value ?? '未填写' },
+      { label: '消耗积分', value: formatAssetCreditCost(selectedAssetCreditCost) },
+      { label: '版本', value: selectedAssetData.versionLabel || '当前版' },
+      { label: '创建智能体', value: selectedAssetSourceAgent || '未记录' },
+      { label: '创建时间', value: formatAssetDate(selectedAssetData.createdAt) },
+      {
+        label: '修改次数',
+        value: selectedAssetChangeCount === null ? '未记录' : `${Math.max(0, Math.round(selectedAssetChangeCount))} 次`,
+      },
+      {
+        label: '评审状态',
+        value: selectedAssetReviewStatus
+          ? formatReviewStatus(selectedAssetReviewStatus)
+          : selectedAssetReviewSummary || selectedAssetReviewIssues.length > 0
+            ? '已记录'
+            : '未记录',
+      },
+      { label: '审核智能体', value: selectedAssetReviewer || '未记录' },
+      {
+        label: '更新时间',
+        value: formatAssetDate(selectedAssetData.updatedAt ?? selectedAssetData.createdAt),
+      },
+    ];
+  }, [
+    selectedAssetChangeCount,
+    selectedAssetData,
+    selectedAssetMetric,
+    selectedAssetCreditCost,
+    selectedAssetOwnerLabel,
+    selectedAssetProjectName,
+    selectedAssetReviewIssues.length,
+    selectedAssetReviewStatus,
+    selectedAssetReviewSummary,
+    selectedAssetReviewer,
+    selectedAssetSourceAgent,
+  ]);
+  useEffect(() => {
+    if (!activeState.projectId && libraryScope === 'current') {
+      setAssetLibraryView({ scope: 'all' });
+    }
+  }, [activeState.projectId, libraryScope, setAssetLibraryView]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    setResolvedMediaDurationSeconds(null);
+    setResolvedDocumentText(null);
+    setResolvedDocumentCharacterCount(null);
+    setDetailResolveStatus(selectedAssetData ? 'loading' : 'idle');
+
+    if (!selectedAssetData) {
+      return undefined;
+    }
+
+    if (selectedAssetData.type === 'video' || selectedAssetData.type === 'audio') {
+      const inlineSeconds =
+        selectedAssetInlineDurationSeconds ??
+        (selectedAssetInlineDurationMs !== null ? selectedAssetInlineDurationMs / 1000 : null);
+      if (inlineSeconds !== null) {
+        setResolvedMediaDurationSeconds(inlineSeconds);
+        setDetailResolveStatus('ready');
+        return undefined;
+      }
+
+      void resolveAssetMediaDuration(selectedAssetData)
+        .then((seconds) => {
+          if (cancelled) {
+            return;
+          }
+          setResolvedMediaDurationSeconds(seconds);
+          setDetailResolveStatus(seconds === null ? 'error' : 'ready');
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setDetailResolveStatus('error');
+          }
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (selectedAssetData.type === 'document') {
+      if (selectedAssetInlineWordCount !== null) {
+        setResolvedDocumentCharacterCount(selectedAssetInlineWordCount);
+      }
+
+      void resolveDocumentText(selectedAssetData)
+        .then((text) => {
+          if (cancelled) {
+            return;
+          }
+          setResolvedDocumentText(text);
+          setResolvedDocumentCharacterCount(
+            text === null ? selectedAssetInlineWordCount : countDocumentCharacters(text),
+          );
+          setDetailResolveStatus(text === null ? 'error' : 'ready');
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setDetailResolveStatus('error');
+          }
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setDetailResolveStatus('ready');
+    return undefined;
+  }, [
+    selectedAssetData,
+    selectedAssetInlineDurationMs,
+    selectedAssetInlineDurationSeconds,
+    selectedAssetInlineWordCount,
+  ]);
+
+  useEffect(() => {
+    if (!selectedAsset || previewImage) {
+      return undefined;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setSelectedAsset(null);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [previewImage, selectedAsset]);
+
+  useEffect(() => {
+    setIsDetailInfoCollapsed(false);
+  }, [selectedAsset]);
+
+  const updateLibraryView = useCallback(
+    (request: {
+      filterType?: FilterType;
+      groupMode?: AssetLibraryGroupMode;
+      scope?: AssetLibraryScope;
+    }) => {
+      setAssetLibraryView(request);
+    },
+    [setAssetLibraryView],
+  );
 
   const getAssetIcon = (type: Asset['type']) => {
     switch (type) {
@@ -108,14 +895,87 @@ export const AssetLibrary: React.FC = () => {
     }
   };
 
+  const scopedAssets = useMemo(() => {
+    if (libraryScope === 'current' && activeState.projectId) {
+      return activeAssets;
+    }
+    return assets;
+  }, [activeAssets, activeState.projectId, assets, libraryScope]);
+
+  const activeProjectName = activeState.projectId
+    ? projectNameById.get(activeState.projectId) || '当前项目'
+    : '未选择项目';
+
   const filteredAssets = useMemo(() => {
-    return activeAssets.filter((asset) => {
+    const normalizedSearch = searchQuery.trim().toLowerCase();
+    return scopedAssets.filter((asset) => {
       const matchesType = filterType === 'all' || asset.type === filterType;
+      const matchesFavorite = !favoriteOnly || isFavoriteAsset(asset);
+      const matchesRating = ratingFilter === 0 || getAssetRating(asset) >= ratingFilter;
+      const projectName = projectNameById.get(asset.projectId) || '';
       const matchesSearch =
-        searchQuery === '' || asset.name.toLowerCase().includes(searchQuery.toLowerCase());
-      return matchesType && matchesSearch;
+        normalizedSearch === '' ||
+        asset.name.toLowerCase().includes(normalizedSearch) ||
+        projectName.toLowerCase().includes(normalizedSearch);
+      return matchesType && matchesFavorite && matchesRating && matchesSearch;
     });
-  }, [activeAssets, filterType, searchQuery]);
+  }, [favoriteOnly, filterType, projectNameById, ratingFilter, scopedAssets, searchQuery]);
+
+  const groupedAssetSections = useMemo(() => {
+    if (groupMode === 'none') {
+      return [
+        {
+          key: 'flat',
+          title: libraryScope === 'current' ? activeProjectName : '全部资产',
+          subtitle: `${filteredAssets.length} 个资产`,
+          assets: filteredAssets,
+        },
+      ];
+    }
+
+    if (groupMode === 'project') {
+      const projectOrder = new Map(projects.map((project, index) => [project.id, index]));
+      const grouped = new Map<string, Asset[]>();
+      for (const asset of filteredAssets) {
+        const groupAssets = grouped.get(asset.projectId) ?? [];
+        groupAssets.push(asset);
+        grouped.set(asset.projectId, groupAssets);
+      }
+
+      return Array.from(grouped.entries())
+        .sort(
+          ([leftProjectId], [rightProjectId]) =>
+            (projectOrder.get(leftProjectId) ?? Number.MAX_SAFE_INTEGER) -
+            (projectOrder.get(rightProjectId) ?? Number.MAX_SAFE_INTEGER),
+        )
+        .map(([projectId, groupAssets]) => ({
+          key: projectId,
+          title: projectNameById.get(projectId) || '未命名项目',
+          subtitle: `${groupAssets.length} 个资产`,
+          assets: groupAssets,
+        }));
+    }
+
+    return (['image', 'video', 'audio', 'document'] as Asset['type'][])
+      .map((type) => {
+        const groupAssets = filteredAssets.filter((asset) => asset.type === type);
+        return {
+          key: type,
+          title: ASSET_TYPE_LABELS[type],
+          subtitle: `${groupAssets.length} 个资产`,
+          assets: groupAssets,
+        };
+      })
+      .filter((section) => section.assets.length > 0);
+  }, [activeProjectName, filteredAssets, groupMode, libraryScope, projectNameById, projects]);
+
+  const hasActiveAssetFilters =
+    searchQuery.trim() !== '' ||
+    filterType !== 'all' ||
+    favoriteOnly ||
+    ratingFilter > 0 ||
+    libraryScope !== 'current' ||
+    groupMode !== 'none';
 
   const handleCloseUploadModal = () => {
     if (isUploading) {
@@ -240,7 +1100,53 @@ export const AssetLibrary: React.FC = () => {
   };
 
   const handleAssetClick = (assetId: string) => {
-    setSelectedAsset(assetId === selectedAsset ? null : assetId);
+    setSelectedAsset(assetId);
+  };
+
+  const updateAssetMetadata = (
+    asset: Asset,
+    nextMetadata: Record<string, unknown>,
+    event?: React.MouseEvent,
+  ) => {
+    event?.stopPropagation();
+
+    const existingOperation = metadataUpdateQueuesRef.current.get(asset.id) ?? Promise.resolve(asset);
+    let nextOperation: Promise<Asset>;
+
+    nextOperation = existingOperation
+      .catch(() => asset)
+      .then((latestAsset) =>
+        updateAsset(asset.id, {
+          metadata: {
+            ...normalizeAssetMetadata(latestAsset.metadata),
+            ...nextMetadata,
+          },
+        }),
+      )
+      .catch((error) => {
+        showToast({
+          type: 'error',
+          title: '更新资产标记失败',
+          message: error instanceof Error ? error.message : '请稍后重试',
+        });
+        return asset;
+      })
+      .finally(() => {
+        if (metadataUpdateQueuesRef.current.get(asset.id) === nextOperation) {
+          metadataUpdateQueuesRef.current.delete(asset.id);
+        }
+      });
+
+    metadataUpdateQueuesRef.current.set(asset.id, nextOperation);
+  };
+
+  const handleFavoriteToggle = (asset: Asset, event: React.MouseEvent) => {
+    updateAssetMetadata(asset, { favorite: !isFavoriteAsset(asset) }, event);
+  };
+
+  const handleRatingChange = (asset: Asset, rating: number, event: React.MouseEvent) => {
+    const currentRating = getAssetRating(asset);
+    updateAssetMetadata(asset, { rating: currentRating === rating ? 0 : rating }, event);
   };
 
   const handleAssetDownload = async (asset: Asset, event: React.MouseEvent) => {
@@ -252,7 +1158,7 @@ export const AssetLibrary: React.FC = () => {
       link.target = '_blank';
       link.rel = 'noreferrer';
 
-      if (shouldLoadProtectedAsset(asset.id, asset.url)) {
+      if (isProtectedAssetUrl(asset.id, asset.url)) {
         const blob = await getServerAssetBlob(asset.id);
         const objectUrl = window.URL.createObjectURL(blob);
         link.href = objectUrl;
@@ -292,14 +1198,114 @@ export const AssetLibrary: React.FC = () => {
   };
 
   const getFilterLabel = (type: FilterType) => {
-    const labels: Record<FilterType, string> = {
-      all: '全部',
-      image: '图片',
-      video: '视频',
-      audio: '音频',
-      document: '文档',
-    };
-    return labels[type];
+    return ASSET_TYPE_LABELS[type];
+  };
+
+  const getRatingFilterLabel = (rating: RatingFilter) => {
+    return rating === 0 ? '星级' : `${rating} 星+`;
+  };
+
+  const renderAssetItem = (asset: Asset, index: number) => {
+    const favorite = isFavoriteAsset(asset);
+    const rating = getAssetRating(asset);
+    const projectName = projectNameById.get(asset.projectId);
+
+    return (
+      <div
+        key={asset.id}
+        className={`${viewMode === 'grid' ? styles.assetCard : styles.assetListItem} ${selectedAsset === asset.id ? styles.selected : ''}`}
+        style={{ animationDelay: `${Math.min(index, 12) * 0.04}s` }}
+        onClick={() => handleAssetClick(asset.id)}
+      >
+        <div className={styles.assetPreview}>
+          {asset.type === 'image' ? (
+            <AssetPreviewImage asset={asset} onPreview={setPreviewImage} />
+          ) : asset.type === 'document' ? (
+            <DocumentAssetThumbnail asset={asset} />
+          ) : (
+            <div className={styles.iconPreview}>{getAssetIcon(asset.type)}</div>
+          )}
+          {selectedAsset === asset.id && (
+            <div className={styles.assetOverlay}>
+              <button
+                className={styles.actionBtn}
+                title="下载"
+                onClick={(event) => void handleAssetDownload(asset, event)}
+              >
+                <Download size={16} />
+              </button>
+              <button
+                className={`${styles.actionBtn} ${favorite ? styles.favoriteActive : ''}`}
+                title={favorite ? '取消收藏' : '收藏'}
+                onClick={(event) => handleFavoriteToggle(asset, event)}
+              >
+                <Star size={16} fill={favorite ? 'currentColor' : 'none'} />
+              </button>
+              <button
+                className={`${styles.actionBtn} ${styles.danger}`}
+                title="删除"
+                onClick={(event) => void handleAssetDelete(asset, event)}
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
+          )}
+        </div>
+        <div className={styles.assetInfo}>
+          <div className={styles.assetNameRow}>
+            <span className={styles.assetName} title={asset.name}>
+              {asset.name}
+            </span>
+            <button
+              className={`${styles.favoriteButton} ${favorite ? styles.favoriteButtonActive : ''}`}
+              title={favorite ? '取消收藏' : '收藏'}
+              aria-label={favorite ? '取消收藏' : '收藏'}
+              aria-pressed={favorite}
+              onClick={(event) => handleFavoriteToggle(asset, event)}
+            >
+              <Star size={15} fill={favorite ? 'currentColor' : 'none'} />
+            </button>
+            <button className={styles.moreBtn} onClick={(event) => event.stopPropagation()}>
+              <MoreVertical size={16} />
+            </button>
+          </div>
+          <div className={styles.assetMetaRow}>
+            <span className={styles.assetType}>{getFilterLabel(asset.type)}</span>
+            {libraryScope === 'all' && projectName && (
+              <span className={styles.projectBadge}>{projectName}</span>
+            )}
+            {favorite && (
+              <span className={styles.favoriteBadge}>
+                <Star size={12} fill="currentColor" />
+                收藏
+              </span>
+            )}
+            <span className={styles.assetDate}>
+              {new Date(asset.createdAt).toLocaleDateString('zh-CN')}
+            </span>
+          </div>
+          <div
+            className={styles.ratingRow}
+            onClick={(event) => event.stopPropagation()}
+            aria-label={`${asset.name} 星级评分`}
+          >
+            {[1, 2, 3, 4, 5].map((value) => (
+              <button
+                key={value}
+                type="button"
+                className={`${styles.ratingButton} ${rating >= value ? styles.ratingActive : ''}`}
+                title={`${value} 星`}
+                aria-label={`${value} 星`}
+                aria-pressed={rating >= value}
+                onClick={(event) => handleRatingChange(asset, value, event)}
+              >
+                <Star size={13} fill={rating >= value ? 'currentColor' : 'none'} />
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
   };
 
   return (
@@ -322,6 +1328,26 @@ export const AssetLibrary: React.FC = () => {
 
         <div className={styles.viewToggle}>
           <button
+            className={`${styles.viewBtn} ${libraryScope === 'current' ? styles.active : ''}`}
+            onClick={() => updateLibraryView({ scope: 'current' })}
+            title="只看当前项目"
+            disabled={!activeState.projectId}
+          >
+            <FolderOpen size={18} />
+            <span>当前项目</span>
+          </button>
+          <button
+            className={`${styles.viewBtn} ${libraryScope === 'all' ? styles.active : ''}`}
+            onClick={() => updateLibraryView({ scope: 'all' })}
+            title="查看全部项目资产"
+          >
+            <Layers size={18} />
+            <span>全部</span>
+          </button>
+        </div>
+
+        <div className={styles.viewToggle}>
+          <button
             className={`${styles.viewBtn} ${viewMode === 'grid' ? styles.active : ''}`}
             onClick={() => setViewMode('grid')}
             title="网格视图"
@@ -337,11 +1363,36 @@ export const AssetLibrary: React.FC = () => {
           </button>
         </div>
 
+        <div className={styles.groupToggle}>
+          {([
+            ["none", "平铺"],
+            ["project", "按项目"],
+            ["type", "按分类"],
+          ] as Array<[AssetLibraryGroupMode, string]>).map(([mode, label]) => (
+            <button
+              key={mode}
+              type="button"
+              className={groupMode === mode ? styles.activeGroupBtn : undefined}
+              onClick={() => {
+                updateLibraryView({
+                  groupMode: mode,
+                  scope: mode === 'project' ? 'all' : libraryScope,
+                });
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
         <div className={styles.actions}>
           <div className={styles.filterDropdown}>
             <button
               className={styles.toolBtn}
-              onClick={() => setShowFilterDropdown((prev) => !prev)}
+              onClick={() => {
+                setShowFilterDropdown((prev) => !prev);
+                setShowRatingDropdown(false);
+              }}
             >
               <Filter size={16} />
               {getFilterLabel(filterType)}
@@ -353,12 +1404,56 @@ export const AssetLibrary: React.FC = () => {
                     key={type}
                     className={`${styles.filterItem} ${filterType === type ? styles.active : ''}`}
                     onClick={() => {
-                      setFilterType(type);
+                      updateLibraryView({ filterType: type });
                       setShowFilterDropdown(false);
                     }}
                   >
                     {getAssetIcon(type as Asset['type'])}
                     {getFilterLabel(type)}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <button
+            className={`${styles.toolBtn} ${favoriteOnly ? styles.activeToolBtn : ''}`}
+            onClick={() => {
+              setFavoriteOnly((prev) => !prev);
+              setShowFilterDropdown(false);
+              setShowRatingDropdown(false);
+            }}
+            title={favoriteOnly ? '显示全部资产' : '只看收藏'}
+            aria-label={favoriteOnly ? '取消只看收藏' : '只看收藏'}
+            aria-pressed={favoriteOnly}
+          >
+            <Star size={16} fill={favoriteOnly ? 'currentColor' : 'none'} />
+            收藏
+          </button>
+          <div className={styles.filterDropdown}>
+            <button
+              className={`${styles.toolBtn} ${ratingFilter > 0 ? styles.activeToolBtn : ''}`}
+              onClick={() => {
+                setShowRatingDropdown((prev) => !prev);
+                setShowFilterDropdown(false);
+              }}
+              aria-label="星级筛选"
+            >
+              <Star size={16} fill={ratingFilter > 0 ? 'currentColor' : 'none'} />
+              {getRatingFilterLabel(ratingFilter)}
+            </button>
+            {showRatingDropdown && (
+              <div className={styles.filterMenu}>
+                {([0, 1, 2, 3, 4, 5] as RatingFilter[]).map((rating) => (
+                  <button
+                    key={rating}
+                    className={`${styles.filterItem} ${ratingFilter === rating ? styles.active : ''}`}
+                    onClick={() => {
+                      setRatingFilter(rating);
+                      setShowRatingDropdown(false);
+                    }}
+                  >
+                    <Star size={16} fill={rating > 0 ? 'currentColor' : 'none'} />
+                    {rating === 0 ? '全部星级' : `${rating} 星及以上`}
                   </button>
                 ))}
               </div>
@@ -370,72 +1465,221 @@ export const AssetLibrary: React.FC = () => {
         </div>
       </div>
 
+      {selectedAssetData && (
+        <div className={styles.detailOverlay} role="presentation" onClick={() => setSelectedAsset(null)}>
+          <section
+            className={`${styles.detailPanel} ${
+              selectedAssetData.type === 'image' ? styles.imageDetailPanel : styles.documentDetailPanel
+            }`}
+            aria-label="资产详情"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className={styles.detailToolbar}>
+              <div className={styles.detailToolbarLeft}>
+                <button
+                  type="button"
+                  className={`${styles.detailActionBtn} ${styles.detailBackBtn}`}
+                  onClick={() => setSelectedAsset(null)}
+                  title="返回资产库"
+                >
+                  <ArrowLeft size={16} />
+                  <span>返回资产库</span>
+                </button>
+                <div className={styles.detailToolbarTitle}>
+                  <h3 className={styles.detailName} title={selectedAssetData.name}>
+                    {selectedAssetData.name}
+                  </h3>
+                  <div className={styles.detailMetaRow}>
+                    <span className={styles.assetType}>{getFilterLabel(selectedAssetData.type)}</span>
+                    <span className={styles.projectBadge}>{selectedAssetProjectName}</span>
+                    <span className={styles.detailMuted}>
+                      {formatAssetDate(selectedAssetData.createdAt)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <div className={styles.detailToolbarActions}>
+                <button
+                  type="button"
+                  className={styles.detailActionBtn}
+                  onClick={(event) => void handleAssetDownload(selectedAssetData, event)}
+                  title="下载"
+                >
+                  <Download size={16} />
+                  <span>下载</span>
+                </button>
+                <button
+                  type="button"
+                  className={`${styles.detailActionBtn} ${selectedAssetFavorite ? styles.detailActionActive : ''}`}
+                  onClick={(event) => handleFavoriteToggle(selectedAssetData, event)}
+                  title={selectedAssetFavorite ? '取消收藏' : '收藏'}
+                >
+                  <Star size={16} fill={selectedAssetFavorite ? 'currentColor' : 'none'} />
+                  <span>{selectedAssetFavorite ? '取消收藏' : '收藏'}</span>
+                </button>
+                <button
+                  type="button"
+                  className={`${styles.detailActionBtn} ${styles.detailDanger}`}
+                  onClick={(event) => void handleAssetDelete(selectedAssetData, event)}
+                  title="删除"
+                >
+                  <Trash2 size={16} />
+                  <span>删除</span>
+                </button>
+              </div>
+            </div>
+            <div className={styles.detailMain}>
+              <div className={styles.detailPreview}>
+                {selectedAssetData.type === 'image' ? (
+                  <AssetPreviewImage asset={selectedAssetData} onPreview={setPreviewImage} />
+                ) : selectedAssetData.type === 'document' ? (
+                  <div className={styles.detailDocumentPreview}>
+                    <div className={styles.detailDocumentPreviewHeader}>
+                      <div>
+                        <strong>{selectedAssetIsMarkdownDocument ? 'Markdown 预览' : '文档预览'}</strong>
+                        <span>{selectedAssetMetric?.value ?? '加载中'}</span>
+                      </div>
+                    </div>
+                    <div className={styles.detailDocumentPreviewBody}>
+                      {detailResolveStatus === 'loading' && !resolvedDocumentText ? (
+                        <div className={styles.detailLoadingState}>
+                          <Loader2 size={20} className={styles.previewSpinner} />
+                          <span>正在加载文档</span>
+                        </div>
+                      ) : resolvedDocumentText !== null ? (
+                        selectedAssetIsMarkdownDocument ? (
+                          <div className={styles.detailMarkdownPreview}>
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {resolvedDocumentText}
+                            </ReactMarkdown>
+                          </div>
+                        ) : (
+                          <pre className={styles.detailPlaintextPreview}>
+                            {resolvedDocumentText || '文档为空'}
+                          </pre>
+                        )
+                      ) : (
+                        <div className={styles.detailLoadingState}>
+                          <ImageOff size={20} />
+                          <span>文档无法预览</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className={styles.detailFallback}>
+                    <div className={styles.detailFallbackIcon}>
+                      {getAssetIcon(selectedAssetData.type)}
+                    </div>
+                    <span>{getFilterLabel(selectedAssetData.type)}</span>
+                  </div>
+                )}
+              </div>
+
+              {selectedAssetData.type === 'image' &&
+                (selectedAssetPrompt || selectedAssetRevisedPrompt) && (
+                  <div className={styles.detailPromptBlock}>
+                    <div className={styles.detailPromptHeader}>
+                      <span>提示词</span>
+                      {selectedAssetRevisedPrompt && selectedAssetRevisedPrompt !== selectedAssetPrompt && (
+                        <span>AI 优化</span>
+                      )}
+                    </div>
+                    {selectedAssetPrompt && (
+                      <div className={styles.detailPromptSection}>
+                        <span className={styles.detailPromptLabel}>原始提示词</span>
+                        <pre className={styles.detailPromptText}>{selectedAssetPrompt}</pre>
+                      </div>
+                    )}
+                    {selectedAssetRevisedPrompt && selectedAssetRevisedPrompt !== selectedAssetPrompt && (
+                      <div className={styles.detailPromptSection}>
+                        <span className={styles.detailPromptLabel}>优化提示词</span>
+                        <pre className={styles.detailPromptText}>{selectedAssetRevisedPrompt}</pre>
+                      </div>
+                    )}
+                  </div>
+                )}
+            </div>
+
+            <aside className={`${styles.detailInfoPanel} ${isDetailInfoCollapsed ? styles.collapsedInfoPanel : ''}`}>
+              <button
+                type="button"
+                className={styles.detailInfoToggle}
+                onClick={() => setIsDetailInfoCollapsed((value) => !value)}
+                aria-expanded={!isDetailInfoCollapsed}
+              >
+                <span>信息</span>
+                <span>{isDetailInfoCollapsed ? '展开' : '收起'}</span>
+              </button>
+
+              {!isDetailInfoCollapsed && (
+                <div className={styles.detailInfoContent}>
+                  <dl className={styles.detailGrid}>
+                    {selectedAssetInfoRows.map((row) => (
+                      <div className={styles.detailField} key={row.label}>
+                        <dt className={styles.detailFieldLabel}>{row.label}</dt>
+                        <dd className={styles.detailFieldValue}>{row.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+
+                  <section className={styles.detailReviewBlock}>
+                    <div className={styles.detailReviewHeader}>
+                      <span>评审意见</span>
+                    </div>
+                    <p>
+                      {selectedAssetReviewSummary ||
+                        selectedAssetReviewIssues[0] ||
+                        selectedAssetRetryHints[0] ||
+                        '未记录评审意见'}
+                    </p>
+                    {selectedAssetReviewIssues.length > 0 && (
+                      <ul className={styles.detailReviewList}>
+                        {selectedAssetReviewIssues.slice(0, 4).map((issue, issueIndex) => (
+                          <li key={`${selectedAssetData.id}-review-issue-${issueIndex}`}>{issue}</li>
+                        ))}
+                      </ul>
+                    )}
+                    {selectedAssetRetryHints.length > 0 && (
+                      <div className={styles.detailReviewHint}>
+                        <span>修改建议</span>
+                        <p>{selectedAssetRetryHints.slice(0, 3).join('；')}</p>
+                      </div>
+                    )}
+                  </section>
+                </div>
+              )}
+            </aside>
+          </section>
+        </div>
+      )}
+
       {filteredAssets.length === 0 ? (
         <div className={styles.emptyContainer}>
           <div className={styles.emptyIcon}>
             <FoldersEmpty />
           </div>
-          <h3>当前项目暂无资产</h3>
-          <p>上传的图片、音频、视频或文档会直接保存到当前项目，并参与后续分镜与剧本流程。</p>
+          <h3>{hasActiveAssetFilters ? '没有符合条件的资产' : '当前项目暂无资产'}</h3>
+          <p>
+            {hasActiveAssetFilters
+              ? '调整搜索、类型、收藏或星级筛选后再试。'
+              : '上传的图片、音频、视频或文档会直接保存到当前项目，并参与后续分镜与剧本流程。'}
+          </p>
         </div>
       ) : (
-        <div className={viewMode === 'grid' ? styles.gridLayout : styles.listLayout}>
-          {filteredAssets.map((asset, index) => (
-            <div
-              key={asset.id}
-              className={`${viewMode === 'grid' ? styles.assetCard : styles.assetListItem} ${selectedAsset === asset.id ? styles.selected : ''}`}
-              style={{ animationDelay: `${index * 0.08}s` }}
-              onClick={() => handleAssetClick(asset.id)}
-            >
-              <div className={styles.assetPreview}>
-                {asset.type === 'image' ? (
-                  <AssetPreviewImage asset={asset} />
-                ) : (
-                  <div className={styles.iconPreview}>{getAssetIcon(asset.type)}</div>
-                )}
-                {selectedAsset === asset.id && (
-                  <div className={styles.assetOverlay}>
-                    <button
-                      className={styles.actionBtn}
-                      title="下载"
-                      onClick={(event) => void handleAssetDownload(asset, event)}
-                    >
-                      <Download size={16} />
-                    </button>
-                    <button
-                      className={styles.actionBtn}
-                      title="收藏"
-                      onClick={(event) => event.stopPropagation()}
-                    >
-                      <Star size={16} />
-                    </button>
-                    <button
-                      className={`${styles.actionBtn} ${styles.danger}`}
-                      title="删除"
-                      onClick={(event) => void handleAssetDelete(asset, event)}
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                  </div>
-                )}
-              </div>
-              <div className={styles.assetInfo}>
-                <div className={styles.assetNameRow}>
-                  <span className={styles.assetName} title={asset.name}>
-                    {asset.name}
-                  </span>
-                  <button className={styles.moreBtn} onClick={(event) => event.stopPropagation()}>
-                    <MoreVertical size={16} />
-                  </button>
+        <div className={styles.assetSections}>
+          {groupedAssetSections.map((section) => (
+            <section key={section.key} className={styles.assetSection}>
+              {groupMode !== 'none' && (
+                <div className={styles.assetSectionHeader}>
+                  <h3>{section.title}</h3>
+                  <span>{section.subtitle}</span>
                 </div>
-                <div className={styles.assetMetaRow}>
-                  <span className={styles.assetType}>{getFilterLabel(asset.type)}</span>
-                  <span className={styles.assetDate}>
-                    {new Date(asset.createdAt).toLocaleDateString('zh-CN')}
-                  </span>
-                </div>
+              )}
+              <div className={viewMode === 'grid' ? styles.gridLayout : styles.listLayout}>
+                {section.assets.map((asset, index) => renderAssetItem(asset, index))}
               </div>
-            </div>
+            </section>
           ))}
         </div>
       )}
@@ -462,8 +1706,7 @@ export const AssetLibrary: React.FC = () => {
               <UploadCloud size={48} className={styles.dropZoneIcon} />
               <p className={styles.dropZoneText}>拖拽文件到这里上传</p>
               <p className={styles.dropZoneSubtext}>
-                当前实现会把文件内容直接写入项目资产库，刷新后仍能保留。
-              </p>
+                当前实现会把文件内容直接写入项目资产库，刷新后仍能保留。</p>
               <input
                 type="file"
                 ref={fileInputRef}
@@ -499,6 +1742,108 @@ export const AssetLibrary: React.FC = () => {
           </div>
         </div>
       )}
+
+      {previewImage && (
+        <AssetPreviewDialog preview={previewImage} onClose={() => setPreviewImage(null)} />
+      )}
+    </div>
+  );
+};
+
+const AssetPreviewDialog: React.FC<{
+  preview: PreviewImage;
+  onClose: () => void;
+}> = ({ preview, onClose }) => {
+  const [zoomLevel, setZoomLevel] = useState(1);
+  const assetMetadata = useMemo(() => normalizeAssetMetadata(preview.asset.metadata), [preview.asset.metadata]);
+  const imageSizeBytes = getMetadataNumber(assetMetadata, ['sizeBytes']);
+  const prompt = getMetadataText(assetMetadata, 'prompt');
+  const revisedPrompt = getMetadataText(assetMetadata, 'revisedPrompt');
+  const hasOptimizedPrompt = prompt !== '' && revisedPrompt !== '' && revisedPrompt !== prompt;
+  const previewPrompt = revisedPrompt || prompt;
+  const hasPrompt = prompt !== '' || revisedPrompt !== '';
+
+  useEffect(() => {
+    setZoomLevel(1);
+  }, [preview.src]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
+  const clampZoom = (value: number) => Math.max(0.5, Math.min(4, Math.round(value * 100) / 100));
+  const zoomOut = () => setZoomLevel((current) => clampZoom(current - 0.25));
+  const zoomIn = () => setZoomLevel((current) => clampZoom(current + 0.25));
+  const resetZoom = () => setZoomLevel(1);
+
+  return (
+    <div className={styles.previewOverlay} role="dialog" aria-modal="true" onClick={onClose}>
+      <div className={styles.previewDialog} onClick={(event) => event.stopPropagation()}>
+        <div className={styles.previewHeader}>
+          <div className={styles.previewHeaderInfo}>
+            <strong>{preview.name}</strong>
+            <div className={styles.previewHeaderMeta}>
+              <span className={styles.previewTypeBadge}>{ASSET_TYPE_LABELS[preview.asset.type]}</span>
+              <span>{formatBytesToMb(imageSizeBytes)}</span>
+            </div>
+          </div>
+          <div className={styles.previewHeaderActions}>
+            <button type="button" onClick={zoomOut} title="缩小" aria-label="缩小">
+              <Minus size={16} />
+            </button>
+            <button type="button" onClick={resetZoom} title="还原" aria-label="还原">
+              <Maximize2 size={16} />
+            </button>
+            <button type="button" onClick={zoomIn} title="放大" aria-label="放大">
+              <Plus size={16} />
+            </button>
+            <span className={styles.previewZoomLabel}>{Math.round(zoomLevel * 100)}%</span>
+            <button type="button" onClick={onClose} title="关闭预览" aria-label="关闭预览">
+              <X size={18} />
+            </button>
+          </div>
+        </div>
+        <div className={styles.previewCanvas}>
+          <div
+            className={styles.previewCanvasStage}
+            style={{ width: `${zoomLevel * 100}%`, height: `${zoomLevel * 100}%` }}
+          >
+            <img src={preview.src} alt={preview.name} className={styles.previewCanvasImage} />
+          </div>
+        </div>
+        {hasPrompt && (
+          <div className={styles.previewFooter}>
+            <div className={styles.previewPromptHeader}>
+                <span>提示词</span>
+                {hasOptimizedPrompt && <span>AI 优化</span>}
+            </div>
+            {prompt ? (
+              <div className={styles.previewPromptSection}>
+                <span className={styles.previewPromptLabel}>原始提示词</span>
+                <pre className={styles.previewPromptText}>{prompt}</pre>
+              </div>
+            ) : previewPrompt ? (
+              <div className={styles.previewPromptSection}>
+                <span className={styles.previewPromptLabel}>提示词</span>
+                <pre className={styles.previewPromptText}>{previewPrompt}</pre>
+              </div>
+            ) : null}
+            {hasOptimizedPrompt && (
+              <div className={styles.previewPromptSection}>
+                <span className={styles.previewPromptLabel}>优化提示词</span>
+                <pre className={styles.previewPromptText}>{revisedPrompt}</pre>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 };

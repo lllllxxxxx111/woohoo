@@ -374,7 +374,7 @@ const AgentEditModal: React.FC<AgentEditModalProps> = ({ visible, agent, onClose
           <InputNumber placeholder="0-2之间" min={0} max={2} step={0.1} style={{ width: '100%' }} />
         </Form.Item>
 
-        <Form.Item field="maxTokens" label="最大Token" style={{ flex: 1 }}>
+        <Form.Item field="maxTokens" label="最大输出上限" style={{ flex: 1 }}>
           <InputNumber
             placeholder="最大输出长度"
             min={100}

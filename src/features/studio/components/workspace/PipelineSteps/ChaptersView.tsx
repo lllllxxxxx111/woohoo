@@ -1,12 +1,86 @@
-import React, { useState } from 'react';
-import { AlignJustify, Target, Play } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { AlignJustify, Play, Target } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { useShallow } from 'zustand/react/shallow';
 
+import { useAppStore } from '../../../../../store';
 import styles from './PipelineSteps.module.css';
 import { usePipelineTaskLauncher } from './usePipelineTaskLauncher';
+import {
+  createProjectSnapshot,
+  getLatestDocumentAsset,
+  loadAssetText,
+} from '../workspaceMvp';
 
 export const ChaptersView: React.FC = () => {
+  const { activeProject, activeScript, activeStoryboard, activeAssets } = useAppStore(
+    useShallow((state) => ({
+      activeProject: state.projects.find((project) => project.id === state.activeState.projectId) ?? null,
+      activeScript: state.activeScript,
+      activeStoryboard: state.activeStoryboard,
+      activeAssets: state.activeAssets,
+    })),
+  );
   const [targetDuration, setTargetDuration] = useState('60');
+  const [chapterDocumentText, setChapterDocumentText] = useState('');
+  const [isLoadingDocument, setIsLoadingDocument] = useState(false);
   const { launchTask, isSubmitting } = usePipelineTaskLauncher();
+
+  const latestChapterAsset = useMemo(
+    () => getLatestDocumentAsset(activeAssets, 'chapter'),
+    [activeAssets],
+  );
+
+  useEffect(() => {
+    if (!latestChapterAsset) {
+      setChapterDocumentText('');
+      setIsLoadingDocument(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsLoadingDocument(true);
+    void loadAssetText(latestChapterAsset)
+      .then((text) => {
+        if (!cancelled) {
+          setChapterDocumentText(text.trim());
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setChapterDocumentText('');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoadingDocument(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [latestChapterAsset]);
+
+  const snapshot = useMemo(() => {
+    if (!activeProject) {
+      return null;
+    }
+
+    return createProjectSnapshot({
+      project: activeProject,
+      script: activeScript,
+      scriptText: activeScript?.content ?? '',
+      storyboard: activeStoryboard,
+      assets: activeAssets,
+    });
+  }, [activeAssets, activeProject, activeScript, activeStoryboard]);
+
+  const totalDuration = useMemo(
+    () => snapshot?.chapters.reduce((sum, chapter) => sum + chapter.durationSeconds, 0) ?? 0,
+    [snapshot?.chapters],
+  );
 
   const handleSyncChat = () => {
     void launchTask(
@@ -18,6 +92,19 @@ export const ChaptersView: React.FC = () => {
     );
   };
 
+  if (!activeProject || !snapshot) {
+    return (
+      <div className={styles.splitLayout}>
+        <div className={styles.mainArea}>
+          <div className={styles.emptyMarkdownState}>
+            <AlignJustify size={20} />
+            <span>请先选择项目，再查看章节规划。</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={styles.splitLayout}>
       <div className={styles.mainArea}>
@@ -28,47 +115,87 @@ export const ChaptersView: React.FC = () => {
 
         <div className={styles.durationControl}>
           <label>
-            <Target size={16} /> 目标短片时长(秒):
+            <Target size={16} /> 目标短片时长(秒)
           </label>
           <input
             type="number"
             value={targetDuration}
-            onChange={(e) => setTargetDuration(e.target.value)}
+            onChange={(event) => setTargetDuration(event.target.value)}
             className={styles.numberInput}
           />
           <button className={styles.btnSecondary} onClick={handleSyncChat} disabled={isSubmitting}>
-            <Play size={14} /> 自动重算分节
+            <Play size={14} /> 自动重算章节
           </button>
         </div>
 
-        <div className={styles.longScrollArea}>
-          <div
-            className={styles.chapterCard}
-            style={{
-              textAlign: 'center',
-              color: 'var(--text-muted)',
-              background: 'transparent',
-              border: 'none',
-              boxShadow: 'none',
-            }}
-          >
-            <p>暂无章节拆解数据，请先在对话区执行拆分。</p>
+        {isLoadingDocument ? (
+          <div className={styles.emptyMarkdownState}>
+            <span>正在读取章节文档…</span>
           </div>
-        </div>
+        ) : chapterDocumentText ? (
+          <div className={styles.markdownPreview}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{chapterDocumentText}</ReactMarkdown>
+          </div>
+        ) : (
+          <div className={styles.longScrollArea}>
+            {snapshot.chapters.length > 0 ? (
+              snapshot.chapters.map((chapter) => (
+                <div key={chapter.id} className={styles.chapterCard}>
+                  <div className={styles.chapterHeader}>
+                    <strong>{chapter.title}</strong>
+                    <span className={styles.chapterTime}>{chapter.durationSeconds}s</span>
+                  </div>
+                  <p className={styles.chapterText}>{chapter.summary}</p>
+                  {chapter.sceneNumbers.length > 0 && (
+                    <p className={styles.infoText}>覆盖分镜：{chapter.sceneNumbers.join('、')}</p>
+                  )}
+                  {chapter.characters.length > 0 && (
+                    <p className={styles.infoText}>角色出场：{chapter.characters.join('、')}</p>
+                  )}
+                </div>
+              ))
+            ) : (
+              <div
+                className={styles.chapterCard}
+                style={{
+                  textAlign: 'center',
+                  color: 'var(--text-muted)',
+                  background: 'transparent',
+                  border: 'none',
+                  boxShadow: 'none',
+                }}
+              >
+                <p>当前还没有章节拆解结果。可以先提交章节任务，或先补齐剧本和分镜。</p>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className={styles.sidePanel}>
         <div className={styles.panelBlock}>
           <h4 className={styles.panelTitle}>数据汇总</h4>
-          <p className={styles.summaryStat}>总拆解章节：4 节</p>
-          <p className={styles.summaryStat}>估算总时长：50 s</p>
-          <p className={styles.summaryStat}>预计场景数：3 个</p>
-          <p className={styles.summaryStat}>出场人物数：4 人</p>
+          <p className={styles.summaryStat}>
+            <span>章节数量</span>
+            <strong>{snapshot.chapters.length}</strong>
+          </p>
+          <p className={styles.summaryStat}>
+            <span>总时长</span>
+            <strong>{totalDuration}s</strong>
+          </p>
+          <p className={styles.summaryStat}>
+            <span>分镜数量</span>
+            <strong>{activeStoryboard?.lines.length ?? 0}</strong>
+          </p>
+          <p className={styles.summaryStat}>
+            <span>角色候选</span>
+            <strong>{snapshot.characters.length}</strong>
+          </p>
         </div>
 
         <div className={styles.panelBlock}>
           <p className={styles.infoText}>
-            根据章节拆解，系统已智能提取出下方所需的【人物】与【场景】列表。
+            如果已经跑过章节拆解流水线，这里会优先显示后端生成的章节文档；否则退化为基于当前剧本和分镜推导的最小章节视图，保证流程先可读、可导出。
           </p>
         </div>
 

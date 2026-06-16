@@ -24,6 +24,7 @@ import {
   type OpsNotificationEvent,
   updateNotificationChannel,
 } from '../../lib/serverApi';
+import styles from './SettingsSection.module.css';
 
 const { Paragraph, Text } = Typography;
 
@@ -135,6 +136,11 @@ function channelDescription(type: NotificationChannelType) {
   return CHANNEL_OPTIONS.find((item) => item.value === type) ?? CHANNEL_OPTIONS[0];
 }
 
+function getEventDisplayTitle(event: OpsNotificationEvent) {
+  const payload = event.payload ?? {};
+  return String(payload.title ?? payload.summary ?? event.dedupeKey ?? event.id);
+}
+
 export const NotificationSettings: React.FC<Props> = ({ language, onLanguageChange }) => {
   const { showToast } = useToast();
   const [channels, setChannels] = useState<OpsNotificationChannel[]>([]);
@@ -189,11 +195,7 @@ export const NotificationSettings: React.FC<Props> = ({ language, onLanguageChan
 
         if (selectedIdRef.current) {
           const updatedSelected = nextChannels.find((item) => item.id === selectedIdRef.current);
-          if (updatedSelected) {
-            syncForm(updatedSelected);
-          } else {
-            syncForm(null);
-          }
+          syncForm(updatedSelected ?? null);
         } else if (nextChannels.length === 1 && !formRef.current.name && !formRef.current.target) {
           syncForm(nextChannels[0]);
         }
@@ -225,9 +227,6 @@ export const NotificationSettings: React.FC<Props> = ({ language, onLanguageChan
       throw new Error('通知目标不能为空');
     }
 
-    /**
-     * 根据渠道类型校验目标格式
-     */
     if (form.channelType === 'email') {
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       if (!emailRegex.test(form.target.trim())) {
@@ -310,13 +309,10 @@ export const NotificationSettings: React.FC<Props> = ({ language, onLanguageChan
     const targetChannelType = channel?.channelType ?? form.channelType;
     const targetOption = channelDescription(targetChannelType);
 
-    /**
-     * 未就绪渠道禁止测试
-     */
     if (!targetOption.live) {
       showToast({
         type: 'warning',
-        title: '该渠道发送器尚未就绪',
+        title: '该通道发送器尚未就绪',
         message: `${targetOption.label} 的后端发送器还在开发中，配置已保存，待接入后可立即生效。`,
       });
       return;
@@ -362,18 +358,38 @@ export const NotificationSettings: React.FC<Props> = ({ language, onLanguageChan
   };
 
   return (
-    <div style={{ paddingRight: 16 }}>
-      <Space direction="vertical" size="large" style={{ width: '100%' }}>
-        <Card
-          bordered={false}
-          title="通知语言与派发说明"
-          style={{ background: 'var(--color-bg-2)' }}
-        >
-          <Space direction="vertical" size="medium" style={{ width: '100%' }}>
+    <Space direction="vertical" size="large" className={styles.page}>
+      <Card bordered={false} className={styles.heroCard}>
+        <div className={styles.heroRow}>
+          <div>
+            <Text type="secondary" style={{ display: 'block', marginBottom: 6 }}>
+              通知设置
+            </Text>
+            <h3 className={styles.heroTitle}>管理通知语言、外发通道和审计记录</h3>
+            <Paragraph type="secondary" className={styles.heroDescription}>
+              当前后端已支持飞书、通用 Webhook、钉钉、企业微信和 Slack 测试发送；邮箱和 Telegram 可先保存配置。
+            </Paragraph>
+          </div>
+          <div className={styles.heroActions}>
+            <Button
+              type="outline"
+              icon={<RefreshCw size={14} />}
+              loading={loading}
+              onClick={() => void refresh(true)}
+            >
+              刷新
+            </Button>
+          </div>
+        </div>
+      </Card>
+
+      <Card bordered={false} title="通知语言与派发说明" className={styles.sectionCard}>
+        <Space direction="vertical" size="medium" style={{ width: '100%' }}>
+          <div className={styles.formGrid}>
             <div>
               <Text bold>通知外发语言</Text>
               <Select
-                style={{ marginTop: 8, width: 280 }}
+                style={{ marginTop: 8, width: '100%' }}
                 value={language}
                 onChange={onLanguageChange}
               >
@@ -384,142 +400,99 @@ export const NotificationSettings: React.FC<Props> = ({ language, onLanguageChan
               </Select>
             </div>
             <Paragraph type="secondary" style={{ margin: 0, fontSize: 13 }}>
-              当前后端已经支持真实通知派发。`feishu / webhook / dingtalk / wecom / slack`
-              可直接测试发送；`email / telegram` 已有数据结构，但发送器还没接。
+              通知语言只影响外发内容模板，不改变系统界面语言。可直接测试已接入的实时通道。
             </Paragraph>
-          </Space>
-        </Card>
+          </div>
+        </Space>
+      </Card>
 
-        <Card
-          bordered={false}
-          title="通知通道管理"
-          extra={
-            <Button
-              type="outline"
-              icon={<RefreshCw size={14} />}
-              loading={loading}
-              onClick={() => void refresh(true)}
-            >
-              刷新
-            </Button>
-          }
-          style={{ background: 'var(--color-bg-2)' }}
-        >
-          <Space direction="vertical" size="large" style={{ width: '100%' }}>
-            {loadError ? <Tag color="red">{loadError}</Tag> : null}
+      <Card bordered={false} title="通知通道管理" className={styles.sectionCard}>
+        <Space direction="vertical" size="large" style={{ width: '100%' }}>
+          {loadError ? <Tag color="red">{loadError}</Tag> : null}
 
-            <div
-              style={{
-                display: 'grid',
-                gap: 16,
-                gridTemplateColumns: 'minmax(0, 1.1fr) minmax(340px, 0.9fr)',
-                alignItems: 'start',
-              }}
-            >
-              <div>
-                <div style={{ display: 'grid', gap: 12 }}>
-                  {channels.length === 0 ? (
-                    <Card bordered={false} style={{ background: 'var(--color-fill-2)' }}>
-                      <Space direction="vertical" size="small">
-                        <Text bold>还没有已保存的通知通道</Text>
-                        <Text type="secondary">
-                          右侧填写飞书、钉钉或通用 webhook 后直接保存即可。
-                        </Text>
-                      </Space>
-                    </Card>
-                  ) : (
-                    channels.map((channel) => {
-                      const option = channelDescription(channel.channelType);
-                      const isSelected = selectedId === channel.id;
-                      return (
-                        <Card
-                          key={channel.id}
-                          bordered={false}
-                          hoverable
-                          style={{
-                            background: isSelected ? 'var(--color-fill-2)' : 'var(--color-bg-1)',
-                            border: isSelected
-                              ? '1px solid var(--color-primary-light-3)'
-                              : '1px solid transparent',
-                          }}
-                          onClick={() => syncForm(channel)}
-                        >
-                          <div
-                            style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}
-                          >
-                            <div style={{ minWidth: 0 }}>
-                              <Space size="small" wrap>
-                                <Text bold>{channel.name}</Text>
-                                <Tag color={channel.isEnabled ? 'green' : 'gray'}>
-                                  {channel.isEnabled ? '已启用' : '已停用'}
-                                </Tag>
-                                <Tag color={option.live ? 'arcoblue' : 'orange'}>
-                                  {option.label}
-                                </Tag>
-                              </Space>
-                              <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
-                                {option.subtitle}
-                              </Text>
-                              <Text
-                                type="secondary"
-                                style={{
-                                  display: 'block',
-                                  marginTop: 8,
-                                  maxWidth: '100%',
-                                  overflow: 'hidden',
-                                  textOverflow: 'ellipsis',
-                                  whiteSpace: 'nowrap',
-                                }}
-                              >
-                                {channel.target}
-                              </Text>
-                            </div>
-
-                            <Space direction="vertical" size="small">
-                              <Button
-                                size="small"
-                                icon={<Send size={14} />}
-                                loading={testing}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  void handleTest(channel);
-                                }}
-                              >
-                                测试
-                              </Button>
-                              <Button
-                                size="small"
-                                status="danger"
-                                icon={<Trash2 size={14} />}
-                                loading={deleting === channel.id}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  void handleDelete(channel);
-                                }}
-                              >
-                                删除
-                              </Button>
-                            </Space>
-                          </div>
-                        </Card>
-                      );
-                    })
-                  )}
-                </div>
-              </div>
-
-              <Card bordered={false} style={{ background: 'var(--color-bg-1)' }}>
-                <Space direction="vertical" size="medium" style={{ width: '100%' }}>
-                  <Space align="center" style={{ width: '100%', justifyContent: 'space-between' }}>
-                    <Space align="center">
-                      <BellRing size={16} />
-                      <Text bold>{selectedChannel ? '编辑通知通道' : '新增通知通道'}</Text>
-                    </Space>
-                    <Button type="text" onClick={() => syncForm(null)}>
-                      新建
-                    </Button>
+          <div className={styles.splitGrid}>
+            <div className={styles.listStack}>
+              {channels.length === 0 ? (
+                <div className={styles.emptyCard}>
+                  <Space direction="vertical" size="small">
+                    <Text bold>还没有已保存的通知通道</Text>
+                    <Text type="secondary">右侧填写飞书、钉钉或通用 webhook 后直接保存即可。</Text>
                   </Space>
+                </div>
+              ) : (
+                channels.map((channel) => {
+                  const option = channelDescription(channel.channelType);
+                  const isSelected = selectedId === channel.id;
+                  return (
+                    <Card
+                      key={channel.id}
+                      bordered={false}
+                      hoverable
+                      className={`${styles.listCard} ${isSelected ? styles.listCardActive : ''}`}
+                      onClick={() => syncForm(channel)}
+                    >
+                      <div className={styles.listCardHead}>
+                        <div className={styles.listCardBody}>
+                          <Space size="small" wrap>
+                            <Text bold>{channel.name}</Text>
+                            <Tag color={channel.isEnabled ? 'green' : 'gray'}>
+                              {channel.isEnabled ? '已启用' : '已停用'}
+                            </Tag>
+                            <Tag color={option.live ? 'arcoblue' : 'orange'}>{option.label}</Tag>
+                          </Space>
+                          <Text type="secondary" className={styles.listText}>
+                            {option.subtitle}
+                          </Text>
+                          <Text type="secondary" className={styles.listText}>
+                            {channel.target}
+                          </Text>
+                        </div>
 
+                        <div className={styles.listActions}>
+                          <Button
+                            size="small"
+                            icon={<Send size={14} />}
+                            loading={testing}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void handleTest(channel);
+                            }}
+                          >
+                            测试
+                          </Button>
+                          <Button
+                            size="small"
+                            status="danger"
+                            icon={<Trash2 size={14} />}
+                            loading={deleting === channel.id}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void handleDelete(channel);
+                            }}
+                          >
+                            删除
+                          </Button>
+                        </div>
+                      </div>
+                    </Card>
+                  );
+                })
+              )}
+            </div>
+
+            <Card bordered={false} className={styles.sectionCard}>
+              <Space direction="vertical" size="medium" style={{ width: '100%' }}>
+                <div className={styles.toolbar}>
+                  <Space align="center">
+                    <BellRing size={16} />
+                    <Text bold>{selectedChannel ? '编辑通知通道' : '新增通知通道'}</Text>
+                  </Space>
+                  <Button type="text" onClick={() => syncForm(null)}>
+                    新建
+                  </Button>
+                </div>
+
+                <div className={styles.formGridFull}>
                   <div>
                     <Text bold>通道名称</Text>
                     <Input
@@ -533,7 +506,7 @@ export const NotificationSettings: React.FC<Props> = ({ language, onLanguageChan
                   <div>
                     <Text bold>通道类型</Text>
                     <Select
-                      style={{ marginTop: 8 }}
+                      style={{ marginTop: 8, width: '100%' }}
                       value={form.channelType}
                       onChange={(value) =>
                         updateForm('channelType', value as NotificationChannelType)
@@ -570,111 +543,86 @@ export const NotificationSettings: React.FC<Props> = ({ language, onLanguageChan
                       placeholder={`{\n  "language": "${language}"\n}`}
                     />
                   </div>
+                </div>
 
-                  <div
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                    }}
-                  >
-                    <Text bold>启用通道</Text>
-                    <Switch
-                      checked={form.isEnabled}
-                      onChange={(value) => updateForm('isEnabled', value)}
-                    />
-                  </div>
+                <div className={styles.statusRow}>
+                  <Text bold>启用通道</Text>
+                  <Switch checked={form.isEnabled} onChange={(value) => updateForm('isEnabled', value)} />
+                </div>
 
-                  <Space>
-                    <Button type="primary" loading={saving} onClick={() => void handleSubmit()}>
-                      {selectedChannel ? '更新通道' : '创建通道'}
-                    </Button>
-                    <Button
-                      icon={<Send size={14} />}
-                      loading={testing}
-                      onClick={() => void handleTest()}
-                    >
-                      测试当前配置
-                    </Button>
-                  </Space>
+                <Space wrap>
+                  <Button type="primary" loading={saving} onClick={() => void handleSubmit()}>
+                    {selectedChannel ? '更新通道' : '创建通道'}
+                  </Button>
+                  <Button icon={<Send size={14} />} loading={testing} onClick={() => void handleTest()}>
+                    测试当前配置
+                  </Button>
                 </Space>
-              </Card>
-            </div>
-          </Space>
-        </Card>
+              </Space>
+            </Card>
+          </div>
+        </Space>
+      </Card>
 
-        <Card bordered={false} title="通知事件审计" style={{ background: 'var(--color-bg-2)' }}>
-          <Space direction="vertical" size="medium" style={{ width: '100%' }}>
-            {events.length === 0 ? (
-              <Text type="secondary">当前账号下还没有通知审计记录。你可以先发送一条测试通知。</Text>
-            ) : (
-              events.map((event) => (
-                <Card key={event.id} bordered={false} style={{ background: 'var(--color-bg-1)' }}>
-                  <div
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      gap: 12,
-                      alignItems: 'flex-start',
-                    }}
-                  >
-                    <div style={{ minWidth: 0 }}>
-                      <Space size="small" wrap>
-                        <Tag color={getStatusTagColor(event.status)}>{event.status}</Tag>
-                        <Tag>{event.eventType}</Tag>
-                        <Text type="secondary">尝试 {event.attemptCount} 次</Text>
-                      </Space>
-                      <Text style={{ display: 'block', marginTop: 8 }}>
-                        {String(
-                          event.payload?.title ||
-                            event.payload?.summary ||
-                            event.dedupeKey ||
-                            event.id,
-                        )}
+      <Card bordered={false} title="通知事件审计" className={styles.sectionCard}>
+        {events.length === 0 ? (
+          <Text type="secondary">当前账号下还没有通知审计记录。你可以先发送一条测试通知。</Text>
+        ) : (
+          <div className={styles.auditList}>
+            {events.map((event) => (
+              <div key={event.id} className={styles.auditCard}>
+                <div className={styles.statusRow}>
+                  <div style={{ minWidth: 0 }}>
+                    <Space size="small" wrap>
+                      <Tag color={getStatusTagColor(event.status)}>{event.status}</Tag>
+                      <Tag>{event.eventType}</Tag>
+                      <Text type="secondary">尝试 {event.attemptCount} 次</Text>
+                    </Space>
+                    <Text style={{ display: 'block', marginTop: 8 }}>
+                      {getEventDisplayTitle(event)}
+                    </Text>
+                    <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
+                      创建于 {formatTimestamp(event.createdAt)}
+                      {event.sentAt ? `，发送于 ${formatTimestamp(event.sentAt)}` : ''}
+                    </Text>
+                    {event.lastError ? (
+                      <Text
+                        type="secondary"
+                        style={{ display: 'block', marginTop: 8, color: 'rgb(var(--danger-6))' }}
+                      >
+                        {event.lastError}
                       </Text>
-                      <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
-                        创建于 {formatTimestamp(event.createdAt)}
-                        {event.sentAt ? `，发送于 ${formatTimestamp(event.sentAt)}` : ''}
-                      </Text>
-                      {event.lastError ? (
-                        <Text
-                          type="secondary"
-                          style={{ display: 'block', marginTop: 8, color: 'rgb(var(--danger-6))' }}
-                        >
-                          {event.lastError}
-                        </Text>
-                      ) : null}
-                    </div>
-
-                    {event.responseBody ? (
-                      <Tag color="green" style={{ maxWidth: 240, whiteSpace: 'normal' }}>
-                        {event.responseBody.slice(0, 120)}
-                      </Tag>
                     ) : null}
                   </div>
-                </Card>
-              ))
-            )}
-          </Space>
-        </Card>
 
-        <Card bordered={false} style={{ background: 'var(--color-bg-2)' }}>
-          <Space direction="vertical" size="small" style={{ width: '100%' }}>
-            <Space align="center">
-              <Mail size={16} />
-              <Text bold>渠道接通状态</Text>
-            </Space>
-            <Divider style={{ margin: '8px 0' }} />
-            <Tag color="green">已接通：飞书 / 钉钉 / 企业微信 / Slack / Webhook</Tag>
-            <Tag color="orange" style={{ marginTop: 4 }}>
-              开发中：邮箱 (SMTP) / Telegram (Bot API)
-            </Tag>
-            <Paragraph type="secondary" style={{ margin: '8px 0 0', fontSize: 12 }}>
-              开发中渠道的配置会被正常保存，待发送器接入后可立即生效，无需重新配置。
-            </Paragraph>
+                  {event.responseBody ? (
+                    <Tag color="green" style={{ maxWidth: 240, whiteSpace: 'normal' }}>
+                      {event.responseBody.slice(0, 120)}
+                    </Tag>
+                  ) : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card bordered={false} className={styles.sectionCard}>
+        <Space direction="vertical" size="small" style={{ width: '100%' }}>
+          <Space align="center">
+            <Mail size={16} />
+            <Text bold>渠道接通状态</Text>
           </Space>
-        </Card>
-      </Space>
-    </div>
+          <Divider style={{ margin: '8px 0' }} />
+          <Tag color="green">已接通：飞书 / 钉钉 / 企业微信 / Slack / Webhook</Tag>
+          <Tag color="orange" style={{ marginTop: 4 }}>
+            开发中：邮箱 (SMTP) / Telegram (Bot API)
+          </Tag>
+          <Paragraph type="secondary" style={{ margin: '8px 0 0', fontSize: 12 }}>
+            开发中渠道的配置会被正常保存，待发送器接入后可立即生效，无需重新配置。
+          </Paragraph>
+        </Space>
+      </Card>
+    </Space>
   );
 };

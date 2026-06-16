@@ -17,6 +17,68 @@ pub struct AiEndpoint {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct AiEndpointCapability {
+    pub id: String,
+    pub endpoint_id: String,
+    pub capability: String,
+    pub model: Option<String>,
+    pub path_override: Option<String>,
+    pub request_adapter: String,
+    pub response_adapter: String,
+    pub supports_stream: bool,
+    pub supports_tools: bool,
+    pub supports_files: bool,
+    pub enabled: bool,
+    pub priority: i64,
+    pub config_json: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiEndpointCapabilityView {
+    pub id: String,
+    pub endpoint_id: String,
+    pub capability: String,
+    pub model: Option<String>,
+    pub path_override: Option<String>,
+    pub request_adapter: String,
+    pub response_adapter: String,
+    pub supports_stream: bool,
+    pub supports_tools: bool,
+    pub supports_files: bool,
+    pub enabled: bool,
+    pub priority: i64,
+    pub config_json: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<AiEndpointCapability> for AiEndpointCapabilityView {
+    fn from(capability: AiEndpointCapability) -> Self {
+        Self {
+            id: capability.id,
+            endpoint_id: capability.endpoint_id,
+            capability: capability.capability,
+            model: capability.model,
+            path_override: capability.path_override,
+            request_adapter: capability.request_adapter,
+            response_adapter: capability.response_adapter,
+            supports_stream: capability.supports_stream,
+            supports_tools: capability.supports_tools,
+            supports_files: capability.supports_files,
+            enabled: capability.enabled,
+            priority: capability.priority,
+            config_json: capability.config_json,
+            created_at: capability.created_at,
+            updated_at: capability.updated_at,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiEndpointView {
@@ -30,6 +92,7 @@ pub struct AiEndpointView {
     pub has_api_key: bool,
     pub created_at: String,
     pub updated_at: String,
+    pub capabilities: Vec<AiEndpointCapabilityView>,
 }
 
 impl From<AiEndpoint> for AiEndpointView {
@@ -45,6 +108,7 @@ impl From<AiEndpoint> for AiEndpointView {
             has_api_key: !endpoint.api_key.trim().is_empty(),
             created_at: endpoint.created_at,
             updated_at: endpoint.updated_at,
+            capabilities: Vec::new(),
         }
     }
 }
@@ -216,6 +280,22 @@ pub struct UpdateEndpointReq {
     pub base_url: String,
     pub api_key: Option<String>,
     pub default_model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertEndpointCapabilityReq {
+    pub capability: String,
+    pub model: Option<String>,
+    pub path_override: Option<String>,
+    pub request_adapter: Option<String>,
+    pub response_adapter: Option<String>,
+    pub supports_stream: Option<bool>,
+    pub supports_tools: Option<bool>,
+    pub supports_files: Option<bool>,
+    pub enabled: Option<bool>,
+    pub priority: Option<i64>,
+    pub config_json: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

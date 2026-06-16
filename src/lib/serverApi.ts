@@ -12,11 +12,41 @@ import type {
   StoryboardLine,
 } from '../types';
 import { createAgentApi } from './serverApi.agents';
+import { createCollaborationApi } from './serverApi.collaboration';
 import { createEndpointApi } from './serverApi.endpoints';
+import { createImageGenApi } from './serverApi.imageGen';
 import { createNotificationApi } from './serverApi.notifications';
+import { createOpsApi } from './serverApi.ops';
+import { createPolicyApi } from './serverApi.policy';
 import { createUsageTaskPipelineApi } from './serverApi.pipeline';
+import { createVideoGenApi } from './serverApi.videoGen';
 
 export type { CreateAgentInput, ProjectAgentInput } from './serverApi.agents';
+export type {
+  CreateImageGenerationInput,
+  CreditTransaction,
+  ImageGeneration,
+  ImageGenerationStatus,
+  UserCredits,
+} from './serverApi.imageGen';
+export type {
+  CreateVideoGenerationInput,
+  VideoGeneration,
+  VideoGenerationStatus,
+} from './serverApi.videoGen';
+export type {
+  ActionProjectScope,
+  AssistantActionAudit,
+  AssistantActionPolicy,
+  AuditLogFilter,
+  ConfirmationToken,
+  ConsumeTokenInput,
+} from './serverApi.policy';
+export type {
+  ServerAiEndpoint,
+  ServerAiEndpointCapability,
+  UpsertEndpointCapabilityInput,
+} from './serverApi.endpoints';
 export type {
   NotificationChannelType,
   OpsNotificationChannel,
@@ -31,6 +61,7 @@ export type {
   PipelineRunEvent,
   PipelineRunStatus,
   PipelineRunStep,
+  PipelineStepOutput,
   PipelineStepStatus,
   PipelineRunSummary,
   PipelinePromptOptimization,
@@ -50,6 +81,12 @@ type ServerSession = {
   token: string;
   username?: string;
   userId?: string;
+};
+
+export type StoredServerProfile = {
+  email?: string;
+  id?: string;
+  username?: string;
 };
 
 type ServerMeResponse = {
@@ -101,12 +138,13 @@ type ServerMessage = {
 type ServerAsset = {
   id: string;
   projectId: string;
+  ownerUserId?: string | null;
   name: string;
   type: Asset['type'];
   url: string;
-  metadata?: Record<string, unknown> | null;
-  createdAt: string;
-  updatedAt?: string;
+  metadata?: Record<string, unknown> | string | null;
+  createdAt: string | number;
+  updatedAt?: string | number;
 };
 
 type ServerScript = {
@@ -335,6 +373,10 @@ const SERVER_PORT_SEARCH_LIMIT =
   Number.parseInt(import.meta.env.VITE_SERVER_PORT_SEARCH_LIMIT || '12', 10) || 12;
 const DEFAULT_SERVER_REQUEST_TIMEOUT_MS =
   Number.parseInt(import.meta.env.VITE_SERVER_REQUEST_TIMEOUT_MS || '10000', 10) || 10000;
+const SERVER_BASE_URL_PROBE_TTL_MS =
+  Number.parseInt(import.meta.env.VITE_SERVER_BASE_URL_PROBE_TTL_MS || '30000', 10) || 30000;
+const SERVER_BASE_URL_FAILURE_BACKOFF_MS =
+  Number.parseInt(import.meta.env.VITE_SERVER_BASE_URL_FAILURE_BACKOFF_MS || '8000', 10) || 8000;
 const REQUEST_ID_HEADER = 'x-request-id';
 const CACHE_KEYS = {
   aiEndpoints: 'ai-endpoints',
@@ -351,10 +393,29 @@ let pendingSessionPromise: Promise<ServerSession> | null = null;
 let cachedSession: ServerSession | null = null;
 let resolvedServerBaseUrl: string | null = null;
 let pendingServerBaseUrlPromise: Promise<string> | null = null;
-const pendingCacheRequests = new Map<string, Promise<unknown>>();
-const responseCache = new Map<string, { expiresAt: number; value: unknown }>();
+type PendingCacheRequest = {
+  promise: Promise<unknown>;
+  generation: number;
+  version: number;
+};
+
+type CachedResponse = {
+  expiresAt: number;
+  value: unknown;
+  generation: number;
+  version: number;
+};
+
+const pendingCacheRequests = new Map<string, PendingCacheRequest>();
+const responseCache = new Map<string, CachedResponse>();
+const cacheKeyVersions = new Map<string, number>();
+const serverBaseUrlProbeCache = new Map<string, number>();
+let apiCacheGeneration = 0;
+let serverBaseUrlDiscoveryFailureUntil = 0;
+let serverBaseUrlDiscoveryFailureMessage: string | null = null;
 
 function clearAllApiCaches() {
+  apiCacheGeneration += 1;
   responseCache.clear();
   pendingCacheRequests.clear();
 }
@@ -398,6 +459,8 @@ function loadStoredServerBaseUrl() {
 
 function persistServerBaseUrl(baseUrl: string) {
   resolvedServerBaseUrl = normalizeServerBaseUrl(baseUrl);
+  serverBaseUrlDiscoveryFailureUntil = 0;
+  serverBaseUrlDiscoveryFailureMessage = null;
 
   if (typeof window === 'undefined') {
     return;
@@ -408,12 +471,33 @@ function persistServerBaseUrl(baseUrl: string) {
 
 function clearStoredServerBaseUrl() {
   resolvedServerBaseUrl = null;
+  serverBaseUrlProbeCache.clear();
 
   if (typeof window === 'undefined') {
     return;
   }
 
   window.localStorage.removeItem(SERVER_BASE_URL_STORAGE_KEY);
+}
+
+function markServerBaseUrlDiscoveryFailure(message: string) {
+  serverBaseUrlDiscoveryFailureUntil = Date.now() + SERVER_BASE_URL_FAILURE_BACKOFF_MS;
+  serverBaseUrlDiscoveryFailureMessage = message;
+}
+
+function hasRecentServerBaseUrlDiscoveryFailure() {
+  return Date.now() < serverBaseUrlDiscoveryFailureUntil;
+}
+
+function getRecentServerBaseUrlDiscoveryFailureMessage() {
+  if (!hasRecentServerBaseUrlDiscoveryFailure()) {
+    return null;
+  }
+
+  return (
+    serverBaseUrlDiscoveryFailureMessage ||
+    '本地后端不可达，请先检查后端是否正常运行，稍后重试。'
+  );
 }
 
 function getServerBaseUrlCandidates() {
@@ -464,6 +548,17 @@ function getLoopbackFallbackBaseUrls(baseUrl: string) {
   }
 }
 
+function hasRecentServerBaseUrlProbe(baseUrl: string) {
+  const checkedAt = serverBaseUrlProbeCache.get(normalizeServerBaseUrl(baseUrl));
+  return Boolean(checkedAt && Date.now() - checkedAt < SERVER_BASE_URL_PROBE_TTL_MS);
+}
+
+function markServerBaseUrlReachable(baseUrl: string) {
+  serverBaseUrlProbeCache.set(normalizeServerBaseUrl(baseUrl), Date.now());
+  serverBaseUrlDiscoveryFailureUntil = 0;
+  serverBaseUrlDiscoveryFailureMessage = null;
+}
+
 async function probeServerBaseUrl(baseUrl: string) {
   const controller = new AbortController();
   const timeoutId =
@@ -486,10 +581,14 @@ async function probeServerBaseUrl(baseUrl: string) {
     const parsed = rawText ? tryParseJson(rawText) : null;
 
     if (typeof parsed === 'string') {
-      return parsed.trim() === 'OK';
+      const ok = parsed.trim() === 'OK';
+      if (ok) {
+        markServerBaseUrlReachable(baseUrl);
+      }
+      return ok;
     }
 
-    return Boolean(
+    const ok = Boolean(
       parsed &&
       typeof parsed === 'object' &&
       'service' in parsed &&
@@ -498,6 +597,10 @@ async function probeServerBaseUrl(baseUrl: string) {
       typeof parsed.status === 'string' &&
       parsed.status.toLowerCase() === 'ok',
     );
+    if (ok) {
+      markServerBaseUrlReachable(baseUrl);
+    }
+    return ok;
   } catch {
     return false;
   } finally {
@@ -514,15 +617,31 @@ async function discoverServerBaseUrl() {
   }
 
   clearStoredServerBaseUrl();
-  throw new Error('本地后端不可达，系统已尝试自动切换端口但未发现可用服务');
+  const errorMessage =
+    '本地后端不可达，系统已尝试自动切换端口但未发现可用服务';
+  markServerBaseUrlDiscoveryFailure(errorMessage);
+  throw new Error(errorMessage);
 }
 
 export async function getServerBaseUrl(forceRefresh = false) {
+  if (pendingServerBaseUrlPromise) {
+    return pendingServerBaseUrlPromise;
+  }
+
+  const recentFailureMessage = getRecentServerBaseUrlDiscoveryFailureMessage();
+  if (recentFailureMessage) {
+    throw new Error(recentFailureMessage);
+  }
+
   const envBaseUrl = import.meta.env.VITE_SERVER_BASE_URL?.trim();
 
   if (!forceRefresh) {
     const storedBaseUrl = loadStoredServerBaseUrl();
     if (storedBaseUrl) {
+      if (hasRecentServerBaseUrlProbe(storedBaseUrl)) {
+        return storedBaseUrl;
+      }
+
       if (await probeServerBaseUrl(storedBaseUrl)) {
         persistServerBaseUrl(storedBaseUrl);
         return storedBaseUrl;
@@ -538,6 +657,10 @@ export async function getServerBaseUrl(forceRefresh = false) {
 
     if (envBaseUrl) {
       const normalizedEnvBaseUrl = normalizeServerBaseUrl(envBaseUrl);
+      if (hasRecentServerBaseUrlProbe(normalizedEnvBaseUrl)) {
+        return normalizedEnvBaseUrl;
+      }
+
       if (await probeServerBaseUrl(normalizedEnvBaseUrl)) {
         persistServerBaseUrl(normalizedEnvBaseUrl);
         return normalizedEnvBaseUrl;
@@ -597,6 +720,19 @@ export function getStoredServerUserId() {
   return loadStoredSession()?.userId || null;
 }
 
+export function getStoredServerProfile(): StoredServerProfile | null {
+  const session = loadStoredSession();
+  if (!session) {
+    return null;
+  }
+
+  return {
+    email: session.email,
+    id: session.userId,
+    username: session.username,
+  };
+}
+
 function persistSession(session: ServerSession) {
   const previousSession = cachedSession ?? loadStoredSession();
   const previousUserId = previousSession?.userId ?? null;
@@ -652,36 +788,55 @@ async function validateServerSessionToken(session: ServerSession): Promise<Serve
 
 function invalidateApiCache(...keys: string[]) {
   for (const key of keys) {
+    cacheKeyVersions.set(key, (cacheKeyVersions.get(key) ?? 0) + 1);
     responseCache.delete(key);
     pendingCacheRequests.delete(key);
   }
 }
 
 async function readCachedApi<T>(key: string, ttlMs: number, loader: () => Promise<T>): Promise<T> {
+  const generation = apiCacheGeneration;
+  const version = cacheKeyVersions.get(key) ?? 0;
   const cached = responseCache.get(key);
-  if (cached && cached.expiresAt > Date.now()) {
+  if (
+    cached &&
+    cached.expiresAt > Date.now() &&
+    cached.generation === generation &&
+    cached.version === version
+  ) {
     return cached.value as T;
   }
 
   const pending = pendingCacheRequests.get(key);
-  if (pending) {
-    return pending as Promise<T>;
+  if (pending && pending.generation === generation && pending.version === version) {
+    return pending.promise as Promise<T>;
   }
 
-  const nextRequest = loader()
+  const promise = loader()
     .then((value) => {
-      responseCache.set(key, {
-        value,
-        expiresAt: Date.now() + ttlMs,
-      });
+      if (apiCacheGeneration === generation && (cacheKeyVersions.get(key) ?? 0) === version) {
+        responseCache.set(key, {
+          value,
+          expiresAt: Date.now() + ttlMs,
+          generation,
+          version,
+        });
+      }
       return value;
     })
     .finally(() => {
-      pendingCacheRequests.delete(key);
+      const currentPending = pendingCacheRequests.get(key);
+      if (currentPending?.promise === promise) {
+        pendingCacheRequests.delete(key);
+      }
     });
 
-  pendingCacheRequests.set(key, nextRequest);
-  return nextRequest;
+  pendingCacheRequests.set(key, {
+    promise,
+    generation,
+    version,
+  });
+  return promise;
 }
 
 export function clearStoredSession() {
@@ -695,7 +850,11 @@ export function clearStoredSession() {
 
 // Demo session generator removed - enforcing real authentication
 
-function parseTimestamp(value: string | undefined) {
+function parseTimestamp(value: string | number | undefined) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : Date.now();
+  }
+
   const timestamp = value ? Date.parse(value) : Number.NaN;
   return Number.isFinite(timestamp) ? timestamp : Date.now();
 }
@@ -711,6 +870,31 @@ function parseMeta(value: string | null | undefined) {
     return {
       rawMeta: value,
     } satisfies Message['meta'];
+  }
+}
+
+function parseAssetMetadata(
+  value: Record<string, unknown> | string | null | undefined,
+): Record<string, unknown> | null {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    return value;
+  }
+
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
   }
 }
 
@@ -851,14 +1035,17 @@ function mapAsset(asset: ServerAsset): Asset {
     url = `${resolvedServerBaseUrl}${url}`;
   }
 
+  const metadata = parseAssetMetadata(asset.metadata);
+
   return {
     id: asset.id,
     projectId: asset.projectId,
+    ownerUserId: asset.ownerUserId || getStoredServerUserId() || undefined,
     name: asset.name,
     type: asset.type,
     url,
-    metadata: asset.metadata ?? null,
-    versionLabel: deriveAssetVersionLabel(asset.metadata ?? null),
+    metadata,
+    versionLabel: deriveAssetVersionLabel(metadata),
     createdAt: parseTimestamp(asset.createdAt),
     updatedAt: asset.updatedAt ? parseTimestamp(asset.updatedAt) : undefined,
   };
@@ -1023,11 +1210,14 @@ export async function fetchServer(
   const baseUrl = await getServerBaseUrl(forceRefresh);
 
   try {
-    return await executeFetch(`${baseUrl}${path}`);
+    const response = await executeFetch(`${baseUrl}${path}`);
+    markServerBaseUrlReachable(baseUrl);
+    return response;
   } catch (error) {
     for (const fallbackBaseUrl of getLoopbackFallbackBaseUrls(baseUrl)) {
       try {
         const fallbackResponse = await executeFetch(`${fallbackBaseUrl}${path}`);
+        markServerBaseUrlReachable(fallbackBaseUrl);
         persistServerBaseUrl(fallbackBaseUrl);
         return fallbackResponse;
       } catch {
@@ -1044,7 +1234,9 @@ export async function fetchServer(
       throw error;
     }
 
-    return executeFetch(`${refreshedBaseUrl}${path}`);
+    const response = await executeFetch(`${refreshedBaseUrl}${path}`);
+    markServerBaseUrlReachable(refreshedBaseUrl);
+    return response;
   }
 }
 
@@ -1155,6 +1347,16 @@ export async function bootstrapWorkspace(forceRefresh = false) {
   return readCachedApi(CACHE_KEYS.workspaceBootstrap, CACHE_TTLS.workspaceBootstrap, () =>
     requestApi<WorkspaceBootstrapResponse>('/api/workspace/bootstrap'),
   );
+}
+
+export function applyWorkspaceBootstrap(workspace: WorkspaceBootstrapResponse) {
+  return {
+    projects: workspace.projects,
+    assets: workspace.assets,
+    scripts: workspace.scripts,
+    storyboards: workspace.storyboards,
+    agents: workspace.agents,
+  };
 }
 
 export async function createServerProject(name: string) {
@@ -1301,6 +1503,24 @@ export async function uploadServerAsset(projectId: string, file: File) {
   const asset = await requestApi<ServerAsset>(`/api/projects/${projectId}/assets/upload`, {
     method: 'POST',
     body: formData,
+  });
+
+  invalidateApiCache(CACHE_KEYS.workspaceBootstrap);
+  return mapAsset(asset);
+}
+
+export async function updateServerAsset(
+  assetId: string,
+  input: Partial<Pick<Asset, 'name' | 'type' | 'url' | 'metadata'>>,
+) {
+  const asset = await requestApi<ServerAsset>(`/api/assets/${assetId}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      name: input.name,
+      type: input.type,
+      url: input.url,
+      metadata: input.metadata,
+    }),
   });
 
   invalidateApiCache(CACHE_KEYS.workspaceBootstrap);
@@ -1641,6 +1861,8 @@ export const listServerAiEndpoints = endpointApi.listServerAiEndpoints;
 export const createServerAiEndpoint = endpointApi.createServerAiEndpoint;
 export const updateServerAiEndpoint = endpointApi.updateServerAiEndpoint;
 export const deleteServerAiEndpoint = endpointApi.deleteServerAiEndpoint;
+export const listServerAiEndpointCapabilities = endpointApi.listServerAiEndpointCapabilities;
+export const upsertServerAiEndpointCapability = endpointApi.upsertServerAiEndpointCapability;
 
 const notificationApi = createNotificationApi({
   requestApi,
@@ -1692,3 +1914,49 @@ export const pausePipelineRun = usageTaskPipelineApi.pausePipelineRun;
 export const resumePipelineRun = usageTaskPipelineApi.resumePipelineRun;
 export const cancelPipelineRun = usageTaskPipelineApi.cancelPipelineRun;
 export const retryPipelineStep = usageTaskPipelineApi.retryPipelineStep;
+export const streamPipelineRun = usageTaskPipelineApi.streamPipelineRun;
+
+const collaborationApi = createCollaborationApi({ requestApi });
+
+export const createCollaborationSession = collaborationApi.createSession;
+export const getCollaborationSession = collaborationApi.getSession;
+export const getActiveCollaborationSession = collaborationApi.getActiveSession;
+export const dispatchCollaboration = collaborationApi.dispatch;
+export const sendCollaborationMessage = collaborationApi.sendMessage;
+export const listCollaborationMessages = collaborationApi.listMessages;
+export const checkCollaborationLoop = collaborationApi.loopCheck;
+export const admitCollaboration = collaborationApi.admit;
+export const haltCollaboration = collaborationApi.halt;
+export const streamCollaborationEvents = collaborationApi.streamEvents;
+
+const imageGenApi = createImageGenApi(requestApi, {
+  invalidateWorkspaceCache: () => invalidateApiCache(CACHE_KEYS.workspaceBootstrap),
+});
+
+export const listImageGenerations = imageGenApi.listGenerations;
+export const getImageGeneration = imageGenApi.getGeneration;
+export const createImageGeneration = imageGenApi.createGeneration;
+export const getImageCredits = imageGenApi.getCredits;
+export const listImageCreditTransactions = imageGenApi.listCreditTransactions;
+
+const videoGenApi = createVideoGenApi(requestApi, {
+  invalidateWorkspaceCache: () => invalidateApiCache(CACHE_KEYS.workspaceBootstrap),
+});
+
+export const listVideoGenerations = videoGenApi.listGenerations;
+export const getVideoGeneration = videoGenApi.getGeneration;
+export const createVideoGeneration = videoGenApi.createGeneration;
+
+const policyApi = createPolicyApi(requestApi);
+
+export const getActionPolicy = policyApi.getPolicy;
+export const updateActionPolicy = policyApi.updatePolicy;
+export const listActionAudits = policyApi.listAudits;
+export const createConfirmationToken = policyApi.createConfirmationToken;
+export const consumeConfirmationToken = policyApi.consumeConfirmationToken;
+
+const opsApi = createOpsApi(requestApi);
+
+export const getOpsOverview = opsApi.getOverview;
+export const listOpsHeartbeats = opsApi.listHeartbeats;
+export const listOpsFindings = opsApi.listFindings;

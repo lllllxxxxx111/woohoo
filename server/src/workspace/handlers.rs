@@ -177,7 +177,10 @@ pub async fn bootstrap(
 
     let payload = WorkspaceBootstrap {
         projects: project_items,
-        assets: assets.into_iter().map(map_asset).collect(),
+        assets: assets
+            .into_iter()
+            .map(|asset| map_asset(asset, &user_id.0))
+            .collect(),
         scripts: scripts
             .into_iter()
             .map(|script| WorkspaceScript {
@@ -201,7 +204,11 @@ pub async fn bootstrap(
                         scene_number: line.scene_number,
                         description: line.description,
                         duration: line.duration,
-                        assets: line.assets.into_iter().map(map_asset).collect(),
+                        assets: line
+                            .assets
+                            .into_iter()
+                            .map(|asset| map_asset(asset, &user_id.0))
+                            .collect(),
                     })
                     .collect(),
                 updated_at: to_epoch_millis(&storyboard.updated_at),
@@ -233,10 +240,11 @@ fn map_message(message: conversation::model::Message) -> WorkspaceMessage {
     }
 }
 
-fn map_asset(asset: asset::model::Asset) -> WorkspaceAsset {
+fn map_asset(asset: asset::model::Asset, owner_user_id: &str) -> WorkspaceAsset {
     WorkspaceAsset {
         id: asset.id,
         project_id: asset.project_id,
+        owner_user_id: owner_user_id.to_string(),
         name: asset.name,
         asset_type: asset.asset_type,
         url: asset.url,

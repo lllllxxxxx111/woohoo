@@ -1,5 +1,5 @@
 import { useEffect, type MutableRefObject } from 'react';
-import { type AiTask, ensureServerSession, fetchServer } from '../../lib/serverApi';
+import { type AiTask, ensureServerSession, fetchServer, streamCollaborationEvents } from '../../lib/serverApi';
 import { logger } from '../../lib/logger';
 import { useAppStore } from '../../store';
 import type { Message, MessageMeta } from '../../types';
@@ -457,6 +457,16 @@ export function usePendingTaskSse({
             }
             break;
 
+          case 'collaboration_session_created':
+          case 'collaboration_assignment_updated':
+          case 'collaboration_queue_updated':
+          case 'collaboration_question_asked':
+          case 'collaboration_question_answered':
+          case 'collaboration_loop_warning':
+          case 'collaboration_admission_changed':
+          case 'collaboration_workspace_started':
+            break;
+
           default:
             break;
         }
@@ -566,4 +576,186 @@ export function usePendingTaskSse({
     refreshWorkspaceAfterTaskCompletion,
     markUnauthenticated,
   ]);
+
+  /**
+   * 独立协作 SSE 连接：当存在活跃协作会话时自动建立，
+   * 直接消费 /api/collaboration/events/stream 端点
+   *
+   * 后端 SSE 格式：event: collaboration, data: { sessionId, eventType, payload }
+   * 实际事件类型在 eventType 字段中，数据在 payload 子对象中
+   */
+  const activeCollaborationSession = useAppStore(
+    (state) => state.activeCollaborationSession,
+  );
+
+  useEffect(() => {
+    if (!activeCollaborationSession || !isServerWorkspaceReady || !isAuthenticated) {
+      return;
+    }
+
+    const controller = streamCollaborationEvents(
+      (event) => {
+        try {
+          const envelope = JSON.parse(event.data);
+          const eventType = envelope.eventType as string | undefined;
+          const payload = envelope.payload ?? {};
+          const sessionId = envelope.sessionId as string | undefined;
+
+          if (!eventType) return;
+
+          switch (eventType) {
+            case 'collaboration_session_created':
+              if (sessionId) {
+                useAppStore.getState().setCollaborationSession({
+                  id: sessionId,
+                  userId: '',
+                  projectId: payload.projectId || '',
+                  conversationId: '',
+                  state: payload.state || 'discovery',
+                  roundCount: 0,
+                  createdAt: new Date().toISOString(),
+                  updatedAt: new Date().toISOString(),
+                });
+              }
+              break;
+
+            case 'collaboration_assignment_updated':
+              if (payload.assignmentId) {
+                const store = useAppStore.getState();
+                const existing = store.activeCollaborationAssignments;
+                const updated = existing.map((a) =>
+                  a.id === payload.assignmentId
+                    ? { ...a, status: payload.newStatus || a.status }
+                    : a,
+                );
+                if (!existing.some((a) => a.id === payload.assignmentId)) {
+                  updated.push({
+                    id: payload.assignmentId,
+                    sessionId: '',
+                    agentId: payload.agentId || '',
+                    taskType: '',
+                    goal: '',
+                    status: payload.newStatus || 'assigned',
+                    blockingQuestionCount: 0,
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
+                  });
+                }
+                store.setCollaborationAssignments(updated);
+              }
+              break;
+
+            case 'collaboration_queue_updated':
+              if (sessionId) {
+                const session = useAppStore.getState().activeCollaborationSession;
+                if (session && session.id === sessionId) {
+                  useAppStore.getState().setCollaborationSession({
+                    ...session,
+                    replyQueueJson: JSON.stringify(payload.replyQueue || []),
+                  });
+                }
+              }
+              break;
+
+            case 'collaboration_question_asked': {
+              const existing = useAppStore.getState().collaborationPendingQuestions;
+              const fingerprint = `${payload.agentId || ''}-${payload.question || ''}`;
+              if (!existing.some((q) => q.fingerprint === fingerprint)) {
+                useAppStore.getState().setCollaborationPendingQuestions([
+                  ...existing,
+                  {
+                    agentId: payload.agentId || '',
+                    question: payload.question || '',
+                    fingerprint,
+                  },
+                ]);
+              }
+              break;
+            }
+
+            case 'collaboration_question_answered': {
+              const prev = useAppStore.getState().collaborationPendingQuestions;
+              const answeredFingerprint = `${payload.agentId || ''}-${payload.question || ''}`;
+              useAppStore.getState().setCollaborationPendingQuestions(
+                prev.filter((q) => q.fingerprint !== answeredFingerprint),
+              );
+              break;
+            }
+
+            case 'collaboration_loop_warning':
+              if (payload.level !== undefined) {
+                useAppStore.getState().setCollaborationLoopCheckResult({
+                  loopDetected: true,
+                  signals: payload.signals || [],
+                  level: payload.level,
+                  action: payload.action || '',
+                  message: payload.message || '',
+                });
+              }
+              break;
+
+            case 'collaboration_admission_changed':
+              if (sessionId) {
+                const session = useAppStore.getState().activeCollaborationSession;
+                if (session && session.id === sessionId) {
+                  useAppStore.getState().setCollaborationSession({
+                    ...session,
+                    state: payload.admitted ? 'workspace_admission' : session.state,
+                  });
+                }
+              }
+              break;
+
+            case 'collaboration_workspace_started':
+              if (sessionId) {
+                const session = useAppStore.getState().activeCollaborationSession;
+                if (session && session.id === sessionId) {
+                  useAppStore.getState().setCollaborationSession({
+                    ...session,
+                    state: 'workspace_execution',
+                    pipelineRunId: payload.pipelineRunId || session.pipelineRunId,
+                  });
+                }
+              }
+              break;
+
+            case 'collaboration_session_halted':
+              if (sessionId) {
+                const session = useAppStore.getState().activeCollaborationSession;
+                if (session && session.id === sessionId) {
+                  useAppStore.getState().setCollaborationSession({
+                    ...session,
+                    state: 'halted',
+                  });
+                }
+              }
+              break;
+
+            case 'collaboration_dispatched':
+              if (sessionId) {
+                const session = useAppStore.getState().activeCollaborationSession;
+                if (session && session.id === sessionId) {
+                  useAppStore.getState().setCollaborationSession({
+                    ...session,
+                    state: 'delegating',
+                  });
+                }
+              }
+              break;
+
+            case 'collaboration_message_sent':
+              // 消息已发送，无需特殊处理，由消息列表 API 刷新
+              break;
+          }
+        } catch {
+          logger.error('[Collaboration-SSE] Failed to parse event data');
+        }
+      },
+      (error) => {
+        logger.error('[Collaboration-SSE] Connection error:', error);
+      },
+    );
+
+    return () => controller.abort();
+  }, [activeCollaborationSession, isServerWorkspaceReady, isAuthenticated]);
 }

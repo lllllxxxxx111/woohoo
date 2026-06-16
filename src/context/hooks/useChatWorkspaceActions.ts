@@ -5,6 +5,7 @@ import {
   deleteServerMessage,
   rewindServerConversation,
   updateServerConversation,
+  updateServerAsset,
   updateServerMessage,
   uploadServerAsset,
   upsertServerScript,
@@ -685,14 +686,48 @@ export function useChatWorkspaceActions({
     [assets, setAssets, setProjects, setStoryboards],
   );
 
+  const updateAsset = useCallback(
+    async (
+      assetId: string,
+      input: Partial<Pick<Asset, 'name' | 'type' | 'url' | 'metadata'>>,
+    ) => {
+      const targetAsset = assets.find((asset) => asset.id === assetId);
+      if (!targetAsset) {
+        throw new Error('资产不存在');
+      }
+
+      const nextAsset = await updateServerAsset(assetId, input);
+
+      setAssets((prev) => prev.map((asset) => (asset.id === assetId ? nextAsset : asset)));
+      setStoryboards((prev) =>
+        prev.map((storyboard) =>
+          storyboard.projectId !== nextAsset.projectId
+            ? storyboard
+            : {
+                ...storyboard,
+                lines: storyboard.lines.map((line) => ({
+                  ...line,
+                  assets: line.assets.map((asset) => (asset.id === assetId ? nextAsset : asset)),
+                })),
+              },
+        ),
+      );
+
+      return nextAsset;
+    },
+    [assets, setAssets, setStoryboards],
+  );
+
   const saveScript = useCallback(
     async (projectId: string, content: string, title?: string) => {
       const existingScript = scripts.find((script) => script.projectId === projectId);
       const nextTitle = deriveScriptTitle(content, title || existingScript?.title);
 
       let nextScript: Script;
+      let savedOnServer = false;
       try {
         nextScript = await upsertServerScript(projectId, nextTitle, content);
+        savedOnServer = true;
       } catch (error) {
         logger.error('Failed to save script on server', error);
         nextScript = existingScript
@@ -706,12 +741,16 @@ export function useChatWorkspaceActions({
           return [nextScript, ...prev];
         }
 
-        return prev.map((script) => (script.projectId === projectId ? nextScript : script));
+          return prev.map((script) => (script.projectId === projectId ? nextScript : script));
       });
+
+      if (savedOnServer) {
+        void refreshWorkspaceWithRetries('script document asset sync', 2);
+      }
 
       return nextScript;
     },
-    [scripts, setScripts],
+    [refreshWorkspaceWithRetries, scripts, setScripts],
   );
 
   const saveStoryboard = useCallback(
@@ -724,8 +763,10 @@ export function useChatWorkspaceActions({
       }));
 
       let nextStoryboard: Storyboard;
+      let savedOnServer = false;
       try {
         nextStoryboard = await upsertServerStoryboard(projectId, normalizedLines);
+        savedOnServer = true;
       } catch (error) {
         logger.error('Failed to save storyboard on server', error);
         const currentStoryboard = storyboards.find(
@@ -747,9 +788,13 @@ export function useChatWorkspaceActions({
         );
       });
 
+      if (savedOnServer) {
+        void refreshWorkspaceWithRetries('storyboard document asset sync', 2);
+      }
+
       return nextStoryboard;
     },
-    [storyboards, setStoryboards],
+    [refreshWorkspaceWithRetries, storyboards, setStoryboards],
   );
 
   const updateMessageInChat = useCallback(
@@ -852,6 +897,7 @@ export function useChatWorkspaceActions({
     removeMessageLocally,
     deleteMessageInChat,
     uploadAssets,
+    updateAsset,
     deleteAsset,
     saveScript,
     saveStoryboard,

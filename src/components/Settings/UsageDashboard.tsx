@@ -18,11 +18,14 @@ import {
   AiUsageRecord,
   AiUsageSummary,
   getUsageSummary,
+  listImageCreditTransactions,
   listServerAiEndpoints,
 } from '../../lib/serverApi';
+import type { CreditTransaction } from '../../lib/serverApi';
 import { useToast } from '../../context/useToast';
 import { useAppStore } from '../../store';
 import { useShallow } from 'zustand/react/shallow';
+import { formatCreditsFromTokens } from '../../lib/credits';
 
 import {
   Activity,
@@ -106,11 +109,23 @@ const STATUS_OPTIONS = [
   { label: '失败', value: 'failed' },
 ];
 
+const USAGE_SUMMARY_CACHE_TTL_MS = 10_000;
+const USAGE_ERROR_TOAST_COOLDOWN_MS = 15_000;
+
 /** 过滤掉 undefined 和空字符串的筛选条件 */
 function normalizeFilters(filters: UsageFilters) {
   return Object.fromEntries(
     Object.entries(filters).filter(([, value]) => value !== undefined && value !== ''),
   ) as UsageFilters;
+}
+
+function createUsageRequestKey(filters: UsageFilters) {
+  const query = normalizeFilters(filters);
+  return JSON.stringify(
+    Object.keys(query)
+      .sort()
+      .map((key) => [key, query[key as keyof UsageFilters]]),
+  );
 }
 
 /** 计算百分比字符串，分母为零时返回 '0%' */
@@ -234,7 +249,7 @@ const BreakdownSection: React.FC<{
               </div>
               <div className={styles.breakdownValue}>{item.requestCount.toLocaleString()}</div>
               <div className={styles.breakdownMeta}>
-                <span>Tokens: {item.totalTokens.toLocaleString()}</span>
+                <span>积分: {formatCreditsFromTokens(item.totalTokens)}</span>
                 <span>•</span>
                 <span>产出: {item.outputItems}</span>
               </div>
@@ -280,7 +295,19 @@ export const UsageDashboard: React.FC = () => {
   });
   const [activeFilterKeys, setActiveFilterKeys] = useState<OptionalFilterKey[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
+  const [transactions, setTransactions] = useState<CreditTransaction[]>([]);
+  const [transactionsLoading, setTransactionsLoading] = useState(false);
   const requestIdRef = useRef(0);
+  const summaryCacheRef = useRef<{
+    key: string;
+    summary: AiUsageSummary;
+    fetchedAt: number;
+  } | null>(null);
+  const pendingRequestRef = useRef<{
+    key: string;
+    promise: Promise<AiUsageSummary>;
+  } | null>(null);
+  const lastErrorToastAtRef = useRef(0);
 
   /** 添加一个可选筛选条件 */
   const addFilterCondition = (key: OptionalFilterKey) => {
@@ -297,14 +324,42 @@ export const UsageDashboard: React.FC = () => {
 
   /** 从服务端获取用量汇总数据 */
   const fetchData = useCallback(
-    async (nextFilters: UsageFilters) => {
+    async (nextFilters: UsageFilters, options?: { force?: boolean }) => {
       const requestId = requestIdRef.current + 1;
       requestIdRef.current = requestId;
+      const requestKey = createUsageRequestKey(nextFilters);
+      const cached = summaryCacheRef.current;
+
+      if (
+        !options?.force &&
+        cached?.key === requestKey &&
+        Date.now() - cached.fetchedAt < USAGE_SUMMARY_CACHE_TTL_MS
+      ) {
+        setSummary(cached.summary);
+        setRecords(cached.summary.recent);
+        setLoadError(null);
+        return;
+      }
+
       setLoading(true);
+      const query = normalizeFilters(nextFilters);
+      let pending = pendingRequestRef.current;
+      if (options?.force || pending?.key !== requestKey) {
+        pending = {
+          key: requestKey,
+          promise: getUsageSummary({ ...query, limit: 50 }),
+        };
+        pendingRequestRef.current = pending;
+      }
+
       try {
-        const query = normalizeFilters(nextFilters);
-        const nextSummary = await getUsageSummary({ ...query, limit: 50 });
+        const nextSummary = await pending.promise;
         if (requestId !== requestIdRef.current) return;
+        summaryCacheRef.current = {
+          key: requestKey,
+          summary: nextSummary,
+          fetchedAt: Date.now(),
+        };
         setSummary(nextSummary);
         setRecords(nextSummary.recent);
         setLoadError(null);
@@ -312,10 +367,17 @@ export const UsageDashboard: React.FC = () => {
         if (requestId !== requestIdRef.current) return;
         const message = error instanceof Error ? error.message : String(error);
         setSummary((prev) => prev ?? createEmptySummary(nextFilters));
-        setRecords([]);
+        setRecords((prev) => prev);
         setLoadError(message);
-        showToast({ type: 'error', title: '加载监控数据失败', message });
+        const now = Date.now();
+        if (now - lastErrorToastAtRef.current > USAGE_ERROR_TOAST_COOLDOWN_MS) {
+          lastErrorToastAtRef.current = now;
+          showToast({ type: 'error', title: '加载监控数据失败', message });
+        }
       } finally {
+        if (pendingRequestRef.current?.promise === pending.promise) {
+          pendingRequestRef.current = null;
+        }
         if (requestId === requestIdRef.current) setLoading(false);
       }
     },
@@ -336,6 +398,25 @@ export const UsageDashboard: React.FC = () => {
     void listServerAiEndpoints().then((next) => {
       if (isActive) setEndpointOptions(next.map((e) => ({ id: e.id, name: e.name })));
     });
+    return () => {
+      isActive = false;
+    };
+  }, []);
+
+  /** 加载积分交易历史 */
+  useEffect(() => {
+    let isActive = true;
+    setTransactionsLoading(true);
+    void listImageCreditTransactions()
+      .then((result) => {
+        if (isActive) setTransactions(result);
+      })
+      .catch(() => {
+        // 交易历史加载失败不阻塞主面板
+      })
+      .finally(() => {
+        if (isActive) setTransactionsLoading(false);
+      });
     return () => {
       isActive = false;
     };
@@ -396,10 +477,14 @@ export const UsageDashboard: React.FC = () => {
       ),
     },
     {
-      title: 'Token 消耗',
+      title: '积分消耗',
       dataIndex: 'totalTokens',
       width: 150,
-      render: (v: number) => <Text bold>{v.toLocaleString()}</Text>,
+      render: (v: number) => (
+        <Space direction="vertical" size={0}>
+          <Text bold>{formatCreditsFromTokens(v)}</Text>
+        </Space>
+      ),
     },
     {
       title: '耗时',
@@ -503,13 +588,13 @@ export const UsageDashboard: React.FC = () => {
           <h2>
             <Activity size={24} style={{ color: 'var(--bg-accent)' }} /> 全站 API 用量统计与监控
           </h2>
-          <p>基于服务器端点日志的实时深度分析，记录每一次 AI 调用背后的资源消耗与分发路径。</p>
+          <p>统一展示为积分消耗，便于查看各项目、智能体和通道的使用情况。</p>
         </div>
         <Button
           type="primary"
           status="success"
           icon={<RefreshCw size={14} />}
-          onClick={() => void fetchData(filters)}
+          onClick={() => void fetchData(filters, { force: true })}
           loading={loading}
           shape="round"
         >
@@ -608,11 +693,11 @@ export const UsageDashboard: React.FC = () => {
           footer={`成功率 ${percentage(currentSummary.totals.successCount, currentSummary.totals.requestCount)}`}
         />
         <StatCard
-          title="Token 消耗"
-          value={currentSummary.totals.totalTokens.toLocaleString()}
+          title="积分消耗"
+          value={formatCreditsFromTokens(currentSummary.totals.totalTokens)}
           icon={<Layers3 size={18} />}
           color="#10b981"
-          footer={`平均 ${Math.round(currentSummary.totals.totalTokens / (currentSummary.totals.requestCount || 1))} / call`}
+          footer={`平均 ${formatCreditsFromTokens(currentSummary.totals.totalTokens / (currentSummary.totals.requestCount || 1))} 积分 / 次`}
         />
         <StatCard
           title="平均延迟"
@@ -623,7 +708,7 @@ export const UsageDashboard: React.FC = () => {
         />
         <StatCard
           title="重做消耗"
-          value={currentSummary.totals.redoTotalTokens.toLocaleString()}
+          value={formatCreditsFromTokens(currentSummary.totals.redoTotalTokens)}
           icon={<RotateCcw size={18} />}
           color="#ef4444"
           footer={`重试 ${currentSummary.totals.redoRequestCount} 次`}
@@ -680,6 +765,100 @@ export const UsageDashboard: React.FC = () => {
           border={false}
           loading={loading}
           scroll={{ x: 740, y: 320 }}
+          style={{ width: '100%' }}
+        />
+      </div>
+
+      <div className={styles.mainTableCard}>
+        <div className={styles.tableHeader}>
+          <h3>
+            积分交易历史{' '}
+            <span
+              style={{ fontWeight: 400, fontSize: 13, color: 'var(--text-muted)', marginLeft: 12 }}
+            >
+              充值、消费与退款记录
+            </span>
+          </h3>
+        </div>
+        <Table
+          columns={[
+            {
+              title: '时间',
+              dataIndex: 'createdAt',
+              width: 160,
+              render: (v: string) => (
+                <Text type="secondary" style={{ fontSize: 13 }}>
+                  {new Date(v).toLocaleString()}
+                </Text>
+              ),
+            },
+            {
+              title: '类型',
+              dataIndex: 'kind',
+              width: 100,
+              render: (v: string) => {
+                const colorMap: Record<string, string> = {
+                  earned: 'green',
+                  spent: 'orange',
+                  refund: 'blue',
+                };
+                const labelMap: Record<string, string> = {
+                  earned: '充值',
+                  spent: '消费',
+                  refund: '退款',
+                };
+                return (
+                  <Tag color={colorMap[v] || 'gray'} size="small">
+                    {labelMap[v] || v}
+                  </Tag>
+                );
+              },
+            },
+            {
+              title: '金额',
+              dataIndex: 'amount',
+              width: 120,
+              render: (v: number) => (
+                <Text bold style={{ color: v >= 0 ? 'var(--color-success-6)' : 'var(--color-danger-6)' }}>
+                  {v >= 0 ? '+' : ''}{v.toFixed(2)}
+                </Text>
+              ),
+            },
+            {
+              title: '余额',
+              dataIndex: 'balanceAfter',
+              width: 120,
+              render: (v: number) => <Text>{v.toFixed(2)}</Text>,
+            },
+            {
+              title: '原因',
+              dataIndex: 'reason',
+              render: (v: string | null) => (
+                <Text type="secondary" style={{ fontSize: 13 }}>
+                  {v || '-'}
+                </Text>
+              ),
+            },
+            {
+              title: '关联',
+              dataIndex: 'refType',
+              width: 140,
+              render: (_: string, r: CreditTransaction) =>
+                r.refType && r.refId ? (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {r.refType} / {r.refId.slice(0, 8)}
+                  </Text>
+                ) : (
+                  <Text type="secondary" style={{ fontSize: 12 }}>-</Text>
+                ),
+            },
+          ]}
+          data={transactions}
+          rowKey="id"
+          pagination={{ pageSize: 20, showTotal: true }}
+          border={false}
+          loading={transactionsLoading}
+          scroll={{ x: 680, y: 300 }}
           style={{ width: '100%' }}
         />
       </div>

@@ -8,6 +8,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use uuid::Uuid;
 
 use crate::{
+    asset::{self, generated_document::GeneratedMarkdownDocument},
     ai::{
         client::StreamFallbackMode,
         config::{AiChatReq, AiTaskStatus},
@@ -65,6 +66,24 @@ struct PipelineStepRow {
 }
 
 #[derive(Debug, Clone, FromRow)]
+struct PipelineDocumentOutputRow {
+    id: String,
+    run_id: String,
+    step_id: String,
+    task_id: Option<String>,
+    output_json: Option<String>,
+    raw_content: Option<String>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct PipelineReviewOutputRow {
+    run_id: String,
+    step_id: String,
+    task_id: Option<String>,
+    raw_content: Option<String>,
+}
+
+#[derive(Debug, Clone, FromRow)]
 struct PersistedTaskRow {
     status: String,
     result: Option<String>,
@@ -76,6 +95,12 @@ struct TaskSnapshot {
     status: String,
     result: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct AgentIdentity {
+    id: String,
+    name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -95,11 +120,27 @@ async fn run_orchestrator_loop(state: AppState) {
     let mut ticker = interval(Duration::from_secs(ORCHESTRATOR_INTERVAL_SECS));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+    // 互斥锁防止 tick 重叠执行（当某次 tick 耗时超过间隔时）
+    let tick_lock = tokio::sync::Mutex::new(());
+
     loop {
         ticker.tick().await;
+
+        // 获取锁，如果上一个 tick 还在执行则等待
+        // 使用 try_lock 跳过而非等待，避免 tick 堆积
+        let guard = match tick_lock.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                tracing::debug!("pipeline orchestrator tick skipped: previous tick still running");
+                continue;
+            }
+        };
+
         if let Err(error) = run_orchestrator_once(&state).await {
             tracing::warn!("pipeline orchestrator tick failed: {}", error);
         }
+
+        drop(guard);
     }
 }
 
@@ -168,6 +209,362 @@ async fn advance_run_once(state: &AppState, run: &PipelineRunRow) -> Result<()> 
     Ok(())
 }
 
+pub async fn reconcile_pipeline_document_assets(state: &AppState) {
+    let outputs = match sqlx::query_as::<_, PipelineDocumentOutputRow>(
+        "SELECT id, run_id, step_id, task_id, output_json, raw_content
+         FROM pipeline_step_outputs
+         WHERE output_type = 'design'
+         ORDER BY created_at ASC, id ASC",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!("failed to list pipeline document outputs for repair: {}", error);
+            return;
+        }
+    };
+
+    let checked = outputs.len();
+    let mut repaired = 0usize;
+    let mut skipped = 0usize;
+
+    for output in outputs {
+        let Some(content) = output
+            .raw_content
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+
+        if let Some(asset_id) = extract_pipeline_output_asset_id(output.output_json.as_deref()) {
+            match asset::repo::find_by_id(&state.db, &asset_id).await {
+                Ok(Some(asset)) => {
+                    skipped += 1;
+                    if let Err(error) =
+                        backfill_existing_pipeline_design_asset_metadata(state, &output, content, &asset).await
+                    {
+                        tracing::warn!(
+                            output_id = %output.id,
+                            asset_id = %asset_id,
+                            "failed to backfill existing pipeline document asset metadata: {}",
+                            error
+                        );
+                    }
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        output_id = %output.id,
+                        asset_id = %asset_id,
+                        "failed to check existing pipeline document asset: {}",
+                        error
+                    );
+                    continue;
+                }
+            }
+        }
+
+        let run = match load_pipeline_run_by_id(&state.db, &output.run_id).await {
+            Ok(run) => run,
+            Err(error) => {
+                tracing::warn!(
+                    output_id = %output.id,
+                    run_id = %output.run_id,
+                    "failed to load pipeline run for asset repair: {}",
+                    error
+                );
+                continue;
+            }
+        };
+        let step = match load_pipeline_step_by_id(&state.db, &output.step_id).await {
+            Ok(step) => step,
+            Err(error) => {
+                tracing::warn!(
+                    output_id = %output.id,
+                    step_id = %output.step_id,
+                    "failed to load pipeline step for asset repair: {}",
+                    error
+                );
+                continue;
+            }
+        };
+
+        let task_id = output
+            .task_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                step.ai_task_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or(output.id.as_str());
+
+        let asset = match persist_pipeline_document_asset(state, &run, &step, task_id, content).await
+        {
+            Ok(asset) => asset,
+            Err(error) => {
+                tracing::warn!(
+                    output_id = %output.id,
+                    run_id = %output.run_id,
+                    step_id = %output.step_id,
+                    "failed to persist pipeline document asset during repair: {}",
+                    error
+                );
+                continue;
+            }
+        };
+
+        let output_json = build_pipeline_document_output_json(
+            output.output_json.as_deref(),
+            &asset,
+            classify_pipeline_document_kind(&step),
+        );
+
+        if let Err(error) = sqlx::query(
+            "UPDATE pipeline_step_outputs
+             SET output_json = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+             WHERE id = ?",
+        )
+        .bind(output_json)
+        .bind(&output.id)
+        .execute(&state.db)
+        .await
+        {
+            tracing::warn!(
+                output_id = %output.id,
+                asset_id = %asset.id,
+                "failed to backfill pipeline output_json: {}",
+                error
+            );
+            continue;
+        }
+
+        repaired += 1;
+    }
+
+    if repaired > 0 || skipped > 0 {
+        tracing::info!(
+            checked,
+            repaired,
+            skipped,
+            "reconciled pipeline document assets"
+        );
+    }
+
+    reconcile_pipeline_document_asset_metadata(state).await;
+}
+
+async fn reconcile_pipeline_document_asset_metadata(state: &AppState) {
+    let reviews = match sqlx::query_as::<_, PipelineReviewOutputRow>(
+        "SELECT run_id, step_id, task_id, raw_content
+         FROM pipeline_step_outputs
+         WHERE output_type = 'review'
+         ORDER BY created_at ASC, id ASC",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!("failed to list pipeline review outputs for asset metadata repair: {}", error);
+            return;
+        }
+    };
+
+    let mut repaired_reviews = 0usize;
+    for output in reviews {
+        let run = match load_pipeline_run_by_id(&state.db, &output.run_id).await {
+            Ok(run) => run,
+            Err(error) => {
+                tracing::warn!(
+                    run_id = %output.run_id,
+                    "failed to load pipeline run for review metadata repair: {}",
+                    error
+                );
+                continue;
+            }
+        };
+        let review_step = match load_pipeline_step_by_id(&state.db, &output.step_id).await {
+            Ok(step) => step,
+            Err(error) => {
+                tracing::warn!(
+                    run_id = %output.run_id,
+                    step_id = %output.step_id,
+                    "failed to load review step for metadata repair: {}",
+                    error
+                );
+                continue;
+            }
+        };
+        let steps = match load_run_steps(&state.db, &output.run_id).await {
+            Ok(steps) => steps,
+            Err(error) => {
+                tracing::warn!(
+                    run_id = %output.run_id,
+                    "failed to load run steps for review metadata repair: {}",
+                    error
+                );
+                continue;
+            }
+        };
+
+        let raw = output.raw_content.unwrap_or_default();
+        let review = parse_review_decision(&raw);
+        let review_issues = extract_text_list(&review.issues);
+        let retry_hints = extract_text_list(&review.retry_hints);
+        let task_id = output
+            .task_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(review_step.id.as_str());
+
+        match update_reviewed_asset_metadata(
+            &state.db,
+            &run,
+            &review_step,
+            &steps,
+            task_id,
+            &review,
+            &review_issues,
+            &retry_hints,
+            false,
+        )
+        .await
+        {
+            Ok(true) => repaired_reviews += 1,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    run_id = %output.run_id,
+                    step_id = %output.step_id,
+                    "failed to repair reviewed asset metadata: {}",
+                    error
+                );
+            }
+        }
+    }
+
+    if repaired_reviews > 0 {
+        tracing::info!(
+            repaired_reviews,
+            "repaired pipeline document review metadata"
+        );
+    }
+}
+
+async fn backfill_existing_pipeline_design_asset_metadata(
+    state: &AppState,
+    output: &PipelineDocumentOutputRow,
+    content: &str,
+    asset: &asset::model::Asset,
+) -> Result<()> {
+    let run = load_pipeline_run_by_id(&state.db, &output.run_id).await?;
+    let step = load_pipeline_step_by_id(&state.db, &output.step_id).await?;
+    let task_id = output
+        .task_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            step.ai_task_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or(output.id.as_str());
+    let creator_agent = resolve_task_agent_identity(&state.db, &run.user_id, task_id).await?;
+
+    let mut metadata = asset
+        .metadata
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<Value>(value).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+
+    let document_kind = classify_pipeline_document_kind(&step);
+    metadata
+        .entry("origin".to_string())
+        .or_insert(json!("pipeline_output"));
+    metadata
+        .entry("format".to_string())
+        .or_insert(json!("markdown"));
+    metadata
+        .entry("pipelineRunId".to_string())
+        .or_insert(json!(run.id));
+    metadata
+        .entry("pipelineType".to_string())
+        .or_insert(json!(run.pipeline_type));
+    metadata
+        .entry("conversationId".to_string())
+        .or_insert(json!(run.conversation_id));
+    metadata
+        .entry("stepId".to_string())
+        .or_insert(json!(step.id));
+    metadata
+        .entry("stepKey".to_string())
+        .or_insert(json!(step.step_key));
+    metadata
+        .entry("stepName".to_string())
+        .or_insert(json!(step.step_name));
+    metadata
+        .entry("stepType".to_string())
+        .or_insert(json!(normalize_step_type(&step)));
+    metadata
+        .entry("taskId".to_string())
+        .or_insert(json!(task_id));
+    metadata
+        .entry("documentKind".to_string())
+        .or_insert(json!(document_kind));
+    metadata
+        .entry("sizeBytes".to_string())
+        .or_insert(json!(content.as_bytes().len()));
+    metadata
+        .entry("creator".to_string())
+        .or_insert(json!("制作流程"));
+    metadata
+        .entry("createdBy".to_string())
+        .or_insert(json!("制作流程"));
+    metadata
+        .entry("changeCount".to_string())
+        .or_insert(json!(0));
+    if let Some(agent) = creator_agent {
+        metadata
+            .entry("creatorAgentId".to_string())
+            .or_insert(json!(agent.id.clone()));
+        metadata
+            .entry("creatorAgentName".to_string())
+            .or_insert(json!(agent.name.clone()));
+        metadata
+            .entry("agentId".to_string())
+            .or_insert(json!(agent.id));
+        metadata
+            .entry("agentName".to_string())
+            .or_insert(json!(agent.name));
+    }
+
+    let metadata = Value::Object(metadata).to_string();
+    asset::repo::update_asset(
+        &state.db,
+        &asset.id,
+        &asset.name,
+        &asset.asset_type,
+        &asset.url,
+        Some(&metadata),
+    )
+    .await?;
+
+    Ok(())
+}
+
 async fn load_run_steps(pool: &SqlitePool, run_id: &str) -> Result<Vec<PipelineStepRow>> {
     Ok(sqlx::query_as::<_, PipelineStepRow>(
         "SELECT id, step_key, step_name, step_order, step_type,
@@ -179,6 +576,30 @@ async fn load_run_steps(pool: &SqlitePool, run_id: &str) -> Result<Vec<PipelineS
     )
     .bind(run_id)
     .fetch_all(pool)
+    .await?)
+}
+
+async fn load_pipeline_run_by_id(pool: &SqlitePool, run_id: &str) -> Result<PipelineRunRow> {
+    Ok(sqlx::query_as::<_, PipelineRunRow>(
+        "SELECT id, user_id, project_id, conversation_id, pipeline_type, status
+         FROM pipeline_runs
+         WHERE id = ?",
+    )
+    .bind(run_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn load_pipeline_step_by_id(pool: &SqlitePool, step_id: &str) -> Result<PipelineStepRow> {
+    Ok(sqlx::query_as::<_, PipelineStepRow>(
+        "SELECT id, step_key, step_name, step_order, step_type,
+                depends_on_json, review_policy_json, ai_task_id, status,
+                attempt_count, max_retries, input_summary, error_message, last_error_at
+         FROM pipeline_run_steps
+         WHERE id = ?",
+    )
+    .bind(step_id)
+    .fetch_one(pool)
     .await?)
 }
 
@@ -305,7 +726,7 @@ async fn handle_running_step(
             if normalize_step_type(step) == "review" {
                 handle_review_completion(&state.db, run, step, steps, task_id, task.result).await
             } else {
-                handle_design_completion(&state.db, run, step, task_id, task.result).await
+                handle_design_completion(state, run, step, task_id, task.result).await
             }
         }
         "failed" => handle_task_failure(&state.db, run, step, task.error).await,
@@ -353,25 +774,45 @@ fn map_task_status(status: AiTaskStatus) -> &'static str {
 }
 
 async fn handle_design_completion(
-    pool: &SqlitePool,
+    state: &AppState,
     run: &PipelineRunRow,
     step: &PipelineStepRow,
     task_id: &str,
     result: Option<String>,
 ) -> Result<bool> {
-    let content_preview = result
+    let raw_content = result.filter(|value| !value.trim().is_empty());
+    let persisted_asset = if let Some(content) = raw_content.as_deref() {
+        match persist_pipeline_document_asset(state, run, step, task_id, content).await {
+            Ok(asset) => Some(asset),
+            Err(error) => {
+                tracing::warn!(
+                    run_id = %run.id,
+                    step_id = %step.id,
+                    "failed to persist pipeline document asset: {}",
+                    error
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let output_json = persisted_asset.as_ref().map(|asset| {
+        build_pipeline_document_output_json(None, asset, classify_pipeline_document_kind(step))
+    });
+    let content_preview = raw_content
         .as_deref()
         .map(build_compact_preview)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "产出已写入步骤输出".to_string());
     let output_id = insert_step_output(
-        pool,
+        &state.db,
         &run.id,
         &step.id,
         Some(task_id),
         "design",
-        None,
-        result,
+        output_json.as_deref(),
+        raw_content,
         None,
         None,
         None,
@@ -379,9 +820,31 @@ async fn handle_design_completion(
     )
     .await?;
 
-    mark_step_completed(pool, &run.id, &step.id, Some(&output_id)).await?;
+    if let Some(asset) = persisted_asset.as_ref() {
+        append_pipeline_event(
+            &state.db,
+            &run.id,
+            Some(&step.id),
+            "pipeline_asset_created",
+            json!({
+                "outputId": output_id,
+                "assetId": asset.id,
+                "assetName": asset.name,
+                "assetType": asset.asset_type,
+                "assetUrl": asset.url,
+                "documentKind": classify_pipeline_document_kind(step),
+                "stepId": step.id,
+                "stepKey": step.step_key,
+                "stepName": step.step_name,
+            }),
+            "system",
+        )
+        .await?;
+    }
+
+    mark_step_completed(&state.db, &run.id, &step.id, Some(&output_id)).await?;
     append_assistant_step_summary(
-        pool,
+        &state.db,
         run,
         step,
         format!("设计步骤「{}」已完成：{}", step.step_name, content_preview),
@@ -389,6 +852,150 @@ async fn handle_design_completion(
     )
     .await?;
     Ok(true)
+}
+
+fn build_pipeline_document_output_json(
+    existing: Option<&str>,
+    asset: &asset::model::Asset,
+    document_kind: &str,
+) -> String {
+    let mut payload = existing
+        .and_then(|value| serde_json::from_str::<Value>(value).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+
+    payload.insert("format".to_string(), json!("markdown"));
+    payload.insert("assetId".to_string(), json!(asset.id.clone()));
+    payload.insert("assetName".to_string(), json!(asset.name.clone()));
+    payload.insert("assetType".to_string(), json!(asset.asset_type.clone()));
+    payload.insert("assetUrl".to_string(), json!(asset.url.clone()));
+    payload.insert("documentKind".to_string(), json!(document_kind));
+
+    Value::Object(payload).to_string()
+}
+
+async fn persist_pipeline_document_asset(
+    state: &AppState,
+    run: &PipelineRunRow,
+    step: &PipelineStepRow,
+    task_id: &str,
+    content: &str,
+) -> Result<asset::model::Asset> {
+    let document_kind = classify_pipeline_document_kind(step);
+    let filename_stem = format!(
+        "pipeline-{}-{}-{}",
+        safe_filename_component(&run.id),
+        safe_filename_component(&step.id),
+        safe_filename_component(task_id)
+    );
+    let asset_name = build_pipeline_document_asset_name(step);
+    let creator_agent = resolve_task_agent_identity(&state.db, &run.user_id, task_id).await?;
+    let metadata = json!({
+        "origin": "pipeline_output",
+        "format": "markdown",
+        "pipelineRunId": run.id,
+        "pipelineType": run.pipeline_type,
+        "conversationId": run.conversation_id,
+        "stepId": step.id,
+        "stepKey": step.step_key,
+        "stepName": step.step_name,
+        "stepType": normalize_step_type(step),
+        "taskId": task_id,
+        "documentKind": document_kind,
+        "sizeBytes": content.as_bytes().len(),
+        "creator": "制作流程",
+        "createdBy": "制作流程",
+        "creatorAgentId": creator_agent.as_ref().map(|agent| agent.id.as_str()),
+        "creatorAgentName": creator_agent.as_ref().map(|agent| agent.name.as_str()),
+        "agentId": creator_agent.as_ref().map(|agent| agent.id.as_str()),
+        "agentName": creator_agent.as_ref().map(|agent| agent.name.as_str()),
+        "generatedAt": now_iso(),
+    });
+
+    Ok(asset::generated_document::persist_markdown_document(
+        state,
+        GeneratedMarkdownDocument {
+            project_id: &run.project_id,
+            name: &asset_name,
+            filename_stem: &filename_stem,
+            content,
+            metadata,
+        },
+    )
+    .await?)
+}
+
+fn extract_pipeline_output_asset_id(output_json: Option<&str>) -> Option<String> {
+    let value = output_json?;
+    let parsed = serde_json::from_str::<Value>(value).ok()?;
+    let asset_id = parsed.get("assetId")?.as_str()?.trim();
+    if asset_id.is_empty() {
+        None
+    } else {
+        Some(asset_id.to_string())
+    }
+}
+
+fn classify_pipeline_document_kind(step: &PipelineStepRow) -> &'static str {
+    let key = step.step_key.to_ascii_lowercase();
+    if key.contains("outline") {
+        "outline"
+    } else if key.contains("script") {
+        "script"
+    } else if key.contains("storyboard") {
+        "storyboard"
+    } else if key.contains("chapter") {
+        "chapter"
+    } else if key.contains("keyframe") {
+        "keyframe"
+    } else {
+        "pipeline_output"
+    }
+}
+
+fn build_pipeline_document_asset_name(step: &PipelineStepRow) -> String {
+    let title = step
+        .step_name
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let fallback = step
+        .step_key
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-");
+    let base = if title.trim().is_empty() {
+        fallback.trim()
+    } else {
+        title.trim()
+    };
+
+    if base.is_empty() {
+        "pipeline-output.md".to_string()
+    } else if base.ends_with(".md") {
+        base.to_string()
+    } else {
+        format!("{base}.md")
+    }
+}
+
+fn safe_filename_component(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() {
+        Uuid::new_v4().to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 async fn handle_review_completion(
@@ -451,6 +1058,19 @@ async fn handle_review_completion(
         review.score,
         Some(review.issues.clone()),
         Some(review.retry_hints.clone()),
+    )
+    .await?;
+
+    update_reviewed_asset_metadata(
+        pool,
+        run,
+        step,
+        steps,
+        task_id,
+        &review,
+        &review_issues,
+        &retry_hints,
+        true,
     )
     .await?;
 
@@ -519,6 +1139,142 @@ async fn handle_review_completion(
     Ok(true)
 }
 
+async fn update_reviewed_asset_metadata(
+    pool: &SqlitePool,
+    run: &PipelineRunRow,
+    review_step: &PipelineStepRow,
+    steps: &[PipelineStepRow],
+    task_id: &str,
+    review: &ReviewDecision,
+    review_issues: &[String],
+    retry_hints: &[String],
+    emit_event: bool,
+) -> Result<bool> {
+    let Some(design_step) = find_retry_design_step(review_step, steps) else {
+        return Ok(false);
+    };
+    let Some(asset_id) = latest_design_asset_id_for_step(pool, &run.id, &design_step.id).await? else {
+        return Ok(false);
+    };
+    let Some(asset) = asset::repo::find_by_id(pool, &asset_id).await? else {
+        return Ok(false);
+    };
+
+    let review_agent = resolve_task_agent_identity(pool, &run.user_id, task_id).await?;
+    let mut metadata = asset
+        .metadata
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<Value>(value).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+
+    let status = if review.decision == "pass" {
+        "approved"
+    } else {
+        "rejected"
+    };
+    let now = now_iso();
+    metadata.insert("reviewStatus".to_string(), json!(status));
+    metadata.insert("reviewDecision".to_string(), json!(review.decision));
+    metadata.insert("reviewScore".to_string(), json!(review.score));
+    metadata.insert(
+        "reviewSummary".to_string(),
+        json!(summarize_asset_review(review, review_issues, retry_hints)),
+    );
+    metadata.insert("reviewIssues".to_string(), json!(review_issues));
+    metadata.insert("retryHints".to_string(), json!(retry_hints));
+    metadata.insert("reviewStepId".to_string(), json!(review_step.id));
+    metadata.insert("reviewStepKey".to_string(), json!(review_step.step_key));
+    metadata.insert("reviewTaskId".to_string(), json!(task_id));
+    metadata.insert("reviewedAt".to_string(), json!(now));
+    if let Some(agent) = review_agent {
+        metadata.insert("reviewerAgentId".to_string(), json!(agent.id));
+        metadata.insert("reviewerAgentName".to_string(), json!(agent.name));
+    }
+
+    let metadata = Value::Object(metadata).to_string();
+    asset::repo::update_asset(
+        pool,
+        &asset.id,
+        &asset.name,
+        &asset.asset_type,
+        &asset.url,
+        Some(&metadata),
+    )
+    .await?;
+
+    if emit_event {
+        append_pipeline_event(
+            pool,
+            &run.id,
+            Some(&review_step.id),
+            "pipeline_asset_review_recorded",
+            json!({
+                "assetId": asset.id,
+                "assetName": asset.name,
+                "reviewStatus": status,
+                "reviewDecision": review.decision,
+                "reviewScore": review.score,
+                "reviewStepId": review_step.id,
+                "reviewStepKey": review_step.step_key,
+            }),
+            "system",
+        )
+        .await?;
+    }
+
+    Ok(true)
+}
+
+async fn latest_design_asset_id_for_step(
+    pool: &SqlitePool,
+    run_id: &str,
+    step_id: &str,
+) -> Result<Option<String>> {
+    let outputs = sqlx::query_as::<_, (Option<String>,)>(
+        "SELECT output_json
+         FROM pipeline_step_outputs
+         WHERE run_id = ? AND step_id = ? AND output_type = 'design'
+         ORDER BY created_at DESC, id DESC
+         LIMIT 8",
+    )
+    .bind(run_id)
+    .bind(step_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(outputs
+        .into_iter()
+        .find_map(|(output_json,)| extract_pipeline_output_asset_id(output_json.as_deref())))
+}
+
+fn summarize_asset_review(
+    review: &ReviewDecision,
+    review_issues: &[String],
+    retry_hints: &[String],
+) -> String {
+    if let Some(code) = review.parse_error.as_deref() {
+        return format!("审核输出格式异常：{}", code);
+    }
+
+    if review.decision == "pass" {
+        return match review.score {
+            Some(score) => format!("审核通过，评分 {:.1}", score),
+            None => "审核通过".to_string(),
+        };
+    }
+
+    if let Some(issue) = review_issues.first() {
+        return format!("审核未通过：{}", issue);
+    }
+
+    if let Some(hint) = retry_hints.first() {
+        return format!("审核未通过，建议：{}", hint);
+    }
+
+    "审核未通过".to_string()
+}
+
 async fn handle_task_failure(
     pool: &SqlitePool,
     run: &PipelineRunRow,
@@ -557,6 +1313,8 @@ async fn handle_task_failure(
     Ok(true)
 }
 
+/// 判断步骤是否仍可重试
+/// max_retries 表示最大重试次数（不含首次执行），总尝试次数 = 1 + max_retries
 fn can_retry_step(step: &PipelineStepRow) -> bool {
     step.attempt_count <= step.max_retries
 }
@@ -771,6 +1529,25 @@ async fn resolve_step_agent_id(
     .await?;
 
     Ok(fallback.map(|(id,)| id))
+}
+
+async fn resolve_task_agent_identity(
+    pool: &SqlitePool,
+    user_id: &str,
+    task_id: &str,
+) -> Result<Option<AgentIdentity>> {
+    let row = sqlx::query_as::<_, (String, String)>(
+        "SELECT a.id, a.name
+         FROM ai_tasks t
+         INNER JOIN agents a ON a.id = t.agent_id
+         WHERE t.id = ? AND t.user_id = ?",
+    )
+    .bind(task_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|(id, name)| AgentIdentity { id, name }))
 }
 
 async fn build_step_prompt(

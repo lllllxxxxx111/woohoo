@@ -216,7 +216,7 @@ const AgentDetailModal: React.FC<AgentDetailModalProps> = ({ visible, agent, onC
                   </Tag>
                 )}
                 {agent.temperature !== undefined && <Tag bordered>温度: {agent.temperature}</Tag>}
-                {agent.maxTokens !== undefined && <Tag bordered>最大Token: {agent.maxTokens}</Tag>}
+                {agent.maxTokens !== undefined && <Tag bordered>输出上限: {agent.maxTokens}</Tag>}
               </Space>
             </div>
           )}

@@ -2,7 +2,7 @@ use crate::error::{AppError, AppResult};
 use axum::{
     extract::Request,
     extract::State,
-    http::{header::HeaderName, HeaderValue},
+    http::{header::HeaderName, HeaderValue, Method},
     middleware::Next,
     response::Response,
 };
@@ -14,6 +14,9 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
+
+/// 清理操作的阈值：每次 is_allowed 调用后，以 1/CLEANUP_PROBABILITY 的概率执行全局清理
+const CLEANUP_PROBABILITY: usize = 100;
 
 #[derive(Debug, Clone)]
 pub struct RequestId {
@@ -29,7 +32,7 @@ pub struct RequestId {
  * - 防止DDoS攻击和暴力破解
  * - 基于IP地址的请求计数
  * - 可配置的窗口大小和最大请求数
- * - 自动清理过期记录防止内存泄漏
+ * - 概率性全局清理过期记录防止内存泄漏
  */
 pub struct RateLimiter {
     /**
@@ -78,19 +81,26 @@ impl RateLimiter {
         let now = Instant::now();
         let window_start = now - Duration::from_secs(self.window_secs);
 
-        // 获取或创建该IP的请求记录
         let request_times = requests.entry(client_ip.to_string()).or_default();
 
-        // 清理过期的请求记录（防止内存泄漏）
         request_times.retain(|&time| time > window_start);
 
-        // 检查是否超过限制
         if request_times.len() >= self.max_requests {
-            false // 超过限制，拒绝请求
+            false
         } else {
-            // 记录本次请求时间
             request_times.push(now);
-            true // 允许请求
+
+            // 概率性全局清理过期记录，防止内存泄漏
+            let now_nanos = now.elapsed().as_nanos() as usize;
+            if now_nanos % CLEANUP_PROBABILITY == 0 {
+                let window_start = window_start;
+                requests.retain(|_, times| {
+                    times.retain(|&time| time > window_start);
+                    !times.is_empty()
+                });
+            }
+
+            true
         }
     }
 }
@@ -144,23 +154,25 @@ pub async fn request_id_middleware(mut request: Request, next: Next) -> Response
  * 从请求中提取客户端真实IP地址
  *
  * 优先级：
- * 1. x-forwarded-for 头（反向代理场景）
+ * 1. Axum 连接信息中的远程地址（直连场景，最可信）
  * 2. x-real-ip 头（Nginx 等代理场景）
- * 3. Axum 连接信息中的远程地址（直连场景）
- * 4. 兜底使用 "unknown" 并附带唯一标识避免合并限速
+ * 3. x-forwarded-for 头的最后一个IP（反向代理场景，最不可信）
+ * 4. 兜底使用 "unknown-{uuid}" 避免合并限速
+ *
+ * 安全说明：
+ * - 连接信息优先于代理头，防止客户端伪造 x-forwarded-for 绕过限速
+ * - x-forwarded-for 取最后一个IP（最接近代理服务器的IP），而非第一个（可被客户端伪造）
  */
 fn extract_client_ip(request: &Request) -> String {
-    if let Some(forwarded) = request
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
+    if let Some(addr) = request.extensions().get::<SocketAddr>() {
+        return addr.ip().to_string();
+    }
+
+    if let Some(connect_info) = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
     {
-        if let Some(first_ip) = forwarded.split(',').next() {
-            let trimmed = first_ip.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
-            }
-        }
+        return connect_info.0.ip().to_string();
     }
 
     if let Some(real_ip) = request
@@ -174,18 +186,38 @@ fn extract_client_ip(request: &Request) -> String {
         }
     }
 
-    if let Some(addr) = request.extensions().get::<SocketAddr>() {
-        return addr.to_string();
-    }
-
-    if let Some(connect_info) = request
-        .extensions()
-        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+    if let Some(forwarded) = request
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
     {
-        return connect_info.0.to_string();
+        if let Some(last_ip) = forwarded.split(',').last() {
+            let trimmed = last_ip.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
     }
 
-    "unknown".to_string()
+    format!("unknown-{}", Uuid::new_v4().as_simple())
+}
+
+fn should_skip_rate_limit(request: &Request) -> bool {
+    request.method() == Method::OPTIONS
+        || request.uri().path() == "/health"
+        || (request.method() == Method::GET
+            && matches!(
+                request.uri().path(),
+                "/api/auth/me"
+                    | "/api/workspace/bootstrap"
+                    | "/api/ai/endpoints"
+                    | "/api/ai/usage/summary"
+                    | "/api/ai/usage/records"
+                    | "/api/notifications/channels"
+                    | "/api/image-gen/generations"
+                    | "/api/billing/credits"
+                    | "/api/billing/transactions"
+            ))
 }
 
 /**
@@ -199,9 +231,12 @@ pub async fn rate_limit_middleware(
     request: Request,
     next: Next,
 ) -> AppResult<Response> {
+    if should_skip_rate_limit(&request) {
+        return Ok(next.run(request).await);
+    }
+
     let client_ip = extract_client_ip(&request);
 
-    // 检查是否允许请求
     if limiter.is_allowed(&client_ip).await {
         Ok(next.run(request).await)
     } else {

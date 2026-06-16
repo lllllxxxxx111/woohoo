@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react';
-import { Camera, Clock, Image as ImageIcon, Music, Plus, Save, Trash2, Video } from 'lucide-react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Camera, Clock, Image as ImageIcon, LoaderCircle, Music, Plus, Save, Trash2, Video } from 'lucide-react';
 import { useAppStore } from '../../../../store';
 import { useShallow } from 'zustand/react/shallow';
 
 import { useAppActions } from '../../../../context/useAppActions';
 import { useToast } from '../../../../context/useToast';
+import { createImageGeneration, createVideoGeneration } from '../../../../lib/serverApi';
 import type { StoryboardLine } from '../../../../types';
 import styles from './StoryboardArea.module.css';
 
@@ -37,6 +38,7 @@ export const StoryboardArea: React.FC = () => {
   const { showToast } = useToast();
   const [lines, setLines] = useState<StoryboardLine[]>(activeStoryboard?.lines || []);
   const [isSaving, setIsSaving] = useState(false);
+  const [generatingLineId, setGeneratingLineId] = useState<string | null>(null);
 
   useEffect(() => {
     setLines(activeStoryboard?.lines || []);
@@ -141,6 +143,78 @@ export const StoryboardArea: React.FC = () => {
     }
   };
 
+  /** 图生图：基于当前镜头描述生成画面 */
+  const handleImageToImage = useCallback(async (line: StoryboardLine) => {
+    if (!line.description.trim()) {
+      showToast({ type: 'warning', title: '描述为空', message: '请先填写镜头描述再生成画面。' });
+      return;
+    }
+
+    setGeneratingLineId(line.id);
+    try {
+      await createImageGeneration({
+        projectId: activeState.projectId ?? '',
+        prompt: `图生图风格转换：${line.description}，保持构图不变，转换为电影质感画面`,
+        model: 'dall-e-3',
+        size: '1792x1024',
+        n: 1,
+      });
+      showToast({ type: 'success', title: '图生图任务已提交', message: `分镜 ${line.sceneNumber} 的画面生成任务已创建。` });
+    } catch (error) {
+      showToast({ type: 'error', title: '图生图失败', message: error instanceof Error ? error.message : '提交失败' });
+    } finally {
+      setGeneratingLineId(null);
+    }
+  }, [activeState.projectId, showToast]);
+
+  /** 图生转场：基于当前镜头生成转场视频 */
+  const handleImageToVideo = useCallback(async (line: StoryboardLine) => {
+    if (!line.description.trim()) {
+      showToast({ type: 'warning', title: '描述为空', message: '请先填写镜头描述再生成转场。' });
+      return;
+    }
+
+    setGeneratingLineId(line.id);
+    try {
+      await createVideoGeneration({
+        projectId: activeState.projectId ?? undefined,
+        prompt: `镜头转场动画：${line.description}，时长 ${line.duration}s，平滑过渡`,
+        model: 'wan2.1-t2v-480p',
+        durationSeconds: line.duration,
+        aspectRatio: '16:9',
+      });
+      showToast({ type: 'success', title: '转场视频任务已提交', message: `分镜 ${line.sceneNumber} 的转场视频已创建。` });
+    } catch (error) {
+      showToast({ type: 'error', title: '转场视频失败', message: error instanceof Error ? error.message : '提交失败' });
+    } finally {
+      setGeneratingLineId(null);
+    }
+  }, [activeState.projectId, showToast]);
+
+  /** 自动音效：基于当前镜头描述生成背景音效提示 */
+  const handleAutoSound = useCallback(async (line: StoryboardLine) => {
+    if (!line.description.trim()) {
+      showToast({ type: 'warning', title: '描述为空', message: '请先填写镜头描述再生成音效。' });
+      return;
+    }
+
+    setGeneratingLineId(line.id);
+    try {
+      await createImageGeneration({
+        projectId: activeState.projectId ?? '',
+        prompt: `为以下镜头场景生成音效描述和氛围标签：${line.description}。输出格式：场景音效名称、情绪标签、建议BPM`,
+        model: 'dall-e-3',
+        size: '1024x1024',
+        n: 1,
+      });
+      showToast({ type: 'success', title: '音效分析任务已提交', message: `分镜 ${line.sceneNumber} 的音效分析已创建。` });
+    } catch (error) {
+      showToast({ type: 'error', title: '音效分析失败', message: error instanceof Error ? error.message : '提交失败' });
+    } finally {
+      setGeneratingLineId(null);
+    }
+  }, [activeState.projectId, showToast]);
+
   if (!activeStoryboard && lines.length === 0) {
     return (
       <div className={styles.emptyContainer}>
@@ -224,14 +298,26 @@ export const StoryboardArea: React.FC = () => {
                   </div>
                 )}
                 <div className={styles.tools}>
-                  <button className={styles.toolBtn}>
-                    <ImageIcon size={14} /> 图生图
+                  <button
+                    className={styles.toolBtn}
+                    onClick={() => void handleImageToImage(line)}
+                    disabled={generatingLineId === line.id}
+                  >
+                    {generatingLineId === line.id ? <LoaderCircle size={14} className={styles.iconSpin} /> : <ImageIcon size={14} />} 图生图
                   </button>
-                  <button className={styles.toolBtn}>
-                    <Video size={14} /> 图生转场
+                  <button
+                    className={styles.toolBtn}
+                    onClick={() => void handleImageToVideo(line)}
+                    disabled={generatingLineId === line.id}
+                  >
+                    {generatingLineId === line.id ? <LoaderCircle size={14} className={styles.iconSpin} /> : <Video size={14} />} 图生转场
                   </button>
-                  <button className={styles.toolBtn}>
-                    <Music size={14} /> 自动音效
+                  <button
+                    className={styles.toolBtn}
+                    onClick={() => void handleAutoSound(line)}
+                    disabled={generatingLineId === line.id}
+                  >
+                    {generatingLineId === line.id ? <LoaderCircle size={14} className={styles.iconSpin} /> : <Music size={14} />} 自动音效
                   </button>
                 </div>
               </div>

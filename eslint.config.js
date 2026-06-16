@@ -11,13 +11,7 @@ import eslintConfigPrettier from 'eslint-config-prettier';
 export default [
   /** 全局忽略目录 */
   {
-    ignores: [
-      'dist/**',
-      'node_modules/**',
-      'server/**',
-      '*.js',
-      '*.cjs',
-    ],
+    ignores: ['dist/**', 'node_modules/**', 'server/**', '*.js', '*.cjs'],
   },
 
   /** 基础推荐规则 + TypeScript 配置 */

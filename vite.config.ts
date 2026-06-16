@@ -15,6 +15,9 @@ export default defineConfig({
   build: {
     chunkSizeWarningLimit: 600,
     rollupOptions: {
+      input: {
+        main: 'src/main.tsx',
+      },
       output: {
         manualChunks(id) {
           if (!id.includes('node_modules')) {
@@ -54,10 +57,10 @@ export default defineConfig({
     host: host || '127.0.0.1',
     hmr: host
       ? {
-          protocol: 'ws',
-          host,
-          port: 5174,
-        }
+        protocol: 'ws',
+        host,
+        port: 5174,
+      }
       : undefined,
     watch: {
       ignored: ['**/src-tauri/**'],

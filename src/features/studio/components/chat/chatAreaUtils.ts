@@ -1,4 +1,4 @@
-import type { Asset, MessageAttachment, MessageMeta, ResourceRef } from '../../../../types';
+import type { Asset, Message, MessageAttachment, MessageMeta, ResourceRef } from '../../../../types';
 
 export function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -216,6 +216,93 @@ export function resolveMentionedAsset(
   }
 
   return activeAssets.filter((asset) => asset.name === assetValue).sort(sortCandidates)[0];
+}
+
+export type CollaborationReadinessHint = {
+  ready: boolean;
+  entryMessageId?: string;
+  reason: string;
+  signals: string[];
+};
+
+const COLLAB_CREATIVE_KEYWORDS = [
+  '短剧',
+  '视频',
+  '故事',
+  '剧情',
+  '剧本',
+  '分镜',
+  '角色',
+  '大纲',
+  '广告',
+  '宣传片',
+  '产品',
+  '海报',
+];
+
+const COLLAB_DETAIL_KEYWORDS = [
+  '受众',
+  '人群',
+  '平台',
+  '风格',
+  '集',
+  '分钟',
+  '预算',
+  '目标',
+  '主题',
+  '卖点',
+  '节奏',
+  '场景',
+];
+
+export function detectCollaborationReadiness(
+  messages: Message[],
+  hasActiveProject: boolean,
+): CollaborationReadinessHint {
+  if (!hasActiveProject) {
+    return { ready: false, reason: '需要先进入项目对话', signals: [] };
+  }
+
+  const userMessages = messages.filter(
+    (message) => message.role === 'user' && message.content.trim().length > 0,
+  );
+  const completedAiMessages = messages.filter(
+    (message) =>
+      message.role === 'ai' &&
+      message.status !== 'pending' &&
+      message.content.trim().length > 0,
+  );
+
+  if (userMessages.length === 0 || completedAiMessages.length === 0) {
+    return { ready: false, reason: '需要至少一轮用户需求和 AI 回复', signals: [] };
+  }
+
+  const combined = messages
+    .map((message) => message.content)
+    .join('\n')
+    .toLowerCase();
+  const creativeSignals = COLLAB_CREATIVE_KEYWORDS.filter((keyword) =>
+    combined.includes(keyword.toLowerCase()),
+  );
+  const detailSignals = COLLAB_DETAIL_KEYWORDS.filter((keyword) =>
+    combined.includes(keyword.toLowerCase()),
+  );
+  const explicitReady = /可以开始|开始制作|进入制作|生成大纲|确认方案|按这个做|就这样/.test(
+    combined,
+  );
+  const enoughConversation = userMessages.length >= 2 || combined.length >= 180;
+  const ready =
+    creativeSignals.length > 0 &&
+    (explicitReady || enoughConversation || detailSignals.length >= 2);
+
+  return {
+    ready,
+    entryMessageId: completedAiMessages[completedAiMessages.length - 1]?.id,
+    reason: ready
+      ? '基础创意信息已具备进入制作协同的条件'
+      : '还需要继续补充创意目标、受众、结构或风格',
+    signals: [...creativeSignals.slice(0, 3), ...detailSignals.slice(0, 3)],
+  };
 }
 
 export function extractMessageResourceRefs(

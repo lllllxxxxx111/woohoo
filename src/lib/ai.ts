@@ -1,5 +1,23 @@
 import type { AiProvider, AiSettings } from '../types';
 import { logger } from './logger';
+import { getServerBaseUrl } from './serverApi';
+
+/** 获取认证请求头 */
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  try {
+    const rawSession = window.localStorage.getItem('woohoo-server-session-v1');
+    if (rawSession) {
+      const session = JSON.parse(rawSession) as { token?: string };
+      if (session.token) {
+        headers['Authorization'] = `Bearer ${session.token}`;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return headers;
+}
 
 export interface AiProviderPreset {
   label: string;
@@ -371,9 +389,9 @@ export function validateAiSettings(settings: Partial<AiSettings> | null | undefi
     errors.push('Frequency Penalty 需在 -2 到 2 之间');
   }
 
-  /** 验证最大Token数 */
+  /** 验证最大输出上限 */
   if (!Number.isFinite(settings?.maxTokens) || (settings?.maxTokens ?? 0) < 1) {
-    errors.push('Max Tokens 需大于 0');
+    errors.push('最大输出上限需大于 0');
   }
 
   return errors;
@@ -895,8 +913,11 @@ function normalizeErrorMessage(message: unknown, status: number): string {
  * 取消正在运行或排队的AI任务
  */
 export async function cancelTask(taskId: string): Promise<void> {
-  const response = await fetch(`/api/ai/tasks/${taskId}`, {
+  const baseUrl = await getServerBaseUrl();
+  const headers = await getAuthHeaders();
+  const response = await fetch(`${baseUrl}/api/ai/tasks/${taskId}`, {
     method: 'DELETE',
+    headers,
   });
 
   if (!response.ok) {
@@ -909,8 +930,11 @@ export async function cancelTask(taskId: string): Promise<void> {
  * 彻底删除已完成的任务
  */
 export async function removeTask(taskId: string): Promise<void> {
-  const response = await fetch(`/api/ai/tasks/${taskId}/remove`, {
+  const baseUrl = await getServerBaseUrl();
+  const headers = await getAuthHeaders();
+  const response = await fetch(`${baseUrl}/api/ai/tasks/${taskId}/remove`, {
     method: 'DELETE',
+    headers,
   });
 
   if (!response.ok) {

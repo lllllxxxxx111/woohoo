@@ -5,7 +5,7 @@
  * 以及编排 ChatInputArea、AgentSidePanel、ProjectCreateModal 等子组件。
  */
 import React, { Suspense, lazy, useEffect, useState, useMemo, useCallback } from 'react';
-import { Settings2, Bot, LoaderCircle, Sparkles, Square } from 'lucide-react';
+import { Settings2, Bot, LoaderCircle, Sparkles, Square, Users } from 'lucide-react';
 import { Button, Tag, Empty, Avatar, Typography, Space } from '@arco-design/web-react';
 import { useAppStore } from '../../../../store';
 import { useShallow } from 'zustand/react/shallow';
@@ -15,6 +15,8 @@ import { AI_PROVIDER_PRESETS } from '../../../../lib/ai';
 import {
   listServerAgents,
   updateServerAgent,
+  createCollaborationSession,
+  dispatchCollaboration,
 } from '../../../../lib/serverApi';
 import type { CreateAgentInput } from '../../../../lib/serverApi';
 import type { AgentContact } from '../../../../types';
@@ -25,6 +27,8 @@ import { useMessageActions } from './hooks/useMessageActions';
 import { ChatInputArea } from './ChatInputArea';
 import { AgentSidePanel } from './AgentSidePanel';
 import { ProjectCreateModal } from './ProjectCreateModal';
+import { CollaborationStatus } from './CollaborationStatus';
+import { CollaborationAlert } from './CollaborationAlert';
 import styles from './ChatArea.module.css';
 
 const AgentDetailModal = lazy(() => import('./AgentDetailModal'));
@@ -49,6 +53,9 @@ export const ChatArea: React.FC = () => {
     isServerWorkspaceReady,
     setActiveProject,
     setSettingsOpen,
+    activeCollaborationSession,
+    activeCollaborationAssignments,
+    collaborationLoopCheckResult,
   } = useAppStore(
     useShallow((state) => ({
       projects: state.projects,
@@ -62,6 +69,9 @@ export const ChatArea: React.FC = () => {
       isServerWorkspaceReady: state.isServerWorkspaceReady,
       setActiveProject: state.setActiveProject,
       setSettingsOpen: state.setSettingsOpen,
+      activeCollaborationSession: state.activeCollaborationSession,
+      activeCollaborationAssignments: state.activeCollaborationAssignments,
+      collaborationLoopCheckResult: state.collaborationLoopCheckResult,
     })),
   );
 
@@ -225,6 +235,55 @@ export const ChatArea: React.FC = () => {
     setSelectedAgent(null);
   }, []);
 
+  /** 启动协同会话：创建会话并分派当前项目智能体 */
+  const [isStartingCollaboration, setIsStartingCollaboration] = useState(false);
+  const handleStartCollaboration = useCallback(async () => {
+    if (!activeProject || !activeState.chatSessionId) {
+      showToast({ type: 'warning', title: '无法启动协同', message: '请先选择项目和对话。' });
+      return;
+    }
+
+    setIsStartingCollaboration(true);
+    try {
+      const session = await createCollaborationSession({
+        projectId: activeProject.id,
+        conversationId: activeState.chatSessionId,
+      });
+
+      useAppStore.getState().setCollaborationSession(session);
+
+      const projectAgents = agentContacts.filter((a) =>
+        activeProject.agentRoster?.some((r) => r.id === a.id),
+      );
+
+      if (projectAgents.length > 0) {
+        const dispatchResult = await dispatchCollaboration(session.id, {
+          assignments: projectAgents.map((agent) => ({
+            agentId: agent.id,
+            taskType: agent.role || 'general',
+            goal: agent.systemPrompt?.slice(0, 200) || `执行${agent.role || '通用'}任务`,
+          })),
+        });
+
+        useAppStore.getState().setCollaborationAssignments(dispatchResult.assignments);
+      }
+
+      showToast({
+        type: 'success',
+        title: '协同会话已启动',
+        message: `会话ID: ${session.id.slice(0, 8)}...，已分派 ${projectAgents.length} 个智能体`,
+      });
+    } catch (error) {
+      showToast({
+        type: 'error',
+        title: '启动协同失败',
+        message: error instanceof Error ? error.message : '未知错误',
+      });
+    } finally {
+      setIsStartingCollaboration(false);
+    }
+  }, [activeProject, activeState.chatSessionId, agentContacts, showToast]);
+
   /** 会话切换时重置消息操作状态 */
   useEffect(() => {
     messageActions.setEditingMessage(null);
@@ -266,6 +325,19 @@ export const ChatArea: React.FC = () => {
             </Space>
           </div>
           <div className={styles.headerActions}>
+            {activeProject && !activeCollaborationSession && (
+              <Button
+                type="secondary"
+                shape="round"
+                size="small"
+                icon={<Users size={14} />}
+                onClick={() => void handleStartCollaboration()}
+                loading={isStartingCollaboration}
+                style={{ fontSize: '12px' }}
+              >
+                启动协同
+              </Button>
+            )}
             {!activeProject && (
               <Button
                 type="primary"
@@ -291,6 +363,15 @@ export const ChatArea: React.FC = () => {
             </Button>
           </div>
         </div>
+
+        {/* 协同状态展示 */}
+        {activeCollaborationSession && (
+          <CollaborationStatus
+            session={activeCollaborationSession}
+            assignments={activeCollaborationAssignments}
+          />
+        )}
+        <CollaborationAlert loopCheckResult={collaborationLoopCheckResult} />
 
         {/* 消息列表 */}
         <div
@@ -403,33 +484,33 @@ export const ChatArea: React.FC = () => {
             );
             return isAiResponding && !hasStreamingMessage;
           })() && (
-            <div className={`${styles.messageWrapper} ${styles.ai}`}>
-              <Avatar size={34} style={{ backgroundColor: 'var(--color-fill-1)' }}>
-                <Bot size={18} />
-              </Avatar>
-              <div className={styles.messageBody}>
-                <div className={`${styles.messageContent} ${styles.thinkingBubble}`}>
-                  <LoaderCircle size={14} className={styles.spinner} style={{ marginRight: 8 }} />
-                  <span style={{ fontSize: '13px' }}>正在为您构建深度回复...</span>
-                  <button
-                    className={styles.cancelThinkingBtn}
-                    onClick={() => {
-                      void messageActions.handleCancelPendingTasks();
-                    }}
-                    title={
-                      messageActions.pendingCancelableTaskIds.length > 0
-                        ? '停止等待'
-                        : '当前无可取消任务'
-                    }
-                    type="button"
-                    disabled={messageActions.pendingCancelableTaskIds.length === 0}
-                  >
-                    <Square size={12} />
-                  </button>
+              <div className={`${styles.messageWrapper} ${styles.ai}`}>
+                <Avatar size={34} style={{ backgroundColor: 'var(--color-fill-1)' }}>
+                  <Bot size={18} />
+                </Avatar>
+                <div className={styles.messageBody}>
+                  <div className={`${styles.messageContent} ${styles.thinkingBubble}`}>
+                    <LoaderCircle size={14} className={styles.spinner} style={{ marginRight: 8 }} />
+                    <span style={{ fontSize: '13px' }}>正在为您构建深度回复...</span>
+                    <button
+                      className={styles.cancelThinkingBtn}
+                      onClick={() => {
+                        void messageActions.handleCancelPendingTasks();
+                      }}
+                      title={
+                        messageActions.pendingCancelableTaskIds.length > 0
+                          ? '停止等待'
+                          : '当前无可取消任务'
+                      }
+                      type="button"
+                      disabled={messageActions.pendingCancelableTaskIds.length === 0}
+                    >
+                      <Square size={12} />
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
+            )}
 
           <div ref={messageGroupsState.bottomRef}></div>
         </div>

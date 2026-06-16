@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   Button,
+  Card,
   Table,
   Space,
   Typography,
@@ -24,6 +25,7 @@ import {
 import { useToast } from '../../context/useToast';
 import { AI_PROVIDER_OPTIONS, AI_PROVIDER_PRESETS, normalizeAiBaseUrl } from '../../lib/ai';
 import type { AiProvider, AiSettings } from '../../types';
+import styles from './SettingsSection.module.css';
 
 const { Text, Paragraph } = Typography;
 
@@ -32,7 +34,7 @@ type ServerAiEndpoint = Awaited<ReturnType<typeof listServerAiEndpoints>>[number
 type EndpointManagementProps = {
   currentSettings: AiSettings;
   currentEndpointId?: string | null;
-  onApplySettings?: (settings: AiSettings) => void;
+  onApplySettings?: (settings: AiSettings, endpointId?: string | null) => void;
 };
 
 /** 规范化基础 URL，去除首尾空格和末尾斜杠 */
@@ -40,12 +42,11 @@ function normalizeBaseUrl(value: string) {
   return value.trim().replace(/\/+$/, '');
 }
 
-/** 判断端点配置是否与给定设置完全匹配（服务商、URL、模型） */
+/** 判断端点配置是否与给定设置的连接信息匹配（服务商、URL） */
 function endpointMatchesSettings(endpoint: ServerAiEndpoint, settings: AiSettings) {
   return (
     endpoint.provider.trim().toLowerCase() === settings.provider.trim().toLowerCase() &&
-    normalizeBaseUrl(endpoint.baseUrl) === normalizeBaseUrl(settings.baseUrl) &&
-    (endpoint.defaultModel?.trim() || '') === settings.model.trim()
+    normalizeBaseUrl(endpoint.baseUrl) === normalizeBaseUrl(settings.baseUrl)
   );
 }
 
@@ -129,6 +130,7 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
     form.resetFields();
     form.setFieldsValue({
       ...AI_PROVIDER_PRESETS['openai'],
+      provider: 'openai',
       forceStreamFallback: true,
     });
     setVisible(true);
@@ -396,7 +398,7 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
       }
 
       if (canRunConnectivityTest && connectivityVerified !== false) {
-        onApplySettings?.(appliedSettings);
+        onApplySettings?.(appliedSettings, savedEndpointId);
       }
 
       if (!canRunConnectivityTest) {
@@ -505,30 +507,41 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
 
   return (
     <>
-      <Space direction="vertical" size="large" style={{ width: '100%' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <Text bold style={{ display: 'block' }}>
-              多模型引擎通道管理
-            </Text>
-            <Paragraph type="secondary" style={{ margin: 0, fontSize: 13 }}>
-              添加不同的 API Keys 以便在系统中无缝切换调用不同渠道的 AI 原生大模型能力。
-            </Paragraph>
+      <Space direction="vertical" size="large" className={styles.page}>
+        <Card bordered={false} className={styles.heroCard}>
+          <div className={styles.heroRow}>
+            <div>
+              <Text type="secondary" style={{ display: 'block', marginBottom: 6 }}>
+                API 通道管理
+              </Text>
+              <h3 className={styles.heroTitle}>统一管理服务商、接口地址和默认模型</h3>
+              <Paragraph type="secondary" className={styles.heroDescription}>
+                每个通道都可以单独测试连通性。保存后会自动同步为当前默认通道，供对话、生图和制作流程复用。
+              </Paragraph>
+            </div>
+            <div className={styles.heroActions}>
+              <Button type="outline" loading={loading} onClick={() => void fetchEndpoints()}>
+                刷新列表
+              </Button>
+              <Button type="primary" icon={<Plus size={16} />} onClick={handleCreate}>
+                新增通道
+              </Button>
+            </div>
           </div>
-          <Button type="primary" icon={<Plus size={16} />} onClick={handleCreate}>
-            新增 API 通道
-          </Button>
-        </div>
-        <Table
-          rowKey="id"
-          columns={columns}
-          data={endpoints}
-          loading={loading}
-          pagination={false}
-          border={false}
-          hover={true}
-          style={{ background: 'var(--color-bg-2)' }}
-        />
+        </Card>
+
+        <Card bordered={false} className={styles.sectionCard}>
+          <Table
+            rowKey="id"
+            columns={columns}
+            data={endpoints}
+            loading={loading}
+            pagination={false}
+            border={false}
+            hover={true}
+            style={{ background: 'transparent' }}
+          />
+        </Card>
       </Space>
 
       <Modal
@@ -558,7 +571,8 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
         }
       >
         <Form form={form} layout="vertical">
-          <Form.Item label="服务商类型 (Provider)" field="provider" rules={[{ required: true }]}>
+          <div className={styles.formGrid}>
+            <Form.Item label="服务商类型" field="provider" rules={[{ required: true }]}>
             <Select onChange={(val) => handleProviderChange(val as AiProvider)}>
               {AI_PROVIDER_OPTIONS.map((opt) => (
                 <Select.Option key={opt.value} value={opt.value}>
@@ -566,25 +580,17 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
                 </Select.Option>
               ))}
             </Select>
-          </Form.Item>
-          <Form.Item
-            label="通道接口地址 (Base URL)"
-            field="baseUrl"
-            rules={[{ required: true }]}
-            help="必须输入完整的服务请求前缀。例如: https://api.openai.com/v1"
-          >
-            <Input placeholder="https://..." />
-          </Form.Item>
+            </Form.Item>
+            <Form.Item label="通道接口地址" field="baseUrl" rules={[{ required: true }]}>
+              <Input placeholder="https://..." />
+            </Form.Item>
+          </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-            <Form.Item label="缺省首选模型 (Default Model)" field="model">
+          <div className={styles.formGrid}>
+            <Form.Item label="缺省首选模型" field="model">
               <Input placeholder="例如: gpt-4o" />
             </Form.Item>
-            <Form.Item
-              label="授权密钥 (API Key)"
-              field="apiKey"
-              extra={editingId ? '留空将保留原密钥不变' : ''}
-            >
+            <Form.Item label="授权密钥" field="apiKey" extra={editingId ? '留空将保留原密钥不变' : ''}>
               <Input
                 placeholder="sk-..."
                 type={apiKeyVisible ? 'text' : 'password'}
@@ -610,14 +616,14 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
               />
             </Form.Item>
           </div>
-          <Form.Item
-            label="流式输出 (Stream)"
-            field="forceStreamFallback"
-            triggerPropName="checked"
-            extra="开启后优先使用流式请求，兼容只支持流式的 API 中转服务"
-          >
-            <Switch checkedText="流式" uncheckedText="非流式" />
-          </Form.Item>
+          <div className={styles.fieldNote}>
+            模型名会作为默认提示写入端点配置，但实际请求仍可由当前通道与任务参数决定。
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <Form.Item field="forceStreamFallback" triggerPropName="checked">
+              <Switch checkedText="流式" uncheckedText="非流式" />
+            </Form.Item>
+          </div>
         </Form>
       </Modal>
     </>

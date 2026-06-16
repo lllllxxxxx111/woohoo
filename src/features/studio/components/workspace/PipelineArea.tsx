@@ -29,7 +29,7 @@ export const PipelineArea: React.FC = () => {
   const renderCurrentStep = () => {
     switch (activeStep) {
       case 'outline':
-        return <OutlineView />;
+        return <OutlineView onAdvanceToScript={() => setActiveStep('script')} />;
       case 'script':
         return <ScriptView />;
       case 'chapters':

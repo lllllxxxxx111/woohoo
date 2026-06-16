@@ -24,6 +24,8 @@ use super::model::*;
 pub struct PipelineRunFilter {
     #[serde(alias = "projectId")]
     pub project_id: Option<String>,
+    #[serde(alias = "conversationId")]
+    pub conversation_id: Option<String>,
     pub status: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
@@ -38,7 +40,17 @@ pub async fn create_pipeline_run(
     Extension(user_id): Extension<UserId>,
     Json(req): Json<CreatePipelineRunReq>,
 ) -> AppResult<(StatusCode, Json<PipelineRun>)> {
-    if !req.beta_enabled {
+    let (status, run) = create_pipeline_run_for_user(&state.db, &user_id.0, req, true).await?;
+    Ok((status, Json(run)))
+}
+
+pub(crate) async fn create_pipeline_run_for_user(
+    pool: &SqlitePool,
+    user_id: &str,
+    req: CreatePipelineRunReq,
+    enforce_beta_gate: bool,
+) -> AppResult<(StatusCode, PipelineRun)> {
+    if enforce_beta_gate && !req.beta_enabled {
         return Err(AppError::Validation(
             "该流程为 Beta 功能，请先在设置中开启“多智能体自动编排（Beta）”".into(),
         ));
@@ -51,14 +63,14 @@ pub async fn create_pipeline_run(
     let existing = sqlx::query_as::<_, (String,)>(
         "SELECT id FROM pipeline_runs WHERE user_id = ? AND idempotency_key = ? AND status IN ('queued', 'running', 'paused')"
     )
-    .bind(&user_id.0)
+    .bind(user_id)
     .bind(&idempotency_key)
-    .fetch_optional(&state.db)
+    .fetch_optional(pool)
     .await?;
 
     if let Some((existing_id,)) = existing {
-        let run = get_run_by_id(&state.db, &user_id.0, &existing_id).await?;
-        return Ok((StatusCode::CONFLICT, Json(run)));
+        let run = get_run_by_id(pool, user_id, &existing_id).await?;
+        return Ok((StatusCode::CONFLICT, run));
     }
 
     let run_id = Uuid::new_v4().to_string();
@@ -73,14 +85,14 @@ pub async fn create_pipeline_run(
         RETURNING *",
     )
     .bind(&run_id)
-    .bind(&user_id.0)
+    .bind(user_id)
     .bind(&req.project_id)
     .bind(&req.conversation_id)
     .bind(&req.pipeline_type)
     .bind(&req.trigger_source)
     .bind(&idempotency_key)
     .bind(total_steps)
-    .fetch_one(&state.db)
+    .fetch_one(pool)
     .await?;
 
     for step_req in &req.steps {
@@ -112,11 +124,11 @@ pub async fn create_pipeline_run(
         .bind(review_policy_json)
         .bind(max_retries)
         .bind(input_summary)
-        .execute(&state.db)
+        .execute(pool)
         .await?;
 
         log_pipeline_event(
-            &state.db,
+            pool,
             &run_id,
             None,
             "step_queued",
@@ -131,7 +143,7 @@ pub async fn create_pipeline_run(
     }
 
     log_pipeline_event(
-        &state.db,
+        pool,
         &run_id,
         None,
         "created",
@@ -145,7 +157,7 @@ pub async fn create_pipeline_run(
     )
     .await?;
 
-    Ok((StatusCode::CREATED, Json(run)))
+    Ok((StatusCode::CREATED, run))
 }
 
 /**
@@ -173,10 +185,18 @@ pub async fn get_pipeline_run(
     .fetch_all(&state.db)
     .await?;
 
+    let outputs = sqlx::query_as::<_, PipelineStepOutput>(
+        "SELECT * FROM pipeline_step_outputs WHERE run_id = ? ORDER BY created_at DESC LIMIT 50",
+    )
+    .bind(&id)
+    .fetch_all(&state.db)
+    .await?;
+
     Ok(Json(PipelineRunSummary {
         run,
         steps,
         recent_events: events,
+        outputs,
     }))
 }
 
@@ -224,6 +244,10 @@ pub async fn list_pipeline_runs(
         conditions.push("project_id = ?".to_string());
         values.push(project_id.clone());
     }
+    if let Some(conversation_id) = &filter.conversation_id {
+        conditions.push("conversation_id = ?".to_string());
+        values.push(conversation_id.clone());
+    }
     if let Some(status) = &filter.status {
         conditions.push("status = ?".to_string());
         values.push(status.clone());
@@ -231,7 +255,7 @@ pub async fn list_pipeline_runs(
 
     let where_clause = conditions.join(" AND ");
     let query = format!(
-        "SELECT * FROM pipeline_runs WHERE {} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        "SELECT * FROM pipeline_runs WHERE {} ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
         where_clause
     );
 

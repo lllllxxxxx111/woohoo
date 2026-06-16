@@ -1,5 +1,8 @@
 export type ProjectResponsibilityKind = 'design' | 'review' | 'editor' | 'manager' | 'custom';
 
+/** AI 消息执行模式：task=异步任务 / sync=同步等待 / direct=直接返回 */
+export type ExecutionMode = 'task' | 'sync' | 'direct';
+
 export interface ProjectRoleCounts {
   design: number;
   review: number;
@@ -194,6 +197,7 @@ export interface Message {
 export interface Asset {
   id: string;
   projectId: string;
+  ownerUserId?: string;
   projectName?: string;
   name: string;
   type: 'image' | 'video' | 'audio' | 'document';
@@ -230,7 +234,14 @@ export interface Storyboard {
 export type ActiveState = {
   projectId: string | null;
   chatSessionId: string | null;
-  currentTab: 'chat' | 'pipeline' | 'assets' | 'automation' | 'skills' | 'preview';
+  currentTab:
+  | 'chat'
+  | 'pipeline'
+  | 'imageGeneration'
+  | 'assets'
+  | 'automation'
+  | 'skills'
+  | 'preview';
 };
 
 export interface AgentProjectHistory {
@@ -306,4 +317,148 @@ export interface AiSettings {
   promptOptimizerBetaEnabled: boolean;
   pipelineRetryBackoffSec: number;
   pipelineRetryMaxBackoffSec: number;
+  assistantActionsEnabled?: boolean;
+  maxActionsPerResponse?: number;
+  actionProjectScope?: string;
+  requireConfirmationFor?: string[];
+}
+
+export type CollaborationSessionState =
+  | 'discovery'
+  | 'delegating'
+  | 'resolving_questions'
+  | 'workspace_admission'
+  | 'workspace_execution'
+  | 'completed'
+  | 'halted';
+
+export type CollaborationAssignmentStatus =
+  | 'idle'
+  | 'assigned'
+  | 'questioning'
+  | 'ready'
+  | 'running'
+  | 'blocked'
+  | 'done'
+  | 'failed';
+
+export type CollaborationMessageKind = 'assign' | 'question' | 'answer' | 'status' | 'escalation';
+
+export interface CollaborationSession {
+  id: string;
+  userId: string;
+  projectId: string;
+  conversationId: string;
+  entryMessageId?: string;
+  state: CollaborationSessionState;
+  orchestratorAgentId?: string;
+  admissionDecisionJson?: string;
+  pipelineRunId?: string;
+  loopStatusJson?: string;
+  replyQueueJson?: string;
+  roundCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CollaborationAssignment {
+  id: string;
+  sessionId: string;
+  agentId: string;
+  taskType: string;
+  goal: string;
+  inputJson?: string;
+  dependsOnJson?: string;
+  status: CollaborationAssignmentStatus;
+  blockingQuestionCount: number;
+  lastQuestionFingerprint?: string;
+  aiTaskId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CollaborationMessage {
+  id: string;
+  sessionId: string;
+  sourceAgentId?: string;
+  targetAgentId?: string;
+  messageKind: CollaborationMessageKind;
+  content: string;
+  questionFingerprint?: string;
+  replyToMessageId?: string;
+  queueOrder: number;
+  createdAt: string;
+}
+
+export interface CollaborationEvent {
+  id: string;
+  sessionId: string;
+  eventType: string;
+  payloadJson?: string;
+  createdAt: string;
+}
+
+export interface CollaborationSessionSummary {
+  session: CollaborationSession;
+  assignments: CollaborationAssignment[];
+}
+
+export interface CreateCollaborationSessionReq {
+  projectId: string;
+  conversationId: string;
+  entryMessageId?: string;
+  orchestratorAgentId?: string;
+}
+
+export interface DispatchAssignmentReq {
+  agentId: string;
+  taskType: string;
+  goal: string;
+  dependsOn?: string[];
+  input?: unknown;
+}
+
+export interface DispatchReq {
+  assignments: DispatchAssignmentReq[];
+}
+
+export interface DispatchResponse {
+  dispatchedCount: number;
+  assignments: CollaborationAssignment[];
+}
+
+export interface SendCollaborationMessageReq {
+  sourceAgentId?: string;
+  targetAgentId?: string;
+  messageKind: CollaborationMessageKind;
+  content: string;
+  questionFingerprint?: string;
+  replyToMessageId?: string;
+}
+
+export interface LoopCheckResponse {
+  loopDetected: boolean;
+  signals: string[];
+  level: number;
+  action: string;
+  message: string;
+}
+
+export interface AdmitResponse {
+  admitted: boolean;
+  pipelineRunId?: string;
+  reason: string;
+  blockingIssues?: BlockingIssue[];
+}
+
+export interface BlockingIssue {
+  assignmentId: string;
+  agentId: string;
+  question: string;
+  status: string;
+}
+
+export interface HaltReq {
+  reason: string;
+  detail?: string;
 }

@@ -15,6 +15,39 @@ export type ServerAiEndpoint = {
   hasApiKey: boolean;
   createdAt: string;
   updatedAt: string;
+  capabilities: ServerAiEndpointCapability[];
+};
+
+export type ServerAiEndpointCapability = {
+  id: string;
+  endpointId: string;
+  capability: string;
+  model?: string | null;
+  pathOverride?: string | null;
+  requestAdapter: string;
+  responseAdapter: string;
+  supportsStream: boolean;
+  supportsTools: boolean;
+  supportsFiles: boolean;
+  enabled: boolean;
+  priority: number;
+  configJson?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type UpsertEndpointCapabilityInput = {
+  capability: string;
+  model?: string;
+  pathOverride?: string;
+  requestAdapter?: string;
+  responseAdapter?: string;
+  supportsStream?: boolean;
+  supportsTools?: boolean;
+  supportsFiles?: boolean;
+  enabled?: boolean;
+  priority?: number;
+  configJson?: string;
 };
 
 type CreateEndpointApiInput = {
@@ -108,10 +141,34 @@ export function createEndpointApi({
     invalidateApiCache(cacheKeys.aiEndpoints);
   };
 
+  const listServerAiEndpointCapabilities = async (endpointId: string) => {
+    return requestApi<ServerAiEndpointCapability[]>(
+      `/api/ai/endpoints/${endpointId}/capabilities`,
+    );
+  };
+
+  const upsertServerAiEndpointCapability = async (
+    endpointId: string,
+    input: UpsertEndpointCapabilityInput,
+  ) => {
+    const capability = await requestApi<ServerAiEndpointCapability>(
+      `/api/ai/endpoints/${endpointId}/capabilities`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(input),
+      },
+    );
+
+    invalidateApiCache(cacheKeys.aiEndpoints);
+    return capability;
+  };
+
   return {
     listServerAiEndpoints,
     createServerAiEndpoint,
     updateServerAiEndpoint,
     deleteServerAiEndpoint,
+    listServerAiEndpointCapabilities,
+    upsertServerAiEndpointCapability,
   };
 }

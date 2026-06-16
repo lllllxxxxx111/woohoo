@@ -1,10 +1,13 @@
 mod ai;
 mod asset;
 mod auth;
+mod billing;
+mod collaboration;
 mod config;
 mod conversation;
 mod db;
 mod error;
+mod image_gen;
 mod middleware; // 速率限制中间件
 mod ops; // 分页查询支持
 mod pagination; // 分页查询支持
@@ -12,6 +15,7 @@ mod pipeline; // 流程运行模型
 mod project;
 mod script;
 mod storyboard;
+mod video_gen;
 mod workspace;
 
 use axum::{
@@ -41,6 +45,7 @@ pub struct AppState {
     pub config: AppConfig,
     pub ai_client: AiClient,
     pub ai_runtime: ai::runtime::AiTaskRuntime,
+    pub collaboration_broadcaster: collaboration::broadcast::CollaborationBroadcaster,
     pub started_at: i64,
 }
 
@@ -102,13 +107,18 @@ async fn main() {
         }
     }
 
+    reconcile_interrupted_image_generations(&pool).await;
+    reconcile_interrupted_video_generations(&pool).await;
+
     let state = AppState {
         db: pool,
         config: config.clone(),
         ai_client,
         ai_runtime,
+        collaboration_broadcaster: collaboration::broadcast::CollaborationBroadcaster::new(),
         started_at,
     };
+    pipeline::orchestrator::reconcile_pipeline_document_assets(&state).await;
     ops::monitor::start_background_workers(state.clone());
     ops::dispatcher::start_dispatcher_worker(state.clone());
     pipeline::orchestrator::start_orchestrator_worker(state.clone());
@@ -371,6 +381,11 @@ async fn main() {
                 .delete(ai::catalog_handlers::delete_endpoint),
         )
         .route(
+            "/api/ai/endpoints/{id}/capabilities",
+            get(ai::catalog_handlers::list_endpoint_capabilities)
+                .put(ai::catalog_handlers::upsert_endpoint_capability),
+        )
+        .route(
             "/api/ai/endpoints/{id}/test",
             post(ai::handlers::test_endpoint_with_saved_key),
         )
@@ -459,6 +474,43 @@ async fn main() {
             "/api/ai/action-audits/consume-token",
             post(ai::policy_handlers::consume_confirmation_token),
         )
+        // 协同会话
+        .route(
+            "/api/collaboration/sessions",
+            post(collaboration::handlers::create_session),
+        )
+        .route(
+            "/api/collaboration/sessions/active",
+            get(collaboration::handlers::get_active_session),
+        )
+        .route(
+            "/api/collaboration/events/stream",
+            get(collaboration::handlers::stream_collaboration_events),
+        )
+        .route(
+            "/api/collaboration/sessions/{id}",
+            get(collaboration::handlers::get_session),
+        )
+        .route(
+            "/api/collaboration/sessions/{id}/dispatch",
+            post(collaboration::handlers::dispatch),
+        )
+        .route(
+            "/api/collaboration/sessions/{id}/messages",
+            get(collaboration::handlers::list_messages).post(collaboration::handlers::send_message),
+        )
+        .route(
+            "/api/collaboration/sessions/{id}/loop-check",
+            post(collaboration::handlers::loop_check),
+        )
+        .route(
+            "/api/collaboration/sessions/{id}/admit",
+            post(collaboration::handlers::admit),
+        )
+        .route(
+            "/api/collaboration/sessions/{id}/halt",
+            post(collaboration::handlers::halt),
+        )
         .route("/api/ops/overview", get(ops::handlers::overview))
         .route("/api/ops/heartbeats", get(ops::handlers::list_heartbeats))
         .route("/api/ops/findings", get(ops::handlers::list_findings))
@@ -480,7 +532,31 @@ async fn main() {
             axum::routing::put(ops::handlers::update_notification_channel)
                 .delete(ops::handlers::delete_notification_channel),
         )
-        .layer(axum_middleware::from_fn_with_state(
+        // 图片生成（Image Studio）
+        .route(
+            "/api/image-gen/generations",
+            post(image_gen::handlers::create_generation).get(image_gen::handlers::list_generations),
+        )
+        .route(
+            "/api/image-gen/generations/{id}",
+            get(image_gen::handlers::get_generation),
+        )
+        // 视频生成
+        .route(
+            "/api/video-gen/generations",
+            post(video_gen::handlers::create_generation).get(video_gen::handlers::list_generations),
+        )
+        .route(
+            "/api/video-gen/generations/{id}",
+            get(video_gen::handlers::get_generation),
+        )
+        // 计费
+        .route("/api/billing/credits", get(billing::handlers::get_credits))
+        .route(
+            "/api/billing/transactions",
+            get(billing::handlers::list_credit_transactions),
+        )
+        .route_layer(axum_middleware::from_fn_with_state(
             state.clone(),
             auth::middleware::auth_middleware,
         ));
@@ -495,8 +571,7 @@ async fn main() {
     let rate_limiter = crate::middleware::create_rate_limiter();
     let auth_rate_limiter = crate::middleware::create_auth_rate_limiter();
 
-    let app = Router::new()
-        .merge(public_routes)
+    let app = public_routes
         .layer(axum::middleware::from_fn_with_state(
             auth_rate_limiter.clone(),
             crate::middleware::rate_limit_middleware,
@@ -515,12 +590,132 @@ async fn main() {
 
     // 启动服务
     tracing::info!("🚀 Server listening on {}", bound_addr);
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }
 
 fn load_env_files() {
     for path in ["server/.env.local", "server/.env", ".env.local", ".env"] {
         let _ = dotenvy::from_filename(path);
+    }
+}
+
+async fn reconcile_interrupted_image_generations(pool: &SqlitePool) {
+    let interrupted = match image_gen::repo::list_interrupted_generations(pool).await {
+        Ok(generations) => generations,
+        Err(error) => {
+            tracing::warn!(
+                "Failed to list interrupted image generation tasks: {}",
+                error
+            );
+            return;
+        }
+    };
+
+    for generation in &interrupted {
+        match billing::repo::refund_outstanding_for_ref(
+            pool,
+            &generation.user_id,
+            "image_generation",
+            &generation.id,
+            "image_generation_interrupted",
+        )
+        .await
+        {
+            Ok(amount) if amount > 0.0 => {
+                tracing::info!(
+                    generation_id = %generation.id,
+                    amount,
+                    "Refunded interrupted image generation charge"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    generation_id = %generation.id,
+                    error = %error,
+                    "Failed to refund interrupted image generation charge"
+                );
+            }
+        }
+    }
+
+    match image_gen::repo::fail_interrupted_generations(pool).await {
+        Ok(count) if count > 0 => {
+            tracing::info!(
+                "Marked {} interrupted image generation tasks as failed",
+                count
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                "Failed to reconcile interrupted image generation tasks: {}",
+                error
+            );
+        }
+    }
+}
+
+/// 对账中断的视频生成任务
+async fn reconcile_interrupted_video_generations(pool: &SqlitePool) {
+    let interrupted = match video_gen::repo::list_interrupted_generations(pool).await {
+        Ok(generations) => generations,
+        Err(error) => {
+            tracing::warn!(
+                "Failed to list interrupted video generation tasks: {}",
+                error
+            );
+            return;
+        }
+    };
+
+    for generation in &interrupted {
+        match billing::repo::refund_outstanding_for_ref(
+            pool,
+            &generation.user_id,
+            "video_generation",
+            &generation.id,
+            "video_generation_interrupted",
+        )
+        .await
+        {
+            Ok(amount) if amount > 0.0 => {
+                tracing::info!(
+                    generation_id = %generation.id,
+                    amount,
+                    "Refunded interrupted video generation charge"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    generation_id = %generation.id,
+                    error = %error,
+                    "Failed to refund interrupted video generation charge"
+                );
+            }
+        }
+    }
+
+    match video_gen::repo::fail_interrupted_generations(pool).await {
+        Ok(count) if count > 0 => {
+            tracing::info!(
+                "Marked {} interrupted video generation tasks as failed",
+                count
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                "Failed to reconcile interrupted video generation tasks: {}",
+                error
+            );
+        }
     }
 }
 

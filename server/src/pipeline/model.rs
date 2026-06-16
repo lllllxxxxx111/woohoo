@@ -151,6 +151,27 @@ pub struct PipelineRunEvent {
  */
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
+pub struct PipelineStepOutput {
+    pub id: String,
+    pub run_id: String,
+    pub step_id: String,
+    pub task_id: Option<String>,
+    pub output_type: String,
+    pub output_json: Option<String>,
+    pub raw_content: Option<String>,
+    pub review_decision: Option<String>,
+    pub review_score: Option<f64>,
+    pub review_issues_json: Option<String>,
+    pub retry_hints_json: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/**
+ * 鍔╃悊鍔ㄤ綔瀹¤鏃ュ織妯″瀷
+ */
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
 pub struct AssistantActionAudit {
     pub id: String,
     pub run_id: Option<String>,
@@ -192,4 +213,5 @@ pub struct PipelineRunSummary {
     pub run: PipelineRun,
     pub steps: Vec<PipelineRunStep>,
     pub recent_events: Vec<PipelineRunEvent>,
+    pub outputs: Vec<PipelineStepOutput>,
 }

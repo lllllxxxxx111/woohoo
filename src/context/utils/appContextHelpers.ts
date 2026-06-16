@@ -167,7 +167,7 @@ export function getChatSession(
 
 export function sanitizeActiveState(projects: Project[], state: ActiveState): ActiveState {
   if (!projects.length) {
-    return { projectId: null, chatSessionId: null, currentTab: 'chat' };
+    return { projectId: null, chatSessionId: null, currentTab: state.currentTab };
   }
 
   const project = state.projectId
@@ -178,7 +178,7 @@ export function sanitizeActiveState(projects: Project[], state: ActiveState): Ac
     return {
       projectId: projects[0].id,
       chatSessionId: projects[0].chatSessions[0]?.id ?? null,
-      currentTab: 'chat',
+      currentTab: state.currentTab,
     };
   }
 
@@ -578,11 +578,80 @@ export function endpointMatchesAiSettings(
     baseUrl: string;
     defaultModel?: string | null;
   },
-  settings: AiSettings,
+  settings: Pick<AiSettings, 'provider' | 'baseUrl'>,
 ) {
   return (
-    endpoint.provider.trim().toLowerCase() === settings.provider.trim().toLowerCase() &&
-    normalizeBaseUrl(endpoint.baseUrl) === normalizeBaseUrl(settings.baseUrl) &&
-    (endpoint.defaultModel?.trim() || '') === settings.model.trim()
+    endpointMatchesAiProvider(endpoint, settings) &&
+    normalizeBaseUrl(endpoint.baseUrl) === normalizeBaseUrl(settings.baseUrl)
   );
+}
+
+export function endpointMatchesAiConnection(
+  endpoint: {
+    provider: string;
+    baseUrl: string;
+  },
+  settings: Pick<AiSettings, 'provider' | 'baseUrl'>,
+) {
+  return (
+    endpointMatchesAiProvider(endpoint, settings) &&
+    normalizeBaseUrl(endpoint.baseUrl) === normalizeBaseUrl(settings.baseUrl)
+  );
+}
+
+export function endpointMatchesAiProvider(
+  endpoint: {
+    provider: string;
+  },
+  settings: Pick<AiSettings, 'provider'>,
+) {
+  return endpoint.provider.trim().toLowerCase() === settings.provider.trim().toLowerCase();
+}
+
+export function selectAiEndpointForSettings<
+  TEndpoint extends {
+    id: string;
+    provider: string;
+    baseUrl: string;
+    defaultModel?: string | null;
+    isActive: boolean;
+    hasApiKey: boolean;
+  },
+>(
+  endpoints: TEndpoint[],
+  settings: Pick<AiSettings, 'provider' | 'baseUrl' | 'model'>,
+  currentEndpointId?: string | null,
+) {
+  const usableProviderEndpoints = endpoints.filter(
+    (endpoint) =>
+      endpoint.isActive && endpoint.hasApiKey && endpointMatchesAiProvider(endpoint, settings),
+  );
+  const currentEndpoint = currentEndpointId
+    ? usableProviderEndpoints.find((endpoint) => endpoint.id === currentEndpointId)
+    : undefined;
+
+  if (currentEndpoint) {
+    return currentEndpoint;
+  }
+
+  return (
+    usableProviderEndpoints.find((endpoint) => endpointMatchesAiSettings(endpoint, settings)) ??
+    usableProviderEndpoints.find((endpoint) => endpointMatchesAiConnection(endpoint, settings)) ??
+    (usableProviderEndpoints.length === 1 ? usableProviderEndpoints[0] : undefined)
+  );
+}
+
+export function resolveAiTaskRequestModel(
+  endpoint: {
+    provider: string;
+    baseUrl: string;
+  },
+  settings: Pick<AiSettings, 'provider' | 'baseUrl' | 'model'>,
+) {
+  const model = settings.model.trim();
+  if (!model || !endpointMatchesAiConnection(endpoint, settings)) {
+    return undefined;
+  }
+
+  return model;
 }

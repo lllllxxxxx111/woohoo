@@ -23,7 +23,11 @@ import {
   buildHistoryMessages,
   shouldFallbackToDirectAi,
   isUnauthorizedError,
+  endpointMatchesAiConnection,
+  endpointMatchesAiProvider,
   endpointMatchesAiSettings,
+  resolveAiTaskRequestModel,
+  selectAiEndpointForSettings,
 } from './appContextHelpers';
 
 /**
@@ -152,12 +156,12 @@ describe('sanitizeActiveState', () => {
     const result = sanitizeActiveState([], {
       projectId: 'proj-1',
       chatSessionId: 'chat-1',
-      currentTab: 'chat',
+      currentTab: 'imageGeneration',
     });
     expect(result).toEqual({
       projectId: null,
       chatSessionId: null,
-      currentTab: 'chat',
+      currentTab: 'imageGeneration',
     });
   });
 
@@ -166,9 +170,10 @@ describe('sanitizeActiveState', () => {
     const result = sanitizeActiveState([project], {
       projectId: 'invalid',
       chatSessionId: null,
-      currentTab: 'chat',
+      currentTab: 'imageGeneration',
     });
     expect(result.projectId).toBe('proj-1');
+    expect(result.currentTab).toBe('imageGeneration');
   });
 
   it('应在聊天会话 ID 无效时回退到第一个会话', () => {
@@ -573,6 +578,68 @@ describe('isUnauthorizedError', () => {
   });
 });
 
+// ==================== endpointMatchesAiProvider ====================
+
+describe('endpointMatchesAiProvider', () => {
+  const settings: AiSettings = {
+    ...createAiSettings('openai'),
+    provider: 'openai',
+    baseUrl: 'https://api.openai.com/v1',
+    model: 'gpt-5.4',
+  };
+
+  it('matches the same provider even when URL and model are different', () => {
+    const endpoint = {
+      provider: 'OpenAI',
+      baseUrl: 'https://xxcsn.site/v1',
+      defaultModel: 'gpt-5.5',
+    };
+
+    expect(endpointMatchesAiProvider(endpoint, settings)).toBe(true);
+  });
+
+  it('rejects endpoints from a different provider', () => {
+    const endpoint = {
+      provider: 'deepseek',
+      baseUrl: 'https://xxcsn.site/v1',
+      defaultModel: 'gpt-5.5',
+    };
+
+    expect(endpointMatchesAiProvider(endpoint, settings)).toBe(false);
+  });
+});
+
+// ==================== endpointMatchesAiConnection ====================
+
+describe('endpointMatchesAiConnection', () => {
+  const settings: AiSettings = {
+    ...createAiSettings('openai'),
+    provider: 'openai',
+    baseUrl: 'https://api.openai.com/v1',
+    model: 'gpt-5.4',
+  };
+
+  it('matches the same provider and base URL when the model differs', () => {
+    const endpoint = {
+      provider: 'OpenAI',
+      baseUrl: 'https://api.openai.com/v1/',
+      defaultModel: 'gpt-image-1',
+    };
+
+    expect(endpointMatchesAiConnection(endpoint, settings)).toBe(true);
+  });
+
+  it('rejects endpoints on a different base URL', () => {
+    const endpoint = {
+      provider: 'openai',
+      baseUrl: 'https://other.example.com/v1',
+      defaultModel: 'gpt-5.4',
+    };
+
+    expect(endpointMatchesAiConnection(endpoint, settings)).toBe(false);
+  });
+});
+
 // ==================== endpointMatchesAiSettings ====================
 
 describe('endpointMatchesAiSettings', () => {
@@ -619,23 +686,100 @@ describe('endpointMatchesAiSettings', () => {
     expect(endpointMatchesAiSettings(endpoint, settings)).toBe(false);
   });
 
-  it('应在 model 不匹配时返回 false', () => {
+  it('应在 model 不匹配时仍返回 true', () => {
     const endpoint = {
       provider: 'openai',
       baseUrl: 'https://api.openai.com/v1',
       defaultModel: 'gpt-3.5',
     };
-    expect(endpointMatchesAiSettings(endpoint, settings)).toBe(false);
+    expect(endpointMatchesAiSettings(endpoint, settings)).toBe(true);
   });
 
-  it('应在 defaultModel 为 null 且 settings.model 为空时匹配', () => {
+  it('应在 defaultModel 为 null 时匹配', () => {
     const endpoint = {
       provider: 'openai',
       baseUrl: 'https://api.openai.com/v1',
       defaultModel: null,
     };
-    const emptyModelSettings = { ...settings, model: '' };
-    expect(endpointMatchesAiSettings(endpoint, emptyModelSettings)).toBe(true);
+    expect(endpointMatchesAiSettings(endpoint, settings)).toBe(true);
+  });
+});
+
+// ==================== selectAiEndpointForSettings ====================
+
+describe('selectAiEndpointForSettings', () => {
+  const settings: AiSettings = {
+    ...createAiSettings('openai'),
+    provider: 'openai',
+    baseUrl: 'https://api.openai.com/v1',
+    model: 'gpt-5.4',
+  };
+  const endpoint = {
+    id: 'aebb2f5a-16ac-455f-860f-6a228d83a02e',
+    provider: 'openai',
+    baseUrl: 'https://xxcsn.site/v1',
+    defaultModel: 'gpt-5.5',
+    isActive: true,
+    hasApiKey: true,
+  };
+
+  it('selects the only usable provider endpoint even when URL and default model differ', () => {
+    expect(selectAiEndpointForSettings([endpoint], settings)?.id).toBe(endpoint.id);
+  });
+
+  it('selects an explicitly bound provider endpoint first', () => {
+    const secondEndpoint = {
+      ...endpoint,
+      id: 'other-endpoint',
+      baseUrl: settings.baseUrl,
+      defaultModel: settings.model,
+    };
+
+    expect(selectAiEndpointForSettings([secondEndpoint, endpoint], settings, endpoint.id)?.id).toBe(
+      endpoint.id,
+    );
+  });
+
+  it('does not guess when multiple provider endpoints are available and none matches the URL', () => {
+    const secondEndpoint = {
+      ...endpoint,
+      id: 'other-endpoint',
+      baseUrl: 'https://another.example.com/v1',
+    };
+
+    expect(selectAiEndpointForSettings([endpoint, secondEndpoint], settings)).toBeUndefined();
+  });
+});
+
+// ==================== resolveAiTaskRequestModel ====================
+
+describe('resolveAiTaskRequestModel', () => {
+  const endpoint = {
+    provider: 'openai',
+    baseUrl: 'https://xxcsn.site/v1',
+    defaultModel: 'gpt-5.5',
+  };
+
+  it('omits a stale settings model when the selected endpoint URL differs', () => {
+    const settings: AiSettings = {
+      ...createAiSettings('openai'),
+      provider: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-5.4',
+    };
+
+    expect(resolveAiTaskRequestModel(endpoint, settings)).toBeUndefined();
+  });
+
+  it('uses an explicit model when the settings connection matches the endpoint', () => {
+    const settings: AiSettings = {
+      ...createAiSettings('openai'),
+      provider: 'openai',
+      baseUrl: 'https://xxcsn.site/v1',
+      model: 'gpt-4.1',
+    };
+
+    expect(resolveAiTaskRequestModel(endpoint, settings)).toBe('gpt-4.1');
   });
 });
 

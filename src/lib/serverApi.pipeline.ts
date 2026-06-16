@@ -1,3 +1,4 @@
+import { getServerBaseUrl } from './serverApi';
 import type { AiTask, AiUsageBucket, AiUsageRecord, AiUsageSummary } from './serverApi';
 
 type RequestApi = <T>(path: string, init?: RequestInit, retry?: boolean) => Promise<T>;
@@ -85,6 +86,7 @@ export interface PipelineRunSummary {
   run: PipelineRun;
   steps: PipelineRunStep[];
   recentEvents: PipelineRunEvent[];
+  outputs: PipelineStepOutput[];
 }
 
 export interface PipelineRunEvent {
@@ -95,6 +97,22 @@ export interface PipelineRunEvent {
   payloadJson: string | null;
   source: string;
   createdAt: string;
+}
+
+export interface PipelineStepOutput {
+  id: string;
+  runId: string;
+  stepId: string;
+  taskId?: string | null;
+  outputType: string;
+  outputJson?: string | null;
+  rawContent?: string | null;
+  reviewDecision?: string | null;
+  reviewScore?: number | null;
+  reviewIssuesJson?: string | null;
+  retryHintsJson?: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface PipelinePromptOptimization {
@@ -133,6 +151,7 @@ export interface CreatePipelineRunInput {
 
 type ListPipelineRunsParams = {
   projectId?: string;
+  conversationId?: string;
   status?: string;
   limit?: number;
   offset?: number;
@@ -145,6 +164,11 @@ function appendDefinedQuery(query: URLSearchParams, params: Record<string, unkno
     }
   });
 }
+
+export type PipelineSseEvent = {
+  event: string;
+  data: string;
+};
 
 export function createUsageTaskPipelineApi(requestApi: RequestApi) {
   const getUsageSummary = async (params?: UsageQueryParams): Promise<AiUsageSummary> => {
@@ -193,6 +217,7 @@ export function createUsageTaskPipelineApi(requestApi: RequestApi) {
   const listPipelineRuns = async (params?: ListPipelineRunsParams): Promise<PipelineRun[]> => {
     const query = new URLSearchParams();
     if (params?.projectId) query.set('project_id', params.projectId);
+    if (params?.conversationId) query.set('conversation_id', params.conversationId);
     if (params?.status) query.set('status', params.status);
     if (params?.limit) query.set('limit', String(params.limit));
     if (params?.offset) query.set('offset', String(params.offset));
@@ -231,6 +256,78 @@ export function createUsageTaskPipelineApi(requestApi: RequestApi) {
     });
   };
 
+  /**
+   * 订阅 Pipeline Run 的 SSE 事件流
+   * 返回一个 AbortController 供调用方取消订阅
+   */
+  const streamPipelineRun = (
+    runId: string,
+    onEvent: (event: PipelineSseEvent) => void,
+    onError?: (error: Error) => void,
+    onDone?: () => void,
+  ): AbortController => {
+    const controller = new AbortController();
+
+    const rawSession = window.localStorage.getItem('woohoo-server-session-v1');
+    const token = rawSession ? (JSON.parse(rawSession) as { token?: string }).token : undefined;
+
+    void (async () => {
+      try {
+        const baseUrl = await getServerBaseUrl();
+        const url = `${baseUrl}/api/pipelines/runs/${runId}/stream`;
+
+        const response = await fetch(url, {
+          headers: {
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            Accept: 'text/event-stream',
+          },
+          signal: controller.signal,
+        });
+
+        if (!response.ok || !response.body) {
+          throw new Error(`SSE connection failed: ${response.status}`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let currentEvent = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (line.startsWith('event:')) {
+              currentEvent = line.slice(6).trim();
+            } else if (line.startsWith('data:')) {
+              const data = line.slice(5).trim();
+              onEvent({ event: currentEvent || 'message', data });
+
+              if (currentEvent === 'done') {
+                onDone?.();
+                controller.abort();
+                return;
+              }
+            }
+          }
+        }
+
+        onDone?.();
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          onError?.(error instanceof Error ? error : new Error(String(error)));
+        }
+      }
+    })();
+
+    return controller;
+  };
+
   return {
     getUsageSummary,
     getUsageRecords,
@@ -244,5 +341,6 @@ export function createUsageTaskPipelineApi(requestApi: RequestApi) {
     resumePipelineRun,
     cancelPipelineRun,
     retryPipelineStep,
+    streamPipelineRun,
   };
 }
