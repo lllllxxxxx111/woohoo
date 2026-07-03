@@ -192,11 +192,19 @@ pub async fn get_pipeline_run(
     .fetch_all(&state.db)
     .await?;
 
+    let reviews = sqlx::query_as::<_, PipelineManualReview>(
+        "SELECT * FROM pipeline_manual_reviews WHERE run_id = ? ORDER BY created_at DESC LIMIT 50",
+    )
+    .bind(&id)
+    .fetch_all(&state.db)
+    .await?;
+
     Ok(Json(PipelineRunSummary {
         run,
         steps,
         recent_events: events,
         outputs,
+        reviews,
     }))
 }
 
@@ -576,7 +584,7 @@ async fn cancel_pipeline_run_state(
         run_id,
         "cancelled",
         "取消",
-        &["queued", "running", "paused"],
+        &["queued", "running", "paused", "failed"],
         Some(now),
     )
     .await
@@ -673,6 +681,397 @@ fn normalize_step_type(raw: &str) -> &'static str {
         "system" => "system",
         _ => "design",
     }
+}
+
+pub async fn list_review_queue(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Query(filter): Query<ReviewQueueFilter>,
+) -> AppResult<Json<ReviewQueueResponse>> {
+    let limit = filter.limit.unwrap_or(20).clamp(1, 100);
+    let offset = filter.offset.unwrap_or(0).max(0);
+
+    let mut conditions = vec![
+        "r.user_id = ?".to_string(),
+        "(s.status IN ('failed', 'blocked') OR r.error_code = 'MANUAL_REVIEW_REQUIRED')"
+            .to_string(),
+    ];
+    let mut values = vec![user_id.0.clone()];
+
+    if let Some(project_id) = filter.project_id.as_deref().map(str::trim) {
+        if !project_id.is_empty() {
+            conditions.push("r.project_id = ?".to_string());
+            values.push(project_id.to_string());
+        }
+    }
+
+    if let Some(pipeline_type) = filter.pipeline_type.as_deref().map(str::trim) {
+        if !pipeline_type.is_empty() {
+            conditions.push("r.pipeline_type = ?".to_string());
+            values.push(pipeline_type.to_string());
+        }
+    }
+
+    if let Some(status) = filter.status.as_deref().map(str::trim) {
+        if !status.is_empty() {
+            conditions.push("s.status = ?".to_string());
+            values.push(status.to_string());
+        }
+    }
+
+    let where_clause = conditions.join(" AND ");
+    let count_sql = format!(
+        "SELECT COUNT(*)
+         FROM pipeline_runs r
+         INNER JOIN pipeline_run_steps s ON s.run_id = r.id
+         WHERE {}",
+        where_clause
+    );
+    let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
+    for value in &values {
+        count_query = count_query.bind(value);
+    }
+    let total = count_query.fetch_one(&state.db).await?;
+
+    let steps_sql = format!(
+        "SELECT s.id, s.run_id
+         FROM pipeline_runs r
+         INNER JOIN pipeline_run_steps s ON s.run_id = r.id
+         WHERE {}
+         ORDER BY s.updated_at DESC, r.created_at DESC
+         LIMIT ? OFFSET ?",
+        where_clause
+    );
+    let mut steps_query = sqlx::query_as::<_, (String, String)>(&steps_sql);
+    for value in &values {
+        steps_query = steps_query.bind(value);
+    }
+    let step_pairs = steps_query
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await?;
+
+    let mut items = Vec::new();
+    for (step_id, run_id) in step_pairs {
+        let run = match get_run_by_id(&state.db, &user_id.0, &run_id).await {
+            Ok(run) => run,
+            Err(_) => continue,
+        };
+
+        let step = match sqlx::query_as::<_, PipelineRunStep>(
+            "SELECT * FROM pipeline_run_steps WHERE id = ? AND run_id = ?",
+        )
+        .bind(&step_id)
+        .bind(&run_id)
+        .fetch_optional(&state.db)
+        .await?
+        {
+            Some(step) => step,
+            None => continue,
+        };
+
+        let project_name = sqlx::query_scalar::<_, String>("SELECT name FROM projects WHERE id = ?")
+            .bind(&run.project_id)
+            .fetch_optional(&state.db)
+            .await?;
+
+        let conversation_title =
+            sqlx::query_scalar::<_, String>("SELECT title FROM conversations WHERE id = ?")
+                .bind(&run.conversation_id)
+                .fetch_optional(&state.db)
+                .await?;
+
+        let latest_event = sqlx::query_as::<_, PipelineRunEvent>(
+            "SELECT *
+             FROM pipeline_run_events
+             WHERE run_id = ? AND step_id = ?
+             ORDER BY created_at DESC
+             LIMIT 1",
+        )
+        .bind(&run_id)
+        .bind(&step_id)
+        .fetch_optional(&state.db)
+        .await?;
+
+        let latest_error_event = sqlx::query_as::<_, PipelineRunEvent>(
+            "SELECT *
+             FROM pipeline_run_events
+             WHERE run_id = ?
+               AND step_id = ?
+               AND event_type IN ('step_failed', 'failed')
+             ORDER BY created_at DESC
+             LIMIT 1",
+        )
+        .bind(&run_id)
+        .bind(&step_id)
+        .fetch_optional(&state.db)
+        .await?;
+
+        let optimization_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)
+             FROM pipeline_prompt_optimizations
+             WHERE run_id = ? AND step_id = ?",
+        )
+        .bind(&run_id)
+        .bind(&step_id)
+        .fetch_one(&state.db)
+        .await?;
+
+        let review_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)
+             FROM pipeline_manual_reviews
+             WHERE run_id = ? AND step_id = ?",
+        )
+        .bind(&run_id)
+        .bind(&step_id)
+        .fetch_one(&state.db)
+        .await?;
+
+        let latest_review = sqlx::query_as::<_, PipelineManualReview>(
+            "SELECT *
+             FROM pipeline_manual_reviews
+             WHERE run_id = ? AND step_id = ?
+             ORDER BY created_at DESC
+             LIMIT 1",
+        )
+        .bind(&run_id)
+        .bind(&step_id)
+        .fetch_optional(&state.db)
+        .await?;
+
+        items.push(ReviewQueueItem {
+            run,
+            step,
+            latest_event,
+            latest_error_event,
+            optimization_count,
+            review_count,
+            latest_review,
+            project_name,
+            conversation_title,
+        });
+    }
+
+    Ok(Json(ReviewQueueResponse {
+        items,
+        total,
+        limit,
+        offset,
+    }))
+}
+
+pub async fn submit_review_decision(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Path((run_id, step_id)): Path<(String, String)>,
+    Json(req): Json<PipelineReviewDecisionReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    let decision = req.decision.trim().to_ascii_lowercase();
+    if !matches!(decision.as_str(), "retry" | "cancel" | "acknowledge") {
+        return Err(AppError::Validation(
+            "Unsupported review decision. Use retry, cancel, or acknowledge.".into(),
+        ));
+    }
+
+    let note = req
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let run = get_run_by_id(&state.db, &user_id.0, &run_id).await?;
+    let step = sqlx::query_as::<_, PipelineRunStep>(
+        "SELECT * FROM pipeline_run_steps WHERE id = ? AND run_id = ?",
+    )
+    .bind(&step_id)
+    .bind(&run_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Pipeline step not found".into()))?;
+
+    match decision.as_str() {
+        "retry" => {
+            if !["failed", "blocked"].contains(&step.status.as_str()) {
+                return Err(AppError::Validation(
+                    format!("Step status '{}' cannot be retried.", step.status).into(),
+                ));
+            }
+            if !["running", "paused", "failed"].contains(&run.status.as_str()) {
+                return Err(AppError::Validation(
+                    format!("Run status '{}' cannot retry a step.", run.status).into(),
+                ));
+            }
+        }
+        "cancel" => {
+            if ["completed", "cancelled"].contains(&run.status.as_str()) {
+                return Err(AppError::Validation(
+                    format!("Run status '{}' cannot be cancelled.", run.status).into(),
+                ));
+            }
+        }
+        "acknowledge" => {}
+        _ => unreachable!(),
+    }
+
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let review_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO pipeline_manual_reviews (id, user_id, run_id, step_id, decision, note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&review_id)
+    .bind(&user_id.0)
+    .bind(&run_id)
+    .bind(&step_id)
+    .bind(&decision)
+    .bind(&note)
+    .bind(&now)
+    .execute(&state.db)
+    .await?;
+
+    let mut updated_run: Option<PipelineRun> = None;
+    let mut updated_step: Option<PipelineRunStep> = None;
+
+    match decision.as_str() {
+        "retry" => {
+            let step_update = sqlx::query_as::<_, PipelineRunStep>(
+                "UPDATE pipeline_run_steps
+                 SET status = 'retrying',
+                     ai_task_id = NULL,
+                     completed_at = NULL,
+                     output_ref = NULL,
+                     error_message = NULL,
+                     last_error_at = NULL,
+                     run_version = COALESCE(run_version, 1) + 1,
+                     updated_at = ?
+                 WHERE id = ? AND run_id = ?
+                 RETURNING *",
+            )
+            .bind(&now)
+            .bind(&step_id)
+            .bind(&run_id)
+            .fetch_one(&state.db)
+            .await?;
+            updated_step = Some(step_update);
+
+            if run.status == "failed" {
+                updated_run = sqlx::query_as::<_, PipelineRun>(
+                    "UPDATE pipeline_runs
+                     SET status = 'running',
+                         error_message = NULL,
+                         error_code = NULL,
+                         finished_at = NULL,
+                         updated_at = ?
+                     WHERE id = ? AND user_id = ?
+                     RETURNING *",
+                )
+                .bind(&now)
+                .bind(&run_id)
+                .bind(&user_id.0)
+                .fetch_optional(&state.db)
+                .await?;
+
+                log_pipeline_event(
+                    &state.db,
+                    &run_id,
+                    Some(&step_id),
+                    "resumed",
+                    &serde_json::json!({
+                        "reason": "manual_review_retry",
+                        "reviewId": review_id,
+                        "note": note,
+                    }),
+                    "user",
+                )
+                .await?;
+            }
+
+            log_pipeline_event(
+                &state.db,
+                &run_id,
+                Some(&step_id),
+                "step_retry",
+                &serde_json::json!({
+                    "reviewId": review_id,
+                    "stepId": step_id,
+                    "stepName": step.step_name,
+                    "reason": "manual_review_retry",
+                    "note": note,
+                }),
+                "user",
+            )
+            .await?;
+        }
+        "cancel" => {
+            let (run_update, changed) =
+                cancel_pipeline_run_state(&state.db, &user_id.0, &run_id).await?;
+            updated_run = Some(run_update);
+
+            if changed {
+                log_pipeline_event(
+                    &state.db,
+                    &run_id,
+                    Some(&step_id),
+                    "cancelled",
+                    &serde_json::json!({
+                        "reason": "manual_review_cancel",
+                        "reviewId": review_id,
+                        "stepId": step_id,
+                        "stepName": step.step_name,
+                        "note": note,
+                    }),
+                    "user",
+                )
+                .await?;
+            }
+        }
+        "acknowledge" => {}
+        _ => unreachable!(),
+    }
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "reviewId": review_id,
+        "decision": decision,
+        "run": updated_run,
+        "step": updated_step,
+    })))
+}
+
+pub async fn list_step_reviews(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Path((run_id, step_id)): Path<(String, String)>,
+) -> AppResult<Json<Vec<PipelineManualReview>>> {
+    let _run = get_run_by_id(&state.db, &user_id.0, &run_id).await?;
+
+    let exists = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM pipeline_run_steps WHERE id = ? AND run_id = ?",
+    )
+    .bind(&step_id)
+    .bind(&run_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    if exists == 0 {
+        return Err(AppError::NotFound("Pipeline step not found".into()));
+    }
+
+    let reviews = sqlx::query_as::<_, PipelineManualReview>(
+        "SELECT *
+         FROM pipeline_manual_reviews
+         WHERE run_id = ? AND step_id = ?
+         ORDER BY created_at DESC
+         LIMIT 50",
+    )
+    .bind(&run_id)
+    .bind(&step_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(reviews))
 }
 
 #[cfg(test)]

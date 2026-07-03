@@ -4,6 +4,7 @@ import { useAppStore } from '../../../../store';
 import { useShallow } from 'zustand/react/shallow';
 import { Button } from '@arco-design/web-react';
 import type { AiTask } from '../../../../lib/serverApi';
+import { ReviewQueue } from './ReviewQueue';
 import styles from './PipelinePreview.module.css';
 
 export const PipelinePreview: React.FC = () => {
@@ -95,6 +96,8 @@ export const PipelinePreview: React.FC = () => {
           <span>{sseError}</span>
         </div>
       )}
+
+      <ReviewQueue projectId={activeState.projectId} />
 
       <div className={styles.timeline}>
         {tasks.length === 0 ? (

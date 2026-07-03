@@ -150,6 +150,14 @@ async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<String>, sqlx::E
             "017_video_gen",
             include_str!("../migrations/017_video_gen.sql"),
         ),
+        (
+            "020_asset_governance",
+            include_str!("../migrations/020_asset_governance.sql"),
+        ),
+        (
+            "021_pipeline_manual_reviews",
+            include_str!("../migrations/021_pipeline_manual_reviews.sql"),
+        ),
     ] {
         if run_sql_migration(pool, version, migration_sql).await? {
             applied_versions.push(version.to_string());

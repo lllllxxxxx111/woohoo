@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Extension, Multipart, Path, State},
+    extract::{Extension, Multipart, Path, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -16,7 +16,10 @@ use crate::{
 };
 
 use super::{
-    model::{Asset, CreateAssetReq, UpdateAssetReq},
+    model::{
+        Asset, AssetDeleteBlockedResponse, AssetDeleteQuery, AssetReferencesResponse,
+        AssetSearchQuery, AssetWithProject, CreateAssetReq, UpdateAssetReq, UpdateAssetTagsReq,
+    },
     repo,
 };
 
@@ -107,6 +110,26 @@ pub async fn list_assets(
 ) -> AppResult<Json<Vec<Asset>>> {
     ensure_project_access(&state, &user_id.0, &project_id).await?;
     let assets = repo::list_by_project(&state.db, &project_id).await?;
+    Ok(Json(assets))
+}
+
+pub async fn search_assets(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Query(params): Query<AssetSearchQuery>,
+) -> AppResult<Json<Vec<AssetWithProject>>> {
+    if let Some(project_id) = &params.project_id {
+        ensure_project_access(&state, &user_id.0, project_id).await?;
+    }
+
+    if let Some(asset_type) = params.asset_type.as_deref().map(str::trim) {
+        match asset_type {
+            "" | "image" | "video" | "audio" | "document" => {}
+            _ => return Err(AppError::Validation("Unsupported asset type".into())),
+        }
+    }
+
+    let assets = repo::search_assets(&state.db, &user_id.0, &params).await?;
     Ok(Json(assets))
 }
 
@@ -388,10 +411,11 @@ pub async fn update_asset(
         .trim()
         .to_string();
     let url = req.url.unwrap_or(current.url).trim().to_string();
-    let metadata = req
-        .metadata
-        .map(|value| value.to_string())
-        .or(current.metadata);
+    let metadata = if let Some(patch) = req.metadata {
+        Some(repo::merge_metadata(current.metadata.as_deref(), &patch))
+    } else {
+        current.metadata
+    };
 
     validate_asset_fields(&name, &asset_type, &url)?;
 
@@ -407,18 +431,71 @@ pub async fn update_asset(
     Ok(Json(asset))
 }
 
+pub async fn update_asset_tags(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateAssetTagsReq>,
+) -> AppResult<Json<Asset>> {
+    load_asset_owned(&state, &user_id.0, &id).await?;
+    let asset = repo::update_asset_tags(&state.db, &id, &req.tags).await?;
+    Ok(Json(asset))
+}
+
+pub async fn get_asset_references(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Path(id): Path<String>,
+) -> AppResult<Json<AssetReferencesResponse>> {
+    load_asset_owned(&state, &user_id.0, &id).await?;
+    let references = repo::find_asset_references(&state.db, &id).await?;
+    let total_count = references.len();
+
+    Ok(Json(AssetReferencesResponse {
+        asset_id: id,
+        references,
+        total_count,
+        has_references: total_count > 0,
+    }))
+}
+
 pub async fn delete_asset(
     State(state): State<AppState>,
     Extension(user_id): Extension<UserId>,
     Path(id): Path<String>,
-) -> AppResult<StatusCode> {
+    Query(query): Query<AssetDeleteQuery>,
+) -> AppResult<Response> {
     let asset = load_asset_owned(&state, &user_id.0, &id).await?;
+    let references = repo::find_asset_references(&state.db, &id).await?;
+    let force = query.force.unwrap_or(false);
+
+    if !references.is_empty() && !force {
+        let blocked = AssetDeleteBlockedResponse {
+            error: format!(
+                "Asset '{}' is referenced in {} place(s). Remove references or retry with force=true.",
+                asset.name,
+                references.len()
+            ),
+            error_code: "ASSET_HAS_REFERENCES",
+            reference_count: repo::count_asset_references(&state.db, &id).await? as usize,
+            references,
+        };
+        return Ok((StatusCode::CONFLICT, Json(blocked)).into_response());
+    }
+
+    if force {
+        sqlx::query("DELETE FROM storyboard_line_assets WHERE asset_id = ?")
+            .bind(&id)
+            .execute(&state.db)
+            .await?;
+    }
+
     repo::delete_asset(&state.db, &id).await?;
 
     if let Err(error) = cleanup_local_asset_file(&state, &asset).await {
         tracing::warn!(asset_id = %asset.id, error = %error, "删除资产记录后清理本地文件失败");
     }
-    Ok(StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn ensure_project_access(state: &AppState, user_id: &str, project_id: &str) -> AppResult<()> {

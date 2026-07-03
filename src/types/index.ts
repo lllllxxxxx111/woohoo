@@ -208,6 +208,47 @@ export interface Asset {
   updatedAt?: number;
 }
 
+export type AssetReferenceType = 'storyboard' | 'pipelineStep' | 'pipelineStepInput';
+
+export interface AssetReference {
+  refType: AssetReferenceType;
+  projectId: string;
+  projectName: string;
+  title: string;
+  subLocator?: string | null;
+  entityId?: string | null;
+}
+
+export interface AssetReferencesResponse {
+  assetId: string;
+  references: AssetReference[];
+  totalCount: number;
+  hasReferences: boolean;
+}
+
+export interface AssetDeleteBlockedResponse {
+  error: string;
+  errorCode: 'ASSET_HAS_REFERENCES';
+  references: AssetReference[];
+  referenceCount: number;
+}
+
+export interface AssetSearchParams {
+  query?: string;
+  assetType?: Asset['type'];
+  projectId?: string;
+  favoriteOnly?: boolean;
+  ratingMin?: number;
+  tag?: string;
+  sort?: 'recent' | 'name' | 'rating' | 'created';
+  limit?: number;
+  offset?: number;
+}
+
+export type AssetWithProject = Asset & {
+  projectName: string;
+};
+
 export interface Script {
   id: string;
   projectId: string;

@@ -2,6 +2,9 @@ import type {
   AgentContact,
   AiSettings,
   Asset,
+  AssetReferencesResponse,
+  AssetSearchParams,
+  AssetWithProject,
   ChatSession,
   Message,
   Project,
@@ -67,6 +70,13 @@ export type {
   PipelineStepStatus,
   PipelineRunSummary,
   PipelinePromptOptimization,
+  PipelineManualReview,
+  ReviewDecisionType,
+  ReviewQueueItem,
+  ReviewQueueResponse,
+  ReviewQueueParams,
+  SubmitReviewDecisionInput,
+  SubmitReviewDecisionResult,
 } from './serverApi.pipeline';
 
 type AuthResponse = {
@@ -147,6 +157,10 @@ type ServerAsset = {
   metadata?: Record<string, unknown> | string | null;
   createdAt: string | number;
   updatedAt?: string | number;
+};
+
+type ServerAssetWithProject = ServerAsset & {
+  projectName: string;
 };
 
 type ServerScript = {
@@ -1547,12 +1561,49 @@ export async function getServerAssetBlob(assetId: string) {
   return requestApiBlob(`/api/assets/${assetId}/file`);
 }
 
-export async function deleteServerAsset(assetId: string) {
-  await requestApi<void>(`/api/assets/${assetId}`, {
+export async function deleteServerAsset(assetId: string, force = false) {
+  await requestApi<void>(`/api/assets/${assetId}${force ? '?force=true' : ''}`, {
     method: 'DELETE',
   });
 
   invalidateApiCache(CACHE_KEYS.workspaceBootstrap);
+}
+
+export async function getAssetReferences(assetId: string) {
+  return requestApi<AssetReferencesResponse>(`/api/assets/${assetId}/references`);
+}
+
+export async function searchAssetsAcrossProjects(params: AssetSearchParams = {}) {
+  const query = new URLSearchParams();
+  if (params.query?.trim()) query.set('query', params.query.trim());
+  if (params.assetType) query.set('assetType', params.assetType);
+  if (params.projectId) query.set('projectId', params.projectId);
+  if (params.favoriteOnly) query.set('favoriteOnly', 'true');
+  if (params.ratingMin && params.ratingMin > 0) query.set('ratingMin', String(params.ratingMin));
+  if (params.tag?.trim()) query.set('tag', params.tag.trim());
+  if (params.sort) query.set('sort', params.sort);
+  if (params.limit) query.set('limit', String(params.limit));
+  if (params.offset) query.set('offset', String(params.offset));
+
+  const qs = query.toString();
+  const assets = await requestApi<ServerAssetWithProject[]>(
+    `/api/assets/search${qs ? `?${qs}` : ''}`,
+  );
+
+  return assets.map((asset): AssetWithProject => ({
+    ...mapAsset(asset),
+    projectName: asset.projectName,
+  }));
+}
+
+export async function updateAssetTags(assetId: string, tags: string[]) {
+  const asset = await requestApi<ServerAsset>(`/api/assets/${assetId}/tags`, {
+    method: 'PUT',
+    body: JSON.stringify({ tags }),
+  });
+
+  invalidateApiCache(CACHE_KEYS.workspaceBootstrap);
+  return mapAsset(asset);
 }
 
 export async function upsertServerScript(projectId: string, title: string, content: string) {
@@ -1931,6 +1982,9 @@ export const pausePipelineRun = usageTaskPipelineApi.pausePipelineRun;
 export const resumePipelineRun = usageTaskPipelineApi.resumePipelineRun;
 export const cancelPipelineRun = usageTaskPipelineApi.cancelPipelineRun;
 export const retryPipelineStep = usageTaskPipelineApi.retryPipelineStep;
+export const getReviewQueue = usageTaskPipelineApi.getReviewQueue;
+export const submitReviewDecision = usageTaskPipelineApi.submitReviewDecision;
+export const listStepReviews = usageTaskPipelineApi.listStepReviews;
 export const streamPipelineRun = usageTaskPipelineApi.streamPipelineRun;
 
 const collaborationApi = createCollaborationApi({ requestApi });
