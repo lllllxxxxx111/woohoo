@@ -659,6 +659,7 @@ export function useChatWorkspaceActions({
         await deleteServerAsset(assetId);
       } catch (error) {
         logger.error('Failed to delete asset on server', error);
+        throw error;
       }
 
       setAssets((prev) => prev.filter((asset) => asset.id !== assetId));

@@ -207,6 +207,59 @@ pub struct PipelineControlReq {
 /**
  * 流程运行聚合视图（用于API响应）
  */
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineManualReview {
+    pub id: String,
+    pub user_id: String,
+    pub run_id: String,
+    pub step_id: String,
+    pub decision: String,
+    pub note: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineReviewDecisionReq {
+    pub decision: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewQueueFilter {
+    #[serde(alias = "projectId")]
+    pub project_id: Option<String>,
+    pub status: Option<String>,
+    #[serde(alias = "pipelineType")]
+    pub pipeline_type: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewQueueItem {
+    pub run: PipelineRun,
+    pub step: PipelineRunStep,
+    pub latest_event: Option<PipelineRunEvent>,
+    pub latest_error_event: Option<PipelineRunEvent>,
+    pub optimization_count: i64,
+    pub review_count: i64,
+    pub latest_review: Option<PipelineManualReview>,
+    pub project_name: Option<String>,
+    pub conversation_title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewQueueResponse {
+    pub items: Vec<ReviewQueueItem>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PipelineRunSummary {
@@ -214,4 +267,5 @@ pub struct PipelineRunSummary {
     pub steps: Vec<PipelineRunStep>,
     pub recent_events: Vec<PipelineRunEvent>,
     pub outputs: Vec<PipelineStepOutput>,
+    pub reviews: Vec<PipelineManualReview>,
 }

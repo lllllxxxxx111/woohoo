@@ -87,6 +87,7 @@ export interface PipelineRunSummary {
   steps: PipelineRunStep[];
   recentEvents: PipelineRunEvent[];
   outputs: PipelineStepOutput[];
+  reviews: PipelineManualReview[];
 }
 
 export interface PipelineRunEvent {
@@ -129,6 +130,58 @@ export interface PipelinePromptOptimization {
   createdAt: string;
   updatedAt: string;
 }
+
+export type ReviewDecisionType = 'retry' | 'cancel' | 'acknowledge';
+
+export interface PipelineManualReview {
+  id: string;
+  userId: string;
+  runId: string;
+  stepId: string;
+  decision: ReviewDecisionType;
+  note: string | null;
+  createdAt: string;
+}
+
+export interface ReviewQueueItem {
+  run: PipelineRun;
+  step: PipelineRunStep;
+  latestEvent: PipelineRunEvent | null;
+  latestErrorEvent: PipelineRunEvent | null;
+  optimizationCount: number;
+  reviewCount: number;
+  latestReview: PipelineManualReview | null;
+  projectName: string | null;
+  conversationTitle: string | null;
+}
+
+export interface ReviewQueueResponse {
+  items: ReviewQueueItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export type ReviewQueueParams = {
+  projectId?: string;
+  status?: PipelineStepStatus | string;
+  pipelineType?: string;
+  limit?: number;
+  offset?: number;
+};
+
+export type SubmitReviewDecisionInput = {
+  decision: ReviewDecisionType;
+  note?: string;
+};
+
+export type SubmitReviewDecisionResult = {
+  success: boolean;
+  reviewId: string;
+  decision: ReviewDecisionType;
+  run: PipelineRun | null;
+  step: PipelineRunStep | null;
+};
 
 export interface CreatePipelineRunInput {
   projectId: string;
@@ -256,6 +309,40 @@ export function createUsageTaskPipelineApi(requestApi: RequestApi) {
     });
   };
 
+  const getReviewQueue = async (params?: ReviewQueueParams): Promise<ReviewQueueResponse> => {
+    const query = new URLSearchParams();
+    if (params?.projectId) query.set('projectId', params.projectId);
+    if (params?.status) query.set('status', params.status);
+    if (params?.pipelineType) query.set('pipelineType', params.pipelineType);
+    if (params?.limit) query.set('limit', String(params.limit));
+    if (params?.offset) query.set('offset', String(params.offset));
+    const qs = query.toString();
+    return requestApi<ReviewQueueResponse>(`/api/pipelines/review-queue${qs ? `?${qs}` : ''}`);
+  };
+
+  const submitReviewDecision = async (
+    runId: string,
+    stepId: string,
+    input: SubmitReviewDecisionInput,
+  ): Promise<SubmitReviewDecisionResult> => {
+    return requestApi<SubmitReviewDecisionResult>(
+      `/api/pipelines/runs/${runId}/steps/${stepId}/review-decision`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    );
+  };
+
+  const listStepReviews = async (
+    runId: string,
+    stepId: string,
+  ): Promise<PipelineManualReview[]> => {
+    return requestApi<PipelineManualReview[]>(
+      `/api/pipelines/runs/${runId}/steps/${stepId}/reviews`,
+    );
+  };
+
   /**
    * 订阅 Pipeline Run 的 SSE 事件流
    * 返回一个 AbortController 供调用方取消订阅
@@ -341,6 +428,9 @@ export function createUsageTaskPipelineApi(requestApi: RequestApi) {
     resumePipelineRun,
     cancelPipelineRun,
     retryPipelineStep,
+    getReviewQueue,
+    submitReviewDecision,
+    listStepReviews,
     streamPipelineRun,
   };
 }

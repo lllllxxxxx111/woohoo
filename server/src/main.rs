@@ -346,11 +346,20 @@ async fn main() {
             "/api/projects/{project_id}/assets/upload",
             post(asset::handlers::upload_asset),
         )
+        .route("/api/assets/search", get(asset::handlers::search_assets))
         .route(
             "/api/assets/{id}",
             get(asset::handlers::get_asset)
                 .put(asset::handlers::update_asset)
                 .delete(asset::handlers::delete_asset),
+        )
+        .route(
+            "/api/assets/{id}/references",
+            get(asset::handlers::get_asset_references),
+        )
+        .route(
+            "/api/assets/{id}/tags",
+            axum::routing::put(asset::handlers::update_asset_tags),
         )
         .route(
             "/api/assets/{id}/file",
@@ -426,6 +435,10 @@ async fn main() {
         )
         .route("/api/ai/chat", post(ai::handlers::ai_chat))
         .route("/api/ai/chat/stream", post(ai::handlers::ai_chat_stream))
+        .route(
+            "/api/pipelines/review-queue",
+            get(pipeline::handlers::list_review_queue),
+        )
         // 流程运行（Pipeline Runs）
         .route(
             "/api/pipelines/runs",
@@ -455,6 +468,14 @@ async fn main() {
         .route(
             "/api/pipelines/runs/{id}/retry-step",
             post(pipeline::handlers::retry_pipeline_step),
+        )
+        .route(
+            "/api/pipelines/runs/{id}/steps/{step_id}/reviews",
+            get(pipeline::handlers::list_step_reviews),
+        )
+        .route(
+            "/api/pipelines/runs/{id}/steps/{step_id}/review-decision",
+            post(pipeline::handlers::submit_review_decision),
         )
         .route(
             "/api/pipelines/runs/{id}/stream",
