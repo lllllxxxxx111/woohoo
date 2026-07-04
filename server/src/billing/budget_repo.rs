@@ -387,3 +387,316 @@ pub async fn record_block_event(
         .await
         .map_err(|error| anyhow!(error))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::AppError;
+    use chrono::{Duration, SecondsFormat};
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn setup_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("failed to create in-memory sqlite pool");
+
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .expect("failed to enable foreign keys");
+
+        sqlx::query(
+            "CREATE TABLE users (
+                id TEXT PRIMARY KEY NOT NULL,
+                username TEXT NOT NULL UNIQUE,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create users table");
+
+        sqlx::query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name TEXT NOT NULL
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create projects table");
+
+        sqlx::query(
+            "CREATE TABLE credit_transactions (
+                id TEXT PRIMARY KEY NOT NULL,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                amount REAL NOT NULL,
+                balance_after REAL NOT NULL,
+                kind TEXT NOT NULL,
+                reason TEXT,
+                ref_type TEXT,
+                ref_id TEXT,
+                created_at TEXT NOT NULL
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create credit_transactions table");
+
+        sqlx::raw_sql(include_str!("../../migrations/022_budget_control.sql"))
+            .execute(&pool)
+            .await
+            .expect("failed to create budget tables");
+
+        pool
+    }
+
+    async fn insert_user(pool: &SqlitePool, user_id: &str) {
+        sqlx::query(
+            "INSERT INTO users (id, username, email, password_hash)
+             VALUES (?, ?, ?, 'test')",
+        )
+        .bind(user_id)
+        .bind(format!("user-{user_id}"))
+        .bind(format!("{user_id}@example.test"))
+        .execute(pool)
+        .await
+        .expect("failed to insert test user");
+    }
+
+    async fn insert_project(pool: &SqlitePool, user_id: &str, project_id: &str) {
+        sqlx::query("INSERT INTO projects (id, user_id, name) VALUES (?, ?, 'Test Project')")
+            .bind(project_id)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .expect("failed to insert test project");
+    }
+
+    async fn insert_transaction(
+        pool: &SqlitePool,
+        user_id: &str,
+        amount: f64,
+        kind: CreditTransactionKind,
+        created_at: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO credit_transactions (
+                id, user_id, amount, balance_after, kind, reason, ref_type, ref_id, created_at
+             )
+             VALUES (?, ?, ?, 100, ?, 'test', 'test', ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(user_id)
+        .bind(amount)
+        .bind(kind.as_str())
+        .bind(Uuid::new_v4().to_string())
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .expect("failed to insert credit transaction");
+    }
+
+    async fn configure_budget(
+        pool: &SqlitePool,
+        user_id: &str,
+        daily_limit: Option<f64>,
+        monthly_limit: Option<f64>,
+        block_high_cost_only: bool,
+        high_cost_threshold: f64,
+    ) -> BudgetSettings {
+        update_budget_settings(
+            pool,
+            user_id,
+            UpdateBudgetSettingsInput {
+                daily_limit,
+                monthly_limit,
+                warning_threshold: 0.8,
+                block_high_cost_only,
+                high_cost_threshold,
+                enabled: true,
+            },
+        )
+        .await
+        .expect("failed to configure budget settings")
+    }
+
+    fn current_timestamp() -> String {
+        Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+    }
+
+    fn previous_day_timestamp() -> String {
+        (Utc::now() - Duration::days(1)).to_rfc3339_opts(SecondsFormat::Secs, true)
+    }
+
+    #[tokio::test]
+    async fn status_sums_spent_transactions_for_budget_windows() {
+        let pool = setup_pool().await;
+        let user_id = "budget-window-user";
+        insert_user(&pool, user_id).await;
+        configure_budget(&pool, user_id, Some(10.0), Some(100.0), false, 0.5).await;
+
+        let now = current_timestamp();
+        insert_transaction(&pool, user_id, 2.0, CreditTransactionKind::Spent, &now).await;
+        insert_transaction(&pool, user_id, 3.0, CreditTransactionKind::Spent, &now).await;
+        insert_transaction(&pool, user_id, 50.0, CreditTransactionKind::Refund, &now).await;
+        insert_transaction(&pool, user_id, 20.0, CreditTransactionKind::Earned, &now).await;
+
+        let status = get_budget_status(&pool, user_id)
+            .await
+            .expect("failed to get budget status");
+
+        assert_eq!(status.daily.spent, 5.0);
+        assert_eq!(status.monthly.spent, 5.0);
+        assert_eq!(status.overall_level, BudgetCheckLevel::Ok);
+    }
+
+    #[tokio::test]
+    async fn daily_and_monthly_limits_block_projected_spend() {
+        let pool = setup_pool().await;
+
+        let daily_user = "daily-block-user";
+        insert_user(&pool, daily_user).await;
+        configure_budget(&pool, daily_user, Some(5.0), Some(100.0), false, 0.5).await;
+        insert_transaction(
+            &pool,
+            daily_user,
+            4.8,
+            CreditTransactionKind::Spent,
+            &current_timestamp(),
+        )
+        .await;
+
+        let daily_check = check_budget(&pool, daily_user, 0.3, "chat", false)
+            .await
+            .expect("failed to check daily budget");
+        assert_eq!(daily_check.level, BudgetCheckLevel::Blocked);
+        assert_eq!(daily_check.window_type, Some(BudgetWindowType::Daily));
+        assert_eq!(daily_check.limit, Some(5.0));
+        assert_eq!(daily_check.spent, 4.8);
+
+        let monthly_user = "monthly-block-user";
+        insert_user(&pool, monthly_user).await;
+        configure_budget(&pool, monthly_user, None, Some(5.0), false, 0.5).await;
+        insert_transaction(
+            &pool,
+            monthly_user,
+            4.8,
+            CreditTransactionKind::Spent,
+            &current_timestamp(),
+        )
+        .await;
+
+        let monthly_check = check_budget(&pool, monthly_user, 0.3, "chat", false)
+            .await
+            .expect("failed to check monthly budget");
+        assert_eq!(monthly_check.level, BudgetCheckLevel::Blocked);
+        assert_eq!(monthly_check.window_type, Some(BudgetWindowType::Monthly));
+    }
+
+    #[tokio::test]
+    async fn high_cost_only_allows_small_requests_after_limit() {
+        let pool = setup_pool().await;
+        let user_id = "high-cost-only-user";
+        insert_user(&pool, user_id).await;
+        configure_budget(&pool, user_id, Some(5.0), None, true, 1.0).await;
+        insert_transaction(
+            &pool,
+            user_id,
+            4.9,
+            CreditTransactionKind::Spent,
+            &current_timestamp(),
+        )
+        .await;
+
+        let small_request = check_budget(&pool, user_id, 0.2, "chat", false)
+            .await
+            .expect("failed to check small request");
+        assert_eq!(small_request.level, BudgetCheckLevel::Warning);
+
+        let forced_high_cost = check_budget(&pool, user_id, 0.2, "image_generation", true)
+            .await
+            .expect("failed to check high-cost request");
+        assert_eq!(forced_high_cost.level, BudgetCheckLevel::Blocked);
+
+        let threshold_high_cost = check_budget(&pool, user_id, 1.0, "chat", false)
+            .await
+            .expect("failed to check threshold request");
+        assert_eq!(threshold_high_cost.level, BudgetCheckLevel::Blocked);
+    }
+
+    #[tokio::test]
+    async fn enforce_budget_records_block_event() {
+        let pool = setup_pool().await;
+        let user_id = "block-event-user";
+        let project_id = "budget-project";
+        insert_user(&pool, user_id).await;
+        insert_project(&pool, user_id, project_id).await;
+        configure_budget(&pool, user_id, Some(5.0), None, false, 0.5).await;
+        insert_transaction(
+            &pool,
+            user_id,
+            4.9,
+            CreditTransactionKind::Spent,
+            &current_timestamp(),
+        )
+        .await;
+
+        let error = crate::billing::budget_enforce::enforce_budget(
+            &pool,
+            user_id,
+            0.2,
+            "chat",
+            false,
+            Some("test-model"),
+            Some(project_id),
+        )
+        .await
+        .expect_err("budget check should block");
+
+        assert!(matches!(error, AppError::BudgetExceeded(_)));
+
+        let events = list_recent_block_events(&pool, user_id, 10)
+            .await
+            .expect("failed to list block events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].window_type, "daily");
+        assert_eq!(events[0].task_type, "chat");
+        assert_eq!(events[0].model.as_deref(), Some("test-model"));
+        assert_eq!(events[0].project_id.as_deref(), Some(project_id));
+    }
+
+    #[tokio::test]
+    async fn previous_day_spend_is_excluded_from_daily_window() {
+        let pool = setup_pool().await;
+        let user_id = "previous-day-user";
+        insert_user(&pool, user_id).await;
+        configure_budget(&pool, user_id, Some(10.0), None, false, 0.5).await;
+
+        insert_transaction(
+            &pool,
+            user_id,
+            6.0,
+            CreditTransactionKind::Spent,
+            &previous_day_timestamp(),
+        )
+        .await;
+        insert_transaction(
+            &pool,
+            user_id,
+            2.0,
+            CreditTransactionKind::Spent,
+            &current_timestamp(),
+        )
+        .await;
+
+        let status = get_budget_status(&pool, user_id)
+            .await
+            .expect("failed to get budget status");
+        assert_eq!(status.daily.spent, 2.0);
+    }
+}

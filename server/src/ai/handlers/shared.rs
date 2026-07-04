@@ -674,9 +674,258 @@ pub(crate) async fn record_usage_safe(pool: &SqlitePool, record: RecordAiUsageIn
     }
 }
 
+pub(crate) fn ai_usage_credit_cost(record: &RecordAiUsageInput) -> f64 {
+    if record.status != AiUsageStatus::Success || record.operation == AiUsageOperation::Test {
+        return 0.0;
+    }
+
+    let total_tokens = record.total_tokens.max(0);
+    if total_tokens == 0 {
+        return 0.0;
+    }
+
+    (total_tokens as f64 / 1000.0).max(0.01)
+}
+
+pub(crate) async fn record_usage_and_bill_safe(pool: &SqlitePool, record: RecordAiUsageInput) {
+    let credit_cost = ai_usage_credit_cost(&record);
+    let should_bill = credit_cost > 0.0;
+    let user_id = record.user_id.clone();
+    let reason = format!("ai_usage_{}", record.operation.as_str());
+    let ref_id = record.request_fingerprint.clone();
+
+    match usage::record(pool, record).await {
+        Ok(()) => {}
+        Err(error) => {
+            tracing::warn!("Failed to record AI usage: {}", error);
+            return;
+        }
+    }
+
+    if !should_bill {
+        return;
+    }
+
+    if let Err(error) = crate::billing::repo::check_and_deduct(
+        pool,
+        &user_id,
+        credit_cost,
+        &reason,
+        Some("ai_usage"),
+        Some(&ref_id),
+    )
+    .await
+    {
+        tracing::warn!(
+            user_id = %user_id,
+            credit_cost,
+            error = %error,
+            "Failed to record AI usage billing transaction"
+        );
+    }
+}
+
 pub(crate) fn message_char_count(messages: &[ChatMessage]) -> i64 {
     messages
         .iter()
         .map(|message| message.content.chars().count() as i64)
         .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::usage::{
+        AiUsageOperation, AiUsageResourceKind, AiUsageStatus, AiUsageTokenSource,
+        RecordAiUsageInput,
+    };
+    use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+
+    fn usage_record(
+        operation: AiUsageOperation,
+        status: AiUsageStatus,
+        total_tokens: i64,
+    ) -> RecordAiUsageInput {
+        RecordAiUsageInput {
+            user_id: "test-user".to_string(),
+            project_id: None,
+            conversation_id: None,
+            agent_id: None,
+            endpoint_id: None,
+            api_key_fingerprint: "test-key".to_string(),
+            provider: "mock".to_string(),
+            model: Some("mock-model".to_string()),
+            operation,
+            status,
+            resource_kind: AiUsageResourceKind::Text,
+            output_items: 1,
+            latency_ms: 1,
+            prompt_tokens: total_tokens,
+            completion_tokens: 0,
+            total_tokens,
+            token_source: AiUsageTokenSource::Estimated,
+            input_chars: 0,
+            output_chars: 0,
+            request_fingerprint: "request".to_string(),
+            attempt_group_key: "attempt".to_string(),
+            trigger_source: None,
+            error_message: None,
+        }
+    }
+
+    #[test]
+    fn ai_usage_credit_cost_only_bills_successful_runtime_usage() {
+        let chat = usage_record(AiUsageOperation::Chat, AiUsageStatus::Success, 1_500);
+        assert_eq!(ai_usage_credit_cost(&chat), 1.5);
+
+        let tiny_chat = usage_record(AiUsageOperation::Chat, AiUsageStatus::Success, 1);
+        assert_eq!(ai_usage_credit_cost(&tiny_chat), 0.01);
+
+        let failed_chat = usage_record(AiUsageOperation::Chat, AiUsageStatus::Failed, 1_500);
+        assert_eq!(ai_usage_credit_cost(&failed_chat), 0.0);
+
+        let test_request = usage_record(AiUsageOperation::Test, AiUsageStatus::Success, 1_500);
+        assert_eq!(ai_usage_credit_cost(&test_request), 0.0);
+    }
+
+    async fn setup_usage_billing_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("failed to create in-memory sqlite pool");
+
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .expect("failed to enable foreign keys");
+
+        sqlx::query(
+            "CREATE TABLE users (
+                id TEXT PRIMARY KEY NOT NULL,
+                username TEXT NOT NULL UNIQUE,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create users table");
+
+        sqlx::query(
+            "CREATE TABLE user_credits (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+                balance REAL NOT NULL DEFAULT 100,
+                total_earned REAL NOT NULL DEFAULT 0,
+                total_spent REAL NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create user_credits table");
+
+        sqlx::query(
+            "CREATE TABLE credit_transactions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                amount REAL NOT NULL,
+                balance_after REAL NOT NULL,
+                kind TEXT NOT NULL,
+                reason TEXT,
+                ref_type TEXT,
+                ref_id TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create credit_transactions table");
+
+        sqlx::query(
+            "CREATE TABLE ai_usage_events (
+                id TEXT PRIMARY KEY NOT NULL,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                project_id TEXT,
+                conversation_id TEXT,
+                agent_id TEXT,
+                endpoint_id TEXT,
+                api_key_fingerprint TEXT NOT NULL DEFAULT '',
+                provider TEXT NOT NULL,
+                model TEXT,
+                operation TEXT NOT NULL,
+                status TEXT NOT NULL,
+                resource_kind TEXT NOT NULL DEFAULT 'text',
+                output_items INTEGER NOT NULL DEFAULT 0,
+                latency_ms INTEGER NOT NULL DEFAULT 0,
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                token_source TEXT NOT NULL DEFAULT 'unavailable',
+                input_chars INTEGER NOT NULL DEFAULT 0,
+                output_chars INTEGER NOT NULL DEFAULT 0,
+                request_fingerprint TEXT NOT NULL DEFAULT '',
+                attempt_group_key TEXT NOT NULL DEFAULT '',
+                attempt_index INTEGER NOT NULL DEFAULT 1,
+                is_redo INTEGER NOT NULL DEFAULT 0,
+                trigger_source TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create ai_usage_events table");
+
+        sqlx::query(
+            "INSERT INTO users (id, username, email, password_hash)
+             VALUES ('test-user', 'test-user', 'test-user@example.test', 'test')",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to insert test user");
+
+        pool
+    }
+
+    #[tokio::test]
+    async fn record_usage_and_bill_safe_writes_spent_transaction_for_success() {
+        let pool = setup_usage_billing_pool().await;
+
+        let success = usage_record(AiUsageOperation::Chat, AiUsageStatus::Success, 1_500);
+        record_usage_and_bill_safe(&pool, success).await;
+
+        let spent = sqlx::query_scalar::<_, f64>(
+            "SELECT COALESCE(SUM(amount), 0)
+             FROM credit_transactions
+             WHERE user_id = 'test-user' AND kind = 'spent' AND ref_type = 'ai_usage'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("failed to query spent transactions");
+        assert_eq!(spent, 1.5);
+
+        let balance = sqlx::query_scalar::<_, f64>(
+            "SELECT balance FROM user_credits WHERE user_id = 'test-user'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("failed to query credit balance");
+        assert_eq!(balance, 98.5);
+
+        let failed = usage_record(AiUsageOperation::Chat, AiUsageStatus::Failed, 1_500);
+        record_usage_and_bill_safe(&pool, failed).await;
+
+        let spent_after_failed = sqlx::query_scalar::<_, f64>(
+            "SELECT COALESCE(SUM(amount), 0)
+             FROM credit_transactions
+             WHERE user_id = 'test-user' AND kind = 'spent' AND ref_type = 'ai_usage'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("failed to query spent transactions after failed usage");
+        assert_eq!(spent_after_failed, 1.5);
+    }
 }
