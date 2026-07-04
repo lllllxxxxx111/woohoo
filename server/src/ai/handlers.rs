@@ -465,7 +465,7 @@ pub async fn ai_chat(
         .await;
         return Err(error);
     }
-    record_usage_safe(
+    record_usage_and_bill_safe(
         &state.db,
         build_usage_record(
             &user_id.0,
@@ -859,7 +859,7 @@ pub async fn ai_chat_stream(
         } else {
             AiUsageStatus::Success
         };
-        record_usage_safe(
+        record_usage_and_bill_safe(
             &db,
             build_direct_usage_record(
                 &request_user_id,
@@ -1657,7 +1657,7 @@ async fn finalize_task_success(
         return;
     }
 
-    record_usage_safe(
+    record_usage_and_bill_safe(
         &state.db,
         build_usage_record(
             user_id,
