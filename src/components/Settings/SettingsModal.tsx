@@ -4,6 +4,7 @@ import {
   BadgeDollarSign,
   BellRing,
   Cpu,
+  Gauge,
   GitBranch,
   LogOut,
   Palette,
@@ -48,12 +49,14 @@ import { EndpointManagement } from './EndpointManagement';
 import { NotificationSettings } from './NotificationSettings';
 import { OpsMonitorPanel } from './OpsMonitorPanel';
 import { UsageDashboard } from './UsageDashboard';
+import { BudgetControl } from './BudgetControl';
 
 const { Title, Text } = Typography;
 
 type SettingsTab =
   | 'overview'
   | 'account'
+  | 'budget'
   | 'dashboard'
   | 'model'
   | 'workflow'
@@ -72,6 +75,7 @@ type NavItem = {
 const NAV_ITEMS: NavItem[] = [
   { id: 'overview', icon: <Sparkles size={16} />, label: '概览' },
   { id: 'account', icon: <User size={16} />, label: '账户与余额' },
+  { id: 'budget', icon: <Gauge size={16} />, label: '预算控制' },
   { id: 'dashboard', icon: <Activity size={16} />, label: '用量统计' },
   { id: 'model', icon: <Server size={16} />, label: 'API 通道' },
   { id: 'workflow', icon: <GitBranch size={16} />, label: '制作流程' },
@@ -85,6 +89,7 @@ const NAV_ITEMS: NavItem[] = [
 const TAB_TITLES: Record<SettingsTab, string> = {
   overview: '概览',
   account: '账户与余额',
+  budget: '预算控制',
   dashboard: '用量统计',
   model: 'API 通道',
   workflow: '制作流程',
@@ -478,6 +483,8 @@ export const SettingsModal: React.FC = () => {
                 </Card>
               </Space>
             )}
+
+            {activeTab === 'budget' && <BudgetControl />}
 
             {activeTab === 'dashboard' && (
               <Space direction="vertical" size="large" style={{ width: '100%' }}>

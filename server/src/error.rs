@@ -29,6 +29,9 @@ pub enum AppError {
     #[error("积分不足: {0}")]
     PaymentRequired(String),
 
+    #[error("预算已超限: {0}")]
+    BudgetExceeded(String),
+
     #[error("冲突: {0}")]
     Conflict(String),
 
@@ -104,6 +107,14 @@ impl IntoResponse for AppError {
                 msg.clone(),
                 "warning",
                 "INSUFFICIENT_CREDITS",
+                false,
+            ),
+
+            AppError::BudgetExceeded(msg) => (
+                StatusCode::PAYMENT_REQUIRED,
+                msg.clone(),
+                "warning",
+                "BUDGET_EXCEEDED",
                 false,
             ),
 

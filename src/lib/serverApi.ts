@@ -15,6 +15,7 @@ import type {
   StoryboardLine,
 } from '../types';
 import { createAgentApi } from './serverApi.agents';
+import { BUDGET_REFRESH_EVENT, createBudgetApi } from './serverApi.budget';
 import { createCollaborationApi } from './serverApi.collaboration';
 import { createEndpointApi } from './serverApi.endpoints';
 import { createImageGenApi } from './serverApi.imageGen';
@@ -60,6 +61,17 @@ export type {
   TestNotificationResult,
   UpsertNotificationChannelInput,
 } from './serverApi.notifications';
+export type {
+  BudgetBlockEvent,
+  BudgetLevel,
+  BudgetSettings,
+  BudgetStatus,
+  BudgetWindowStatus,
+  BudgetWindowType,
+  UpdateBudgetSettingsInput,
+} from './serverApi.budget';
+export { BUDGET_REFRESH_EVENT, notifyBudgetChanged } from './serverApi.budget';
+
 export type {
   CreatePipelineRunInput,
   PipelineRun,
@@ -1276,6 +1288,13 @@ async function parseResponse<T>(response: Response): Promise<T> {
   const requestId = response.headers.get(REQUEST_ID_HEADER);
 
   if (!response.ok) {
+    const errorCode =
+      parsed && typeof parsed === 'object' && 'errorCode' in parsed
+        ? String(parsed.errorCode)
+        : '';
+    if (errorCode === 'BUDGET_EXCEEDED' && typeof window !== 'undefined') {
+      window.dispatchEvent(new Event(BUDGET_REFRESH_EVENT));
+    }
     const errorMessage =
       (parsed && typeof parsed === 'object' && 'error' in parsed && typeof parsed.error === 'string'
         ? parsed.error
@@ -1986,6 +2005,12 @@ export const getReviewQueue = usageTaskPipelineApi.getReviewQueue;
 export const submitReviewDecision = usageTaskPipelineApi.submitReviewDecision;
 export const listStepReviews = usageTaskPipelineApi.listStepReviews;
 export const streamPipelineRun = usageTaskPipelineApi.streamPipelineRun;
+
+const budgetApi = createBudgetApi(requestApi);
+
+export const getBudgetStatus = budgetApi.getBudgetStatus;
+export const updateBudgetSettings = budgetApi.updateBudgetSettings;
+export const listBudgetBlocks = budgetApi.listBudgetBlocks;
 
 const collaborationApi = createCollaborationApi({ requestApi });
 

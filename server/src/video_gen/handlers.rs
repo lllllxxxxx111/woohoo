@@ -56,6 +56,17 @@ pub async fn create_generation(
 
     let cost = calculate_cost(&req.model, req.duration_seconds);
 
+    crate::billing::budget_enforce::enforce_budget(
+        &state.db,
+        &user_id.0,
+        cost,
+        "video_generation",
+        true,
+        Some(&resolved.model),
+        req.project_id.as_deref(),
+    )
+    .await?;
+
     crate::billing::repo::check_and_deduct(
         &state.db,
         &user_id.0,

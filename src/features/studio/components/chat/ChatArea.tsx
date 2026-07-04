@@ -29,6 +29,7 @@ import { AgentSidePanel } from './AgentSidePanel';
 import { ProjectCreateModal } from './ProjectCreateModal';
 import { CollaborationStatus } from './CollaborationStatus';
 import { CollaborationAlert } from './CollaborationAlert';
+import { BudgetWarningBar } from '../../../../components/Settings/BudgetWarningBar';
 import styles from './ChatArea.module.css';
 
 const AgentDetailModal = lazy(() => import('./AgentDetailModal'));
@@ -372,6 +373,7 @@ export const ChatArea: React.FC = () => {
           />
         )}
         <CollaborationAlert loopCheckResult={collaborationLoopCheckResult} />
+        <BudgetWarningBar onOpenSettings={() => setSettingsOpen(true)} />
 
         {/* 消息列表 */}
         <div

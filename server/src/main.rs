@@ -581,6 +581,15 @@ async fn main() {
             "/api/billing/transactions",
             get(billing::handlers::list_credit_transactions),
         )
+        .route(
+            "/api/billing/budget",
+            get(billing::budget_handlers::get_budget_status)
+                .put(billing::budget_handlers::update_budget_settings),
+        )
+        .route(
+            "/api/billing/budget/blocks",
+            get(billing::budget_handlers::list_budget_blocks),
+        )
         .route_layer(axum_middleware::from_fn_with_state(
             state.clone(),
             auth::middleware::auth_middleware,

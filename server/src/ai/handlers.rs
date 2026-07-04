@@ -324,6 +324,37 @@ pub async fn ai_chat(
             return Err(error);
         }
     };
+    let estimated_cost = crate::billing::budget_enforce::estimate_chat_cost(
+        prepared.input_chars,
+        context.max_tokens,
+    );
+    let high_cost_output = matches!(
+        context.output_kind,
+        usage::AiUsageResourceKind::Image | usage::AiUsageResourceKind::Video
+    );
+    let task_type = if high_cost_output {
+        context.output_kind.as_str()
+    } else {
+        "chat"
+    };
+    if let Err(error) = crate::billing::budget_enforce::enforce_budget(
+        &state.db,
+        &user_id.0,
+        estimated_cost,
+        task_type,
+        high_cost_output,
+        Some(&context.model),
+        Some(&context.conversation.project_id),
+    )
+    .await
+    {
+        if let Err(message_error) =
+            save_failure_message(&state.db, &context, &error.to_string(), None).await
+        {
+            tracing::warn!("Failed to persist sync budget error: {}", message_error);
+        }
+        return Err(error);
+    }
     let started = Instant::now();
     let result = state
         .ai_client
@@ -494,6 +525,37 @@ pub async fn ai_chat_stream(
             return Err(error);
         }
     };
+    let estimated_cost = crate::billing::budget_enforce::estimate_chat_cost(
+        prepared.input_chars,
+        context.max_tokens,
+    );
+    let high_cost_output = matches!(
+        context.output_kind,
+        usage::AiUsageResourceKind::Image | usage::AiUsageResourceKind::Video
+    );
+    let task_type = if high_cost_output {
+        context.output_kind.as_str()
+    } else {
+        "chat"
+    };
+    if let Err(error) = crate::billing::budget_enforce::enforce_budget(
+        &state.db,
+        &user_id.0,
+        estimated_cost,
+        task_type,
+        high_cost_output,
+        Some(&context.model),
+        Some(&context.conversation.project_id),
+    )
+    .await
+    {
+        if let Err(message_error) =
+            save_failure_message(&state.db, &context, &error.to_string(), None).await
+        {
+            tracing::warn!("Failed to persist stream budget error: {}", message_error);
+        }
+        return Err(error);
+    }
     let prompt_tokens_estimate = usage::estimate_prompt_tokens(&prepared.messages);
     let stream_started = Instant::now();
     let ai_stream = state
@@ -1233,6 +1295,46 @@ async fn run_ai_task(
             return;
         }
     };
+
+    let estimated_cost = crate::billing::budget_enforce::estimate_chat_cost(
+        prepared.input_chars,
+        context.max_tokens,
+    );
+    let high_cost_output = matches!(
+        context.output_kind,
+        usage::AiUsageResourceKind::Image | usage::AiUsageResourceKind::Video
+    );
+    let task_type = if high_cost_output {
+        context.output_kind.as_str()
+    } else {
+        "chat"
+    };
+    if let Err(error) = crate::billing::budget_enforce::enforce_budget(
+        &state.db,
+        &user_id,
+        estimated_cost,
+        task_type,
+        high_cost_output,
+        Some(&context.model),
+        Some(&context.conversation.project_id),
+    )
+    .await
+    {
+        fail_task_execution(
+            &state,
+            &user_id,
+            &task_id,
+            &context,
+            0,
+            prepared.input_chars,
+            0,
+            usage::unavailable_usage(),
+            error.to_string(),
+            persisted_message_id.as_deref(),
+        )
+        .await;
+        return;
+    }
 
     if should_abort_task_execution(&state, &user_id, &task_id).await {
         return;
