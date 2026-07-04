@@ -64,6 +64,17 @@ pub async fn create_generation(
     let resolved_model = resolved.model.clone();
     let cost = calculate_cost(&resolved_model, &req.size, req.n);
 
+    crate::billing::budget_enforce::enforce_budget(
+        &state.db,
+        &user_id.0,
+        cost,
+        "image_generation",
+        true,
+        Some(&resolved_model),
+        project_id.as_deref(),
+    )
+    .await?;
+
     crate::billing::repo::check_and_deduct(
         &state.db,
         &user_id.0,

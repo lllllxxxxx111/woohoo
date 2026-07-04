@@ -1,0 +1,62 @@
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 10px 16px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, #f59e0b 42%, var(--border-color) 58%);
+  background: color-mix(in srgb, #f59e0b 12%, var(--bg-card) 88%);
+  color: var(--text-primary);
+}
+
+.bar.blocked {
+  border-color: color-mix(in srgb, #ef4444 50%, var(--border-color) 50%);
+  background: color-mix(in srgb, #ef4444 12%, var(--bg-card) 88%);
+}
+
+.content {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.copy strong {
+  font-size: 0.88rem;
+}
+
+.copy span {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+@media (max-width: 640px) {
+  .bar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
