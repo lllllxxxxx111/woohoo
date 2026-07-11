@@ -1,6 +1,7 @@
 use anyhow::Result;
 use serde_json::json;
 use sqlx::SqlitePool;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::model::{AssignmentStatus, CollaborationMessage, MessageKind, SessionState};
 use super::queue::ReplyQueueManager;
@@ -16,6 +17,8 @@ impl Dispatcher {
         session_id: &str,
         assignments: Vec<DispatchItem>,
     ) -> Result<DispatchResult> {
+        validate_assignment_dependencies(&assignments)?;
+
         let session = repo::get_session(pool, session_id).await?;
 
         let current_state =
@@ -29,7 +32,7 @@ impl Dispatcher {
                 .await?;
         }
 
-        let mut created = Vec::new();
+        let mut dispatched_count = 0usize;
         for item in &assignments {
             let depends_on_json = if item.depends_on.is_empty() {
                 None
@@ -69,7 +72,7 @@ impl Dispatcher {
             )
             .await;
 
-            created.push(assignment);
+            dispatched_count += 1;
         }
 
         let _ =
@@ -92,10 +95,7 @@ impl Dispatcher {
         )
         .await;
 
-        Ok(DispatchResult {
-            dispatched_count: created.len(),
-            assignments: created,
-        })
+        Ok(DispatchResult { dispatched_count })
     }
 
     /// 处理智能体提问：将下游 assignment 标记为 questioning/blocked，更新回复队列
@@ -231,6 +231,77 @@ impl Dispatcher {
     }
 }
 
+fn validate_assignment_dependencies(assignments: &[DispatchItem]) -> Result<()> {
+    let agent_ids = assignments
+        .iter()
+        .map(|assignment| assignment.agent_id.as_str())
+        .collect::<HashSet<_>>();
+    if agent_ids.len() != assignments.len() {
+        return Err(anyhow::anyhow!(
+            "each collaboration agent may only receive one assignment"
+        ));
+    }
+
+    let mut indegree = assignments
+        .iter()
+        .map(|assignment| (assignment.agent_id.as_str(), 0usize))
+        .collect::<HashMap<_, _>>();
+    let mut downstream = HashMap::<&str, Vec<&str>>::new();
+
+    for assignment in assignments {
+        let mut unique_dependencies = HashSet::new();
+        for dependency in &assignment.depends_on {
+            let dependency = dependency.trim();
+            if dependency.is_empty() || !unique_dependencies.insert(dependency) {
+                continue;
+            }
+            if dependency == assignment.agent_id {
+                return Err(anyhow::anyhow!(
+                    "collaboration assignment cannot depend on itself"
+                ));
+            }
+            if !agent_ids.contains(dependency) {
+                return Err(anyhow::anyhow!(
+                    "collaboration dependency references an unknown agent: {}",
+                    dependency
+                ));
+            }
+            *indegree
+                .get_mut(assignment.agent_id.as_str())
+                .expect("assignment agent should exist") += 1;
+            downstream
+                .entry(dependency)
+                .or_default()
+                .push(assignment.agent_id.as_str());
+        }
+    }
+
+    let mut queue = indegree
+        .iter()
+        .filter_map(|(agent_id, count)| (*count == 0).then_some(*agent_id))
+        .collect::<VecDeque<_>>();
+    let mut visited = 0usize;
+    while let Some(agent_id) = queue.pop_front() {
+        visited += 1;
+        for dependent in downstream.get(agent_id).into_iter().flatten() {
+            let count = indegree
+                .get_mut(dependent)
+                .expect("dependent agent should exist");
+            *count -= 1;
+            if *count == 0 {
+                queue.push_back(dependent);
+            }
+        }
+    }
+
+    if visited != assignments.len() {
+        return Err(anyhow::anyhow!(
+            "collaboration assignment dependencies contain a cycle"
+        ));
+    }
+    Ok(())
+}
+
 /// 分派项
 #[derive(Debug, Clone)]
 pub struct DispatchItem {
@@ -245,5 +316,43 @@ pub struct DispatchItem {
 #[derive(Debug, Clone)]
 pub struct DispatchResult {
     pub dispatched_count: usize,
-    pub assignments: Vec<crate::collaboration::model::CollaborationAssignment>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(agent_id: &str, depends_on: &[&str]) -> DispatchItem {
+        DispatchItem {
+            agent_id: agent_id.to_string(),
+            task_type: "design".to_string(),
+            goal: format!("task for {agent_id}"),
+            depends_on: depends_on.iter().map(|value| value.to_string()).collect(),
+            input: None,
+        }
+    }
+
+    #[test]
+    fn accepts_acyclic_assignment_dependencies() {
+        let assignments = vec![item("agent-a", &[]), item("agent-b", &["agent-a"])];
+        assert!(validate_assignment_dependencies(&assignments).is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_or_cyclic_dependencies() {
+        assert!(validate_assignment_dependencies(&[item("agent-a", &["missing"])]).is_err());
+        assert!(validate_assignment_dependencies(&[
+            item("agent-a", &["agent-b"]),
+            item("agent-b", &["agent-a"]),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_agent_assignments() {
+        assert!(
+            validate_assignment_dependencies(&[item("agent-a", &[]), item("agent-a", &[]),])
+                .is_err()
+        );
+    }
 }

@@ -163,6 +163,19 @@ async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<String>, sqlx::E
             include_str!("../migrations/022_budget_control.sql"),
         ),
     ] {
+        if version == "020_asset_governance" {
+            let tables = list_all_tables(pool)
+                .await?
+                .into_iter()
+                .collect::<HashSet<_>>();
+            if !tables.contains("assets") || !tables.contains("pipeline_step_outputs") {
+                tracing::info!(
+                    version,
+                    "跳过资产治理 migration：前置表尚不存在，后续启动将自动重试"
+                );
+                continue;
+            }
+        }
         if run_sql_migration(pool, version, migration_sql).await? {
             applied_versions.push(version.to_string());
         }
@@ -2001,6 +2014,17 @@ mod tests {
                 "009_ops_schema_conflict_backfills".to_string(),
                 "010_agent_scope_backfills".to_string(),
                 "011_updated_at_column_backfills".to_string(),
+                "012_collaboration".to_string(),
+                "013_image_studio".to_string(),
+                "014_image_generation_assets".to_string(),
+                "015_ai_endpoint_capabilities".to_string(),
+                "016_collaboration_pipeline_run_id".to_string(),
+                "017_video_gen".to_string(),
+                "018_image_generation_project_id".to_string(),
+                "019_image_generation_asset_ids".to_string(),
+                "020_asset_governance".to_string(),
+                "021_pipeline_manual_reviews".to_string(),
+                "022_budget_control".to_string(),
             ]
         );
 
