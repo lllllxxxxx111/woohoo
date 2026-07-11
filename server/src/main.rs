@@ -122,6 +122,7 @@ async fn main() {
     ops::monitor::start_background_workers(state.clone());
     ops::dispatcher::start_dispatcher_worker(state.clone());
     pipeline::orchestrator::start_orchestrator_worker(state.clone());
+    collaboration::worker::start_worker(state.clone());
 
     let is_production = std::env::var("RUST_ENV")
         .map(|value| value.eq_ignore_ascii_case("production"))
@@ -507,6 +508,10 @@ async fn main() {
         .route(
             "/api/collaboration/sessions/active",
             get(collaboration::handlers::get_active_session),
+        )
+        .route(
+            "/api/collaboration/readiness",
+            get(collaboration::handlers::get_readiness),
         )
         .route(
             "/api/collaboration/events/stream",

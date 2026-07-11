@@ -1,5 +1,11 @@
 import { useEffect, type MutableRefObject } from 'react';
-import { type AiTask, ensureServerSession, fetchServer, streamCollaborationEvents } from '../../lib/serverApi';
+import {
+  type AiTask,
+  ensureServerSession,
+  fetchServer,
+  listCollaborationMessages,
+  streamCollaborationEvents,
+} from '../../lib/serverApi';
 import { logger } from '../../lib/logger';
 import { useAppStore } from '../../store';
 import type { Message, MessageMeta } from '../../types';
@@ -557,11 +563,10 @@ export function usePendingTaskSse({
         if (
           cancelled ||
           abortController.signal.aborted ||
-          (err instanceof TypeError && (
-            err.message.includes('Failed to fetch') ||
-            err.message.includes('NetworkError') ||
-            err.message.includes('aborted')
-          ))
+          (err instanceof TypeError &&
+            (err.message.includes('Failed to fetch') ||
+              err.message.includes('NetworkError') ||
+              err.message.includes('aborted')))
         ) {
           return; // 连接被正常中断，静默返回
         }
@@ -606,9 +611,7 @@ export function usePendingTaskSse({
    * 后端 SSE 格式：event: collaboration, data: { sessionId, eventType, payload }
    * 实际事件类型在 eventType 字段中，数据在 payload 子对象中
    */
-  const activeCollaborationSession = useAppStore(
-    (state) => state.activeCollaborationSession,
-  );
+  const activeCollaborationSession = useAppStore((state) => state.activeCollaborationSession);
 
   useEffect(() => {
     if (!activeCollaborationSession || !isServerWorkspaceReady || !isAuthenticated) {
@@ -647,7 +650,11 @@ export function usePendingTaskSse({
                 const existing = store.activeCollaborationAssignments;
                 const updated = existing.map((a) =>
                   a.id === payload.assignmentId
-                    ? { ...a, status: payload.newStatus || a.status }
+                    ? {
+                        ...a,
+                        status: payload.newStatus || a.status,
+                        aiTaskId: payload.aiTaskId || a.aiTaskId,
+                      }
                     : a,
                 );
                 if (!existing.some((a) => a.id === payload.assignmentId)) {
@@ -658,6 +665,7 @@ export function usePendingTaskSse({
                     taskType: '',
                     goal: '',
                     status: payload.newStatus || 'assigned',
+                    aiTaskId: payload.aiTaskId,
                     blockingQuestionCount: 0,
                     createdAt: new Date().toISOString(),
                     updatedAt: new Date().toISOString(),
@@ -698,9 +706,11 @@ export function usePendingTaskSse({
             case 'collaboration_question_answered': {
               const prev = useAppStore.getState().collaborationPendingQuestions;
               const answeredFingerprint = `${payload.agentId || ''}-${payload.question || ''}`;
-              useAppStore.getState().setCollaborationPendingQuestions(
-                prev.filter((q) => q.fingerprint !== answeredFingerprint),
-              );
+              useAppStore
+                .getState()
+                .setCollaborationPendingQuestions(
+                  prev.filter((q) => q.fingerprint !== answeredFingerprint),
+                );
               break;
             }
 
@@ -737,6 +747,7 @@ export function usePendingTaskSse({
                     state: 'workspace_execution',
                     pipelineRunId: payload.pipelineRunId || session.pipelineRunId,
                   });
+                  useAppStore.getState().switchTab('pipeline');
                 }
               }
               break;
@@ -759,14 +770,25 @@ export function usePendingTaskSse({
                 if (session && session.id === sessionId) {
                   useAppStore.getState().setCollaborationSession({
                     ...session,
-                    state: 'delegating',
+                    state: payload.state || 'resolving_questions',
                   });
                 }
               }
               break;
 
             case 'collaboration_message_sent':
-              // 消息已发送，无需特殊处理，由消息列表 API 刷新
+              if (sessionId) {
+                void listCollaborationMessages(sessionId)
+                  .then((messages) => {
+                    const active = useAppStore.getState().activeCollaborationSession;
+                    if (active?.id === sessionId) {
+                      useAppStore.getState().setCollaborationMessages(messages);
+                    }
+                  })
+                  .catch((error) => {
+                    logger.warn('[Collaboration-SSE] Failed to refresh messages', error);
+                  });
+              }
               break;
           }
         } catch {

@@ -1,10 +1,11 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::Utc;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use super::model::{
-    CollaborationAssignment, CollaborationEvent, CollaborationMessage, CollaborationSession,
+    AssignmentStatus, CollaborationAssignment, CollaborationEvent, CollaborationMessage,
+    CollaborationSession, SessionState,
 };
 
 /// 创建协同会话
@@ -65,6 +66,17 @@ pub async fn update_session_state(
     new_state: &str,
 ) -> Result<CollaborationSession> {
     let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true) + "Z";
+    let session = get_session(pool, session_id).await?;
+    let current = SessionState::try_from(session.state.as_str()).map_err(anyhow::Error::msg)?;
+    let target = SessionState::try_from(new_state).map_err(anyhow::Error::msg)?;
+
+    if current != target && !current.can_transition_to(&target) {
+        return Err(anyhow!(
+            "invalid collaboration session transition: {} -> {}",
+            session.state,
+            new_state
+        ));
+    }
 
     sqlx::query("UPDATE collaboration_sessions SET state = ?, updated_at = ? WHERE id = ?")
         .bind(new_state)
@@ -222,6 +234,23 @@ pub async fn update_assignment_status(
     new_status: &str,
 ) -> Result<CollaborationAssignment> {
     let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true) + "Z";
+    let assignment = sqlx::query_as::<_, CollaborationAssignment>(
+        "SELECT * FROM collaboration_assignments WHERE id = ?",
+    )
+    .bind(assignment_id)
+    .fetch_one(pool)
+    .await?;
+    let current =
+        AssignmentStatus::try_from(assignment.status.as_str()).map_err(anyhow::Error::msg)?;
+    let target = AssignmentStatus::try_from(new_status).map_err(anyhow::Error::msg)?;
+
+    if current != target && !current.can_transition_to(&target) {
+        return Err(anyhow!(
+            "invalid collaboration assignment transition: {} -> {}",
+            assignment.status,
+            new_status
+        ));
+    }
 
     sqlx::query("UPDATE collaboration_assignments SET status = ?, updated_at = ? WHERE id = ?")
         .bind(new_status)
@@ -240,16 +269,17 @@ pub async fn update_assignment_status(
     Ok(assignment)
 }
 
-/// 更新任务卡的 AI 任务 ID
-pub async fn update_assignment_ai_task_id(
+/// 将任务卡关联到真实 AI 任务，并进入运行态
+pub async fn link_assignment_ai_task(
     pool: &SqlitePool,
     assignment_id: &str,
     ai_task_id: &str,
-) -> Result<()> {
+) -> Result<CollaborationAssignment> {
     let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true) + "Z";
-
     sqlx::query(
-        "UPDATE collaboration_assignments SET ai_task_id = ?, status = 'running', updated_at = ? WHERE id = ?",
+        "UPDATE collaboration_assignments
+         SET ai_task_id = ?, status = 'running', updated_at = ?
+         WHERE id = ?",
     )
     .bind(ai_task_id)
     .bind(&now)
@@ -257,6 +287,42 @@ pub async fn update_assignment_ai_task_id(
     .execute(pool)
     .await?;
 
+    Ok(sqlx::query_as::<_, CollaborationAssignment>(
+        "SELECT * FROM collaboration_assignments WHERE id = ?",
+    )
+    .bind(assignment_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+pub async fn find_assignment_by_ai_task_id(
+    pool: &SqlitePool,
+    ai_task_id: &str,
+) -> Result<Option<CollaborationAssignment>> {
+    Ok(sqlx::query_as::<_, CollaborationAssignment>(
+        "SELECT * FROM collaboration_assignments WHERE ai_task_id = ? LIMIT 1",
+    )
+    .bind(ai_task_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+pub async fn update_session_pipeline_run_id(
+    pool: &SqlitePool,
+    session_id: &str,
+    pipeline_run_id: &str,
+) -> Result<()> {
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true) + "Z";
+    sqlx::query(
+        "UPDATE collaboration_sessions
+         SET pipeline_run_id = ?, updated_at = ?
+         WHERE id = ?",
+    )
+    .bind(pipeline_run_id)
+    .bind(&now)
+    .bind(session_id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -394,35 +460,6 @@ pub async fn create_event(
     Ok(event)
 }
 
-/// 查询会话下所有事件
-pub async fn list_events(pool: &SqlitePool, session_id: &str) -> Result<Vec<CollaborationEvent>> {
-    let events = sqlx::query_as::<_, CollaborationEvent>(
-        "SELECT * FROM collaboration_events WHERE session_id = ? ORDER BY created_at ASC",
-    )
-    .bind(session_id)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(events)
-}
-
-/// 查询会话下指定状态的任务卡
-pub async fn list_assignments_by_status(
-    pool: &SqlitePool,
-    session_id: &str,
-    status: &str,
-) -> Result<Vec<CollaborationAssignment>> {
-    let assignments = sqlx::query_as::<_, CollaborationAssignment>(
-        "SELECT * FROM collaboration_assignments WHERE session_id = ? AND status = ?",
-    )
-    .bind(session_id)
-    .bind(status)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(assignments)
-}
-
 /// 获取会话下一个可用的消息队列序号
 pub async fn get_next_queue_order(pool: &SqlitePool, session_id: &str) -> Result<i64> {
     let max_order: i64 = sqlx::query_scalar(
@@ -441,17 +478,42 @@ pub async fn list_active_sessions_for_project(
     pool: &SqlitePool,
     user_id: &str,
     project_id: &str,
+    conversation_id: Option<&str>,
 ) -> Result<Vec<CollaborationSession>> {
-    let sessions = sqlx::query_as::<_, CollaborationSession>(
-        "SELECT * FROM collaboration_sessions \
-         WHERE user_id = ? AND project_id = ? \
-         AND state NOT IN ('completed', 'halted') \
-         ORDER BY updated_at DESC",
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .fetch_all(pool)
-    .await?;
+    let sessions = if let Some(conversation_id) = conversation_id {
+        sqlx::query_as::<_, CollaborationSession>(
+            "SELECT * FROM collaboration_sessions
+             WHERE user_id = ? AND project_id = ? AND conversation_id = ?
+               AND state NOT IN ('completed', 'halted')
+             ORDER BY updated_at DESC",
+        )
+        .bind(user_id)
+        .bind(project_id)
+        .bind(conversation_id)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, CollaborationSession>(
+            "SELECT * FROM collaboration_sessions
+             WHERE user_id = ? AND project_id = ?
+               AND state NOT IN ('completed', 'halted')
+             ORDER BY updated_at DESC",
+        )
+        .bind(user_id)
+        .bind(project_id)
+        .fetch_all(pool)
+        .await?
+    };
 
     Ok(sessions)
+}
+
+pub async fn list_active_sessions(pool: &SqlitePool) -> Result<Vec<CollaborationSession>> {
+    Ok(sqlx::query_as::<_, CollaborationSession>(
+        "SELECT * FROM collaboration_sessions
+         WHERE state NOT IN ('completed', 'halted')
+         ORDER BY updated_at ASC",
+    )
+    .fetch_all(pool)
+    .await?)
 }

@@ -17,9 +17,13 @@ import {
   updateServerAgent,
   createCollaborationSession,
   dispatchCollaboration,
+  getActiveCollaborationSession,
+  getCollaborationSession,
+  getCollaborationReadiness,
+  listCollaborationMessages,
 } from '../../../../lib/serverApi';
 import type { CreateAgentInput } from '../../../../lib/serverApi';
-import type { AgentContact } from '../../../../types';
+import type { AgentContact, CollaborationReadiness } from '../../../../types';
 import { TaskGroupItem } from './ChatMessageGroupItem';
 import { useMessageGroups, EMPTY_MESSAGES } from './hooks/useMessageGroups';
 import { useWorkflowGuard } from './hooks/useWorkflowGuard';
@@ -29,6 +33,7 @@ import { AgentSidePanel } from './AgentSidePanel';
 import { ProjectCreateModal } from './ProjectCreateModal';
 import { CollaborationStatus } from './CollaborationStatus';
 import { CollaborationAlert } from './CollaborationAlert';
+import { CollaborationMessage } from './CollaborationMessage';
 import { BudgetWarningBar } from '../../../../components/Settings/BudgetWarningBar';
 import styles from './ChatArea.module.css';
 
@@ -56,6 +61,7 @@ export const ChatArea: React.FC = () => {
     setSettingsOpen,
     activeCollaborationSession,
     activeCollaborationAssignments,
+    activeCollaborationMessages,
     collaborationLoopCheckResult,
   } = useAppStore(
     useShallow((state) => ({
@@ -72,6 +78,7 @@ export const ChatArea: React.FC = () => {
       setSettingsOpen: state.setSettingsOpen,
       activeCollaborationSession: state.activeCollaborationSession,
       activeCollaborationAssignments: state.activeCollaborationAssignments,
+      activeCollaborationMessages: state.activeCollaborationMessages,
       collaborationLoopCheckResult: state.collaborationLoopCheckResult,
     })),
   );
@@ -82,6 +89,8 @@ export const ChatArea: React.FC = () => {
   const [editModalVisible, setEditModalVisible] = useState(false);
   /** 当前选中的智能体数据 */
   const [selectedAgent, setSelectedAgent] = useState<AgentContact | null>(null);
+  const [collaborationReadiness, setCollaborationReadiness] =
+    useState<CollaborationReadiness | null>(null);
 
   /** 同步智能体数据到 store */
   const syncAgentsToStore = useCallback((nextAgents: AgentContact[]) => {
@@ -164,6 +173,70 @@ export const ChatArea: React.FC = () => {
     () => new Map(agentContacts.map((a) => [a.id, a])),
     [agentContacts],
   );
+  const collaborationAgentNameMap = useMemo(
+    () => new Map(agentContacts.map((agent) => [agent.id, agent.name])),
+    [agentContacts],
+  );
+
+  const collaborationTimelineItems = useMemo(() => {
+    const groupItems = messageGroupsState.visibleMessageGroups.map((group) => ({
+      type: 'group' as const,
+      id: group.id,
+      timestamp: group.messages[0]?.timestamp ?? 0,
+      group,
+    }));
+    const collaborationItems = activeCollaborationMessages.map((message) => ({
+      type: 'collaboration' as const,
+      id: `collaboration-${message.id}`,
+      timestamp:
+        Date.parse(message.createdAt.replace(/ZZ$/, 'Z')) ||
+        (message.queueOrder > 0 ? message.queueOrder : 0),
+      message,
+    }));
+    return [...groupItems, ...collaborationItems].sort(
+      (left, right) => left.timestamp - right.timestamp,
+    );
+  }, [activeCollaborationMessages, messageGroupsState.visibleMessageGroups]);
+
+  useEffect(() => {
+    if (!activeProject || !activeState.chatSessionId || !isServerWorkspaceReady) {
+      setCollaborationReadiness(null);
+      return;
+    }
+    const conversationId = activeState.chatSessionId;
+
+    let cancelled = false;
+    const restore = async () => {
+      try {
+        const [readiness, summary] = await Promise.all([
+          getCollaborationReadiness(conversationId),
+          getActiveCollaborationSession(activeProject.id, conversationId),
+        ]);
+        if (cancelled) return;
+        setCollaborationReadiness(readiness);
+        if (!summary) {
+          useAppStore.getState().clearCollaboration();
+          return;
+        }
+
+        useAppStore.getState().setCollaborationSession(summary.session);
+        useAppStore.getState().setCollaborationAssignments(summary.assignments);
+        const messages = await listCollaborationMessages(summary.session.id);
+        if (!cancelled) {
+          useAppStore.getState().setCollaborationMessages(messages);
+          if (summary.session.state === 'workspace_execution') {
+            useAppStore.getState().switchTab('pipeline');
+          }
+        }
+      } catch {
+        if (!cancelled) setCollaborationReadiness(null);
+      }
+    };
+    void restore();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeMessages, activeProject, activeState.chatSessionId, isServerWorkspaceReady]);
 
   /** 处理查看智能体详情 */
   const handleViewAgentDetail = useCallback((agent: AgentContact) => {
@@ -253,9 +326,11 @@ export const ChatArea: React.FC = () => {
 
       useAppStore.getState().setCollaborationSession(session);
 
-      const projectAgents = agentContacts.filter((a) =>
-        activeProject.agentRoster?.some((r) => r.id === a.id),
-      );
+      const projectAgents = activeProject.agentRoster?.length
+        ? agentContacts.filter((agent) =>
+            activeProject.agentRoster?.some((rosterAgent) => rosterAgent.id === agent.id),
+          )
+        : agentContacts;
 
       if (projectAgents.length > 0) {
         const dispatchResult = await dispatchCollaboration(session.id, {
@@ -267,6 +342,11 @@ export const ChatArea: React.FC = () => {
         });
 
         useAppStore.getState().setCollaborationAssignments(dispatchResult.assignments);
+        const summary = await getCollaborationSession(session.id);
+        useAppStore.getState().setCollaborationSession(summary.session);
+        useAppStore.getState().setCollaborationAssignments(summary.assignments);
+        const messages = await listCollaborationMessages(session.id);
+        useAppStore.getState().setCollaborationMessages(messages);
       }
 
       showToast({
@@ -334,6 +414,12 @@ export const ChatArea: React.FC = () => {
                 icon={<Users size={14} />}
                 onClick={() => void handleStartCollaboration()}
                 loading={isStartingCollaboration}
+                disabled={!collaborationReadiness?.ready}
+                title={
+                  collaborationReadiness?.ready
+                    ? '启动协同创作'
+                    : `还需补充：${collaborationReadiness?.missing.join('、') || '项目创作信息'}`
+                }
                 style={{ fontSize: '12px' }}
               >
                 启动协同
@@ -441,7 +527,20 @@ export const ChatArea: React.FC = () => {
               )}
 
               {/* 按任务组渲染消息 */}
-              {messageGroupsState.visibleMessageGroups.map((group) => {
+              {collaborationTimelineItems.map((item) => {
+                if (item.type === 'collaboration') {
+                  return (
+                    <CollaborationMessage
+                      key={item.id}
+                      sourceAgentId={item.message.sourceAgentId}
+                      targetAgentId={item.message.targetAgentId}
+                      messageKind={item.message.messageKind}
+                      content={item.message.content}
+                      agentNameMap={collaborationAgentNameMap}
+                    />
+                  );
+                }
+                const group = item.group;
                 const isCollapsed = messageGroupsState.collapsedGroups.has(group.id);
                 const isTaskGroup = group.type === 'user_task' && group.messages.length > 1;
 
@@ -458,7 +557,9 @@ export const ChatArea: React.FC = () => {
                     currentProjectId={activeState.projectId}
                     canEditUserMessage={Boolean(activeProject && activeChat)}
                     onOptimizeStoryOutlineDraft={messageActions.handleOptimizeStoryOutlineDraft}
-                    onWorkflowGuardConfirm={workflowGuardResult.handleWorkflowGuardConfirmForMessage}
+                    onWorkflowGuardConfirm={
+                      workflowGuardResult.handleWorkflowGuardConfirmForMessage
+                    }
                     submittingWorkflowGuardId={workflowGuardResult.submittingWorkflowGuardId}
                     pendingWorkflowGuardIds={workflowGuardResult.pendingWorkflowGuardIds}
                     confirmedWorkflowGuardIds={workflowGuardResult.confirmedWorkflowGuardIds}
@@ -486,33 +587,33 @@ export const ChatArea: React.FC = () => {
             );
             return isAiResponding && !hasStreamingMessage;
           })() && (
-              <div className={`${styles.messageWrapper} ${styles.ai}`}>
-                <Avatar size={34} style={{ backgroundColor: 'var(--color-fill-1)' }}>
-                  <Bot size={18} />
-                </Avatar>
-                <div className={styles.messageBody}>
-                  <div className={`${styles.messageContent} ${styles.thinkingBubble}`}>
-                    <LoaderCircle size={14} className={styles.spinner} style={{ marginRight: 8 }} />
-                    <span style={{ fontSize: '13px' }}>正在为您构建深度回复...</span>
-                    <button
-                      className={styles.cancelThinkingBtn}
-                      onClick={() => {
-                        void messageActions.handleCancelPendingTasks();
-                      }}
-                      title={
-                        messageActions.pendingCancelableTaskIds.length > 0
-                          ? '停止等待'
-                          : '当前无可取消任务'
-                      }
-                      type="button"
-                      disabled={messageActions.pendingCancelableTaskIds.length === 0}
-                    >
-                      <Square size={12} />
-                    </button>
-                  </div>
+            <div className={`${styles.messageWrapper} ${styles.ai}`}>
+              <Avatar size={34} style={{ backgroundColor: 'var(--color-fill-1)' }}>
+                <Bot size={18} />
+              </Avatar>
+              <div className={styles.messageBody}>
+                <div className={`${styles.messageContent} ${styles.thinkingBubble}`}>
+                  <LoaderCircle size={14} className={styles.spinner} style={{ marginRight: 8 }} />
+                  <span style={{ fontSize: '13px' }}>正在为您构建深度回复...</span>
+                  <button
+                    className={styles.cancelThinkingBtn}
+                    onClick={() => {
+                      void messageActions.handleCancelPendingTasks();
+                    }}
+                    title={
+                      messageActions.pendingCancelableTaskIds.length > 0
+                        ? '停止等待'
+                        : '当前无可取消任务'
+                    }
+                    type="button"
+                    disabled={messageActions.pendingCancelableTaskIds.length === 0}
+                  >
+                    <Square size={12} />
+                  </button>
                 </div>
               </div>
-            )}
+            </div>
+          )}
 
           <div ref={messageGroupsState.bottomRef}></div>
         </div>

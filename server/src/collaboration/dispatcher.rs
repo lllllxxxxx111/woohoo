@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::SqlitePool;
 
-use super::model::{AssignmentStatus, CollaborationMessage, SessionState};
+use super::model::{AssignmentStatus, CollaborationMessage, MessageKind, SessionState};
 use super::queue::ReplyQueueManager;
 use super::repo;
 
@@ -61,8 +61,8 @@ impl Dispatcher {
                     &json!({
                         "assignmentId": assignment.id,
                         "agentId": assignment.agent_id,
-                        "oldStatus": "idle",
-                        "newStatus": "assigned"
+                        "oldStatus": AssignmentStatus::Idle.as_str(),
+                        "newStatus": AssignmentStatus::Assigned.as_str()
                     })
                     .to_string(),
                 ),
@@ -114,7 +114,12 @@ impl Dispatcher {
             let current = AssignmentStatus::try_from(assignment.status.as_str())
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
             if current == AssignmentStatus::Assigned || current == AssignmentStatus::Questioning {
-                let _ = repo::update_assignment_status(pool, &assignment.id, "questioning").await;
+                let _ = repo::update_assignment_status(
+                    pool,
+                    &assignment.id,
+                    AssignmentStatus::Questioning.as_str(),
+                )
+                .await;
             }
             let _ =
                 repo::increment_blocking_question_count(pool, &assignment.id, fingerprint).await;
@@ -127,7 +132,7 @@ impl Dispatcher {
             session_id,
             Some(source_agent_id),
             Some(target_agent_id),
-            "question",
+            MessageKind::Question.as_str(),
             content,
             fingerprint,
             None,
@@ -135,7 +140,13 @@ impl Dispatcher {
         )
         .await?;
 
-        ReplyQueueManager::enqueue(pool, session_id, target_agent_id, "answer").await?;
+        ReplyQueueManager::enqueue(
+            pool,
+            session_id,
+            target_agent_id,
+            MessageKind::Answer.as_str(),
+        )
+        .await?;
 
         let _ = repo::create_event(
             pool,
@@ -173,7 +184,12 @@ impl Dispatcher {
             let current = AssignmentStatus::try_from(assignment.status.as_str())
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
             if current == AssignmentStatus::Blocked || current == AssignmentStatus::Questioning {
-                let _ = repo::update_assignment_status(pool, &assignment.id, "ready").await;
+                let _ = repo::update_assignment_status(
+                    pool,
+                    &assignment.id,
+                    AssignmentStatus::Ready.as_str(),
+                )
+                .await;
             }
         }
 
@@ -184,7 +200,7 @@ impl Dispatcher {
             session_id,
             Some(source_agent_id),
             Some(target_agent_id),
-            "answer",
+            MessageKind::Answer.as_str(),
             content,
             None,
             reply_to_message_id,

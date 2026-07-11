@@ -62,15 +62,6 @@ impl ReplyQueueManager {
         Ok(queue)
     }
 
-    /// 获取当前发言者（队列头部）
-    pub async fn current_speaker(
-        pool: &SqlitePool,
-        session_id: &str,
-    ) -> Result<Option<QueueEntry>> {
-        let queue = Self::load_queue(pool, session_id).await?;
-        Ok(queue.first().cloned())
-    }
-
     /// 移除队列头部（当前发言者完成发言）
     pub async fn dequeue(pool: &SqlitePool, session_id: &str) -> Result<Option<QueueEntry>> {
         let mut queue = Self::load_queue(pool, session_id).await?;

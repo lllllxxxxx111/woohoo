@@ -444,6 +444,11 @@ export interface CollaborationSessionSummary {
   assignments: CollaborationAssignment[];
 }
 
+export interface CollaborationReadiness {
+  ready: boolean;
+  missing: string[];
+}
+
 export interface CreateCollaborationSessionReq {
   projectId: string;
   conversationId: string;

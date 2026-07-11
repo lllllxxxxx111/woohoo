@@ -2017,6 +2017,7 @@ const collaborationApi = createCollaborationApi({ requestApi });
 export const createCollaborationSession = collaborationApi.createSession;
 export const getCollaborationSession = collaborationApi.getSession;
 export const getActiveCollaborationSession = collaborationApi.getActiveSession;
+export const getCollaborationReadiness = collaborationApi.getReadiness;
 export const dispatchCollaboration = collaborationApi.dispatch;
 export const sendCollaborationMessage = collaborationApi.sendMessage;
 export const listCollaborationMessages = collaborationApi.listMessages;
