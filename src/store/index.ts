@@ -7,6 +7,7 @@ import type {
   Asset,
   CollaborationSession,
   CollaborationAssignment,
+  CollaborationMessage,
   LoopCheckResponse,
   Message,
   Project,
@@ -148,6 +149,7 @@ export interface AppStoreState {
   /** 协同会话状态（由 SSE 协同事件填充） */
   activeCollaborationSession: CollaborationSession | null;
   activeCollaborationAssignments: CollaborationAssignment[];
+  activeCollaborationMessages: CollaborationMessage[];
   collaborationLoopCheckResult: LoopCheckResponse | null;
   collaborationPendingQuestions: Array<{ agentId: string; question: string; fingerprint: string }>;
 
@@ -170,8 +172,11 @@ export interface AppStoreState {
   setSseError: (error: string | null) => void;
   setCollaborationSession: (session: CollaborationSession | null) => void;
   setCollaborationAssignments: (assignments: CollaborationAssignment[]) => void;
+  setCollaborationMessages: (messages: CollaborationMessage[]) => void;
   setCollaborationLoopCheckResult: (result: LoopCheckResponse | null) => void;
-  setCollaborationPendingQuestions: (questions: Array<{ agentId: string; question: string; fingerprint: string }>) => void;
+  setCollaborationPendingQuestions: (
+    questions: Array<{ agentId: string; question: string; fingerprint: string }>,
+  ) => void;
   clearCollaboration: () => void;
 }
 
@@ -207,6 +212,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   sseError: null,
   activeCollaborationSession: null,
   activeCollaborationAssignments: [],
+  activeCollaborationMessages: [],
   collaborationLoopCheckResult: null,
   collaborationPendingQuestions: [],
 
@@ -292,8 +298,19 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   setSseConnected: (isSseConnected) => set({ isSseConnected }),
   setSseError: (sseError) => set({ sseError }),
   setCollaborationSession: (activeCollaborationSession) => set({ activeCollaborationSession }),
-  setCollaborationAssignments: (activeCollaborationAssignments) => set({ activeCollaborationAssignments }),
-  setCollaborationLoopCheckResult: (collaborationLoopCheckResult) => set({ collaborationLoopCheckResult }),
-  setCollaborationPendingQuestions: (collaborationPendingQuestions) => set({ collaborationPendingQuestions }),
-  clearCollaboration: () => set({ activeCollaborationSession: null, activeCollaborationAssignments: [], collaborationLoopCheckResult: null, collaborationPendingQuestions: [] }),
+  setCollaborationAssignments: (activeCollaborationAssignments) =>
+    set({ activeCollaborationAssignments }),
+  setCollaborationMessages: (activeCollaborationMessages) => set({ activeCollaborationMessages }),
+  setCollaborationLoopCheckResult: (collaborationLoopCheckResult) =>
+    set({ collaborationLoopCheckResult }),
+  setCollaborationPendingQuestions: (collaborationPendingQuestions) =>
+    set({ collaborationPendingQuestions }),
+  clearCollaboration: () =>
+    set({
+      activeCollaborationSession: null,
+      activeCollaborationAssignments: [],
+      activeCollaborationMessages: [],
+      collaborationLoopCheckResult: null,
+      collaborationPendingQuestions: [],
+    }),
 }));

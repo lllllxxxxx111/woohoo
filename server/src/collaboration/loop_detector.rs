@@ -3,11 +3,13 @@ use std::collections::HashMap;
 use anyhow::Result;
 use sqlx::SqlitePool;
 
+use super::model::MessageKind;
 use super::repo;
 
 /// 循环检测信号
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoopSignal {
+    RoundLimitReached,
     HighFingerprintRepeatRate,
     NoStateChangeInRecentRounds,
     NoNewReadyAssignments,
@@ -17,6 +19,7 @@ pub enum LoopSignal {
 impl LoopSignal {
     pub fn as_str(&self) -> &'static str {
         match self {
+            LoopSignal::RoundLimitReached => "round_limit_reached",
             LoopSignal::HighFingerprintRepeatRate => "high_fingerprint_repeat_rate",
             LoopSignal::NoStateChangeInRecentRounds => "no_state_change_in_recent_rounds",
             LoopSignal::NoNewReadyAssignments => "no_new_ready_assignments",
@@ -32,6 +35,10 @@ impl LoopDetector {
     /// 执行循环检测，返回检测到的信号列表
     pub async fn detect(pool: &SqlitePool, session_id: &str) -> Result<Vec<LoopSignal>> {
         let session = repo::get_session(pool, session_id).await?;
+
+        if session.round_count >= 20 {
+            return Ok(vec![LoopSignal::RoundLimitReached]);
+        }
 
         if session.round_count < 5 {
             return Ok(vec![]);
@@ -99,7 +106,7 @@ impl LoopDetector {
         let recent_questions: Vec<_> = messages
             .iter()
             .rev()
-            .filter(|m| m.message_kind == "question")
+            .filter(|m| m.message_kind == MessageKind::Question.as_str())
             .take(10)
             .collect();
 

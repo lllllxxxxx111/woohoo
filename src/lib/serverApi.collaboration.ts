@@ -10,6 +10,7 @@ import type {
   LoopCheckResponse,
   AdmitResponse,
   HaltReq,
+  CollaborationReadiness,
 } from '../types';
 
 type RequestApi = <T>(path: string, init?: RequestInit, retry?: boolean) => Promise<T>;
@@ -32,74 +33,59 @@ export function createCollaborationApi({ requestApi }: CreateCollaborationApiInp
   };
 
   const getSession = async (sessionId: string) => {
-    return requestApi<CollaborationSessionSummary>(
-      `/api/collaboration/sessions/${sessionId}`,
-    );
+    return requestApi<CollaborationSessionSummary>(`/api/collaboration/sessions/${sessionId}`);
   };
 
   const dispatch = async (sessionId: string, req: DispatchReq) => {
-    return requestApi<DispatchResponse>(
-      `/api/collaboration/sessions/${sessionId}/dispatch`,
-      {
-        method: 'POST',
-        body: JSON.stringify(req),
-      },
-    );
+    return requestApi<DispatchResponse>(`/api/collaboration/sessions/${sessionId}/dispatch`, {
+      method: 'POST',
+      body: JSON.stringify(req),
+    });
   };
 
-  const sendMessage = async (
-    sessionId: string,
-    req: SendCollaborationMessageReq,
-  ) => {
-    return requestApi<CollaborationMessage>(
-      `/api/collaboration/sessions/${sessionId}/messages`,
-      {
-        method: 'POST',
-        body: JSON.stringify(req),
-      },
-    );
+  const sendMessage = async (sessionId: string, req: SendCollaborationMessageReq) => {
+    return requestApi<CollaborationMessage>(`/api/collaboration/sessions/${sessionId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify(req),
+    });
   };
 
   /** 获取协同会话的消息列表 */
   const listMessages = async (sessionId: string) => {
-    return requestApi<CollaborationMessage[]>(
-      `/api/collaboration/sessions/${sessionId}/messages`,
-    );
+    return requestApi<CollaborationMessage[]>(`/api/collaboration/sessions/${sessionId}/messages`);
   };
 
   /** 获取项目当前活跃的协同会话 */
-  const getActiveSession = async (projectId: string) => {
-    return requestApi<CollaborationSession>(
-      `/api/collaboration/sessions/active?projectId=${projectId}`,
+  const getActiveSession = async (projectId: string, conversationId?: string) => {
+    const query = new URLSearchParams({ projectId });
+    if (conversationId) query.set('conversationId', conversationId);
+    return requestApi<CollaborationSessionSummary | null>(
+      `/api/collaboration/sessions/active?${query.toString()}`,
     );
+  };
+
+  const getReadiness = async (conversationId: string) => {
+    const query = new URLSearchParams({ conversationId });
+    return requestApi<CollaborationReadiness>(`/api/collaboration/readiness?${query.toString()}`);
   };
 
   const loopCheck = async (sessionId: string) => {
-    return requestApi<LoopCheckResponse>(
-      `/api/collaboration/sessions/${sessionId}/loop-check`,
-      {
-        method: 'POST',
-      },
-    );
+    return requestApi<LoopCheckResponse>(`/api/collaboration/sessions/${sessionId}/loop-check`, {
+      method: 'POST',
+    });
   };
 
   const admit = async (sessionId: string) => {
-    return requestApi<AdmitResponse>(
-      `/api/collaboration/sessions/${sessionId}/admit`,
-      {
-        method: 'POST',
-      },
-    );
+    return requestApi<AdmitResponse>(`/api/collaboration/sessions/${sessionId}/admit`, {
+      method: 'POST',
+    });
   };
 
   const halt = async (sessionId: string, req: HaltReq) => {
-    return requestApi<CollaborationSession>(
-      `/api/collaboration/sessions/${sessionId}/halt`,
-      {
-        method: 'POST',
-        body: JSON.stringify(req),
-      },
-    );
+    return requestApi<CollaborationSession>(`/api/collaboration/sessions/${sessionId}/halt`, {
+      method: 'POST',
+      body: JSON.stringify(req),
+    });
   };
 
   /**
@@ -168,6 +154,7 @@ export function createCollaborationApi({ requestApi }: CreateCollaborationApiInp
     createSession,
     getSession,
     getActiveSession,
+    getReadiness,
     dispatch,
     sendMessage,
     listMessages,

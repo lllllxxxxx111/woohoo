@@ -108,7 +108,10 @@ impl AssignmentStatus {
             (AssignmentStatus::Idle, AssignmentStatus::Assigned)
                 | (AssignmentStatus::Assigned, AssignmentStatus::Questioning)
                 | (AssignmentStatus::Assigned, AssignmentStatus::Ready)
+                | (AssignmentStatus::Assigned, AssignmentStatus::Running)
+                | (AssignmentStatus::Assigned, AssignmentStatus::Failed)
                 | (AssignmentStatus::Questioning, AssignmentStatus::Blocked)
+                | (AssignmentStatus::Questioning, AssignmentStatus::Ready)
                 | (AssignmentStatus::Ready, AssignmentStatus::Running)
                 | (AssignmentStatus::Blocked, AssignmentStatus::Ready)
                 | (AssignmentStatus::Running, AssignmentStatus::Done)
@@ -188,6 +191,7 @@ pub struct CollaborationSession {
     pub loop_status_json: Option<String>,
     pub reply_queue_json: Option<String>,
     pub round_count: i64,
+    pub pipeline_run_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -325,6 +329,22 @@ pub struct HaltReq {
 #[serde(rename_all = "camelCase")]
 pub struct ActiveSessionQuery {
     pub project_id: String,
+    pub conversation_id: Option<String>,
+}
+
+/// 查询当前对话是否具备启动协同的条件
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadinessQuery {
+    pub conversation_id: String,
+}
+
+/// 协同启动成熟度结果
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaborationReadinessResponse {
+    pub ready: bool,
+    pub missing: Vec<String>,
 }
 
 /// 协同会话聚合视图
@@ -398,7 +418,10 @@ mod tests {
             (AssignmentStatus::Idle, AssignmentStatus::Assigned),
             (AssignmentStatus::Assigned, AssignmentStatus::Questioning),
             (AssignmentStatus::Assigned, AssignmentStatus::Ready),
+            (AssignmentStatus::Assigned, AssignmentStatus::Running),
+            (AssignmentStatus::Assigned, AssignmentStatus::Failed),
             (AssignmentStatus::Questioning, AssignmentStatus::Blocked),
+            (AssignmentStatus::Questioning, AssignmentStatus::Ready),
             (AssignmentStatus::Ready, AssignmentStatus::Running),
             (AssignmentStatus::Blocked, AssignmentStatus::Ready),
             (AssignmentStatus::Running, AssignmentStatus::Done),
