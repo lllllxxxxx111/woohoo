@@ -32,7 +32,13 @@
 
 ## 附件建议
 
-社区只支持文字、图片、GIF、链接和 20M 以内文件。当前提交包：
+社区只支持文字、图片、GIF、链接和 20M 以内文件。优先贴 GitHub 分支链接：
+
+```text
+https://github.com/lllllxxxxx111/woohoo/tree/codex/agent-eval-good-features
+```
+
+也可以附加当前提交包：
 
 ```text
 woohoo-studio-trae-demo-20260703.zip

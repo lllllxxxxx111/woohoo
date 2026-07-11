@@ -23,9 +23,12 @@ npm run dev:all
 
 如果换环境运行，也可以在登录页直接注册任意邮箱账号，密码需不少于 8 位且包含字母和数字。
 
-### 方式 B：Docker Demo 模式
+### 方式 B：GitHub + Docker Demo 模式（推荐给评审）
 
 ```bash
+git clone https://github.com/lllllxxxxx111/woohoo.git
+cd woohoo
+git checkout codex/agent-eval-good-features
 docker compose up --build
 ```
 
@@ -35,6 +38,12 @@ docker compose up --build
 - 后端健康检查：http://127.0.0.1:18081/health
 
 Docker 环境首次启动后直接注册账号即可。
+
+如果已经下载了提交附件 `woohoo-studio-trae-demo-20260703.zip`，也可以解压后在解压目录直接运行：
+
+```bash
+docker compose up --build
+```
 
 ## 建议演示脚本
 

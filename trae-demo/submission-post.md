@@ -34,9 +34,32 @@ Woohoo Studio 的判断是：AI 创作工具不应该只停留在「聊天框」
 
 ## 3. Demo 体验地址
 
-当前 Demo 可用本地方式体验。
+推荐直接从 GitHub 拉取后用 Docker 体验：
+
+```bash
+git clone https://github.com/lllllxxxxx111/woohoo.git
+cd woohoo
+git checkout codex/agent-eval-good-features
+docker compose up --build
+```
+
+访问：
+
+- 前端：http://127.0.0.1:18080
+- 后端健康检查：http://127.0.0.1:18081/health
+
+源码分支：
+
+- https://github.com/lllllxxxxx111/woohoo/tree/codex/agent-eval-good-features
+
+也可以下载附件 `woohoo-studio-trae-demo-20260703.zip` 后解压运行：
+
+```bash
+docker compose up --build
+```
 
 开发模式：
+
 
 ```bash
 npm install
@@ -48,20 +71,9 @@ npm run dev:all
 - 前端：http://127.0.0.1:1420
 - 后端健康检查：http://127.0.0.1:8080/health
 
-Docker 模式：
-
-```bash
-docker compose up --build
-```
-
-访问：
-
-- 前端：http://127.0.0.1:18080
-- 后端健康检查：http://127.0.0.1:18081/health
-
 如需要上传附件，可上传 `woohoo-studio-trae-demo-20260703.zip`。如果社区附件超过限制，请上传到 GitHub、飞书云文档或其他可公开访问的位置，并在这里填写公开链接：
 
-- 体验/源码附件链接：待填写
+- 体验/源码附件链接：https://github.com/lllllxxxxx111/woohoo/tree/codex/agent-eval-good-features
 
 演示账号：
 
