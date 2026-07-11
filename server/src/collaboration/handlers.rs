@@ -189,113 +189,12 @@ pub async fn dispatch(
         .await
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    let session = repo::get_session(&state.db, &session_id)
+    dispatch_ready_assignments(&state, &user_id.0, &session_id)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    let mut linked_assignments = Vec::with_capacity(result.assignments.len());
-    for assignment in result.assignments {
-        let task_prompt = format!(
-            "你正在参与项目内多智能体协同。\n任务类型：{}\n任务目标：{}\n请直接给出可供其他智能体继续工作的明确产出，不要反问用户。",
-            assignment.task_type, assignment.goal
-        );
-        let req = AiChatReq {
-            conversation_id: session.conversation_id.clone(),
-            content: task_prompt,
-            resource_refs: None,
-            agent_id: Some(assignment.agent_id.clone()),
-            endpoint_id: None,
-            model: None,
-            force_stream_fallback: Some(true),
-            system_prompt: None,
-            temperature: None,
-            top_p: None,
-            frequency_penalty: None,
-            max_tokens: None,
-            output_kind: Some("document".to_string()),
-            output_items: Some(1),
-            allow_assistant_actions: false,
-            confirmed_message_id: None,
-            confirmed_workflow_guard_message_id: None,
-            trigger_source: Some("collaboration".to_string()),
-        };
-
-        match enqueue_ai_task_for_request(
-            &state,
-            &user_id.0,
-            req,
-            AiUsageOperation::Task,
-            StreamFallbackMode::Force,
-        )
+    let linked_assignments = repo::list_assignments(&state.db, &session_id)
         .await
-        {
-            Ok(task) => {
-                let linked = repo::link_assignment_ai_task(&state.db, &assignment.id, &task.id)
-                    .await
-                    .map_err(|e| AppError::Internal(e.to_string()))?;
-                let next_order = repo::get_next_queue_order(&state.db, &session_id)
-                    .await
-                    .map_err(|e| AppError::Internal(e.to_string()))?;
-                let _ = repo::create_message(
-                    &state.db,
-                    &session_id,
-                    session.orchestrator_agent_id.as_deref(),
-                    Some(&linked.agent_id),
-                    MessageKind::Assign.as_str(),
-                    &linked.goal,
-                    None,
-                    None,
-                    next_order,
-                )
-                .await;
-                broadcast_collaboration_event(
-                    &state,
-                    &session_id,
-                    "collaboration_assignment_updated",
-                    Some(json!({
-                        "assignmentId": linked.id,
-                        "agentId": linked.agent_id,
-                        "newStatus": linked.status,
-                        "aiTaskId": linked.ai_task_id,
-                    })),
-                );
-                if let Some(current_task) = state.ai_runtime.get_task(&user_id.0, &task.id).await {
-                    if matches!(
-                        current_task.status,
-                        crate::ai::config::AiTaskStatus::Completed
-                            | crate::ai::config::AiTaskStatus::Failed
-                    ) {
-                        if let Err(error) =
-                            super::worker::sync_terminal_task(&state, &current_task).await
-                        {
-                            tracing::warn!(task_id = %task.id, error = %error, "同步快速完成的协同任务失败");
-                        }
-                    }
-                }
-                linked_assignments.push(linked);
-            }
-            Err(error) => {
-                let failed = repo::update_assignment_status(
-                    &state.db,
-                    &assignment.id,
-                    AssignmentStatus::Failed.as_str(),
-                )
-                .await
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-                broadcast_collaboration_event(
-                    &state,
-                    &session_id,
-                    "collaboration_assignment_updated",
-                    Some(json!({
-                        "assignmentId": failed.id,
-                        "agentId": failed.agent_id,
-                        "newStatus": failed.status,
-                        "error": error.to_string(),
-                    })),
-                );
-                linked_assignments.push(failed);
-            }
-        }
-    }
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let payload = json!({
         "dispatchedCount": result.dispatched_count,
@@ -321,6 +220,182 @@ pub async fn dispatch(
         dispatched_count: result.dispatched_count as i64,
         assignments: linked_assignments,
     }))
+}
+
+pub(crate) async fn dispatch_ready_assignments(
+    state: &AppState,
+    user_id: &str,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    let session = repo::get_session(&state.db, session_id).await?;
+    let assignments = repo::list_assignments(&state.db, session_id).await?;
+    let messages = repo::list_messages(&state.db, session_id).await?;
+
+    for assignment in assignments.iter().filter(|assignment| {
+        matches!(assignment.status.as_str(), "assigned" | "ready")
+            && assignment.ai_task_id.is_none()
+            && dependencies_satisfied(assignment, &assignments)
+    }) {
+        let Some(claimed) = repo::claim_assignment_for_execution(&state.db, &assignment.id).await?
+        else {
+            continue;
+        };
+        broadcast_collaboration_event(
+            state,
+            session_id,
+            "collaboration_assignment_updated",
+            Some(json!({
+                "assignmentId": claimed.id,
+                "agentId": claimed.agent_id,
+                "newStatus": claimed.status,
+            })),
+        );
+
+        let dependency_context = dependency_output_context(&claimed, &messages);
+        let input_context = claimed.input_json.as_deref().unwrap_or("无额外输入");
+        let task_prompt = format!(
+            "你正在参与项目内多智能体协同。\n任务类型：{}\n任务目标：{}\n任务输入：{}{}\n请直接给出可供其他智能体继续工作的明确产出，不要反问用户。",
+            claimed.task_type, claimed.goal, input_context, dependency_context
+        );
+        let req = AiChatReq {
+            conversation_id: session.conversation_id.clone(),
+            content: task_prompt,
+            resource_refs: None,
+            agent_id: Some(claimed.agent_id.clone()),
+            endpoint_id: None,
+            model: None,
+            force_stream_fallback: Some(true),
+            system_prompt: None,
+            temperature: None,
+            top_p: None,
+            frequency_penalty: None,
+            max_tokens: None,
+            output_kind: Some("document".to_string()),
+            output_items: Some(1),
+            allow_assistant_actions: false,
+            confirmed_message_id: None,
+            confirmed_workflow_guard_message_id: None,
+            trigger_source: Some("collaboration".to_string()),
+        };
+
+        match enqueue_ai_task_for_request(
+            state,
+            user_id,
+            req,
+            AiUsageOperation::Task,
+            StreamFallbackMode::Force,
+        )
+        .await
+        {
+            Ok(task) => {
+                let linked =
+                    repo::link_assignment_ai_task(&state.db, &claimed.id, &task.id).await?;
+                let next_order = repo::get_next_queue_order(&state.db, session_id).await?;
+                let _ = repo::create_message(
+                    &state.db,
+                    session_id,
+                    session.orchestrator_agent_id.as_deref(),
+                    Some(&linked.agent_id),
+                    MessageKind::Assign.as_str(),
+                    &linked.goal,
+                    None,
+                    None,
+                    next_order,
+                )
+                .await;
+                broadcast_collaboration_event(
+                    state,
+                    session_id,
+                    "collaboration_assignment_updated",
+                    Some(json!({
+                        "assignmentId": linked.id,
+                        "agentId": linked.agent_id,
+                        "newStatus": linked.status,
+                        "aiTaskId": linked.ai_task_id,
+                    })),
+                );
+                if let Some(current_task) = state.ai_runtime.get_task(user_id, &task.id).await {
+                    if matches!(
+                        current_task.status,
+                        crate::ai::config::AiTaskStatus::Completed
+                            | crate::ai::config::AiTaskStatus::Failed
+                    ) {
+                        Box::pin(super::worker::sync_terminal_task(state, &current_task)).await?;
+                    }
+                }
+            }
+            Err(error) => {
+                let failed = repo::update_assignment_status(
+                    &state.db,
+                    &claimed.id,
+                    AssignmentStatus::Failed.as_str(),
+                )
+                .await?;
+                broadcast_collaboration_event(
+                    state,
+                    session_id,
+                    "collaboration_assignment_updated",
+                    Some(json!({
+                        "assignmentId": failed.id,
+                        "agentId": failed.agent_id,
+                        "newStatus": failed.status,
+                        "error": error.to_string(),
+                    })),
+                );
+                halt_failed_session(state, session_id, "协同任务创建失败").await?;
+                return Err(anyhow::anyhow!(error.to_string()));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn assignment_dependencies(assignment: &CollaborationAssignment) -> Vec<String> {
+    assignment
+        .depends_on_json
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+        .unwrap_or_default()
+}
+
+fn dependencies_satisfied(
+    assignment: &CollaborationAssignment,
+    assignments: &[CollaborationAssignment],
+) -> bool {
+    assignment_dependencies(assignment)
+        .into_iter()
+        .all(|dependency| {
+            assignments
+                .iter()
+                .find(|candidate| candidate.agent_id == dependency)
+                .is_some_and(|candidate| candidate.status == "done")
+        })
+}
+
+fn dependency_output_context(
+    assignment: &CollaborationAssignment,
+    messages: &[CollaborationMessage],
+) -> String {
+    let dependencies = assignment_dependencies(assignment);
+    let outputs = dependencies
+        .iter()
+        .filter_map(|agent_id| {
+            messages
+                .iter()
+                .rev()
+                .find(|message| {
+                    message.source_agent_id.as_deref() == Some(agent_id.as_str())
+                        && message.message_kind == MessageKind::Status.as_str()
+                })
+                .map(|message| format!("\n上游智能体 {} 的产出：\n{}", agent_id, message.content))
+        })
+        .collect::<String>();
+    if outputs.is_empty() {
+        String::new()
+    } else {
+        format!("\n依赖任务产出：{}", outputs)
+    }
 }
 
 /// 发送协同消息
@@ -694,7 +769,38 @@ async fn admit_session(
     }
 
     // 入场成功后自动创建 pipeline_run
-    let pipeline_run_id = create_pipeline_from_collaboration(&state, &session, &assignments).await;
+    let pipeline_run_id =
+        match create_pipeline_from_collaboration(state, &session, &assignments).await {
+            Ok(pipeline_run_id) => pipeline_run_id,
+            Err(error) => {
+                let failure_payload = json!({
+                    "admitted": false,
+                    "sessionId": session_id,
+                    "pipelineRunId": null,
+                    "error": error.to_string(),
+                });
+                let _ = repo::update_admission_decision(
+                    &state.db,
+                    &session_id,
+                    &failure_payload.to_string(),
+                )
+                .await;
+                let _ = repo::create_event(
+                    &state.db,
+                    &session_id,
+                    "collaboration_admission_changed",
+                    Some(&failure_payload.to_string()),
+                )
+                .await;
+                broadcast_collaboration_event(
+                    state,
+                    &session_id,
+                    "collaboration_admission_changed",
+                    Some(failure_payload),
+                );
+                return Err(error);
+            }
+        };
 
     let payload = json!({
         "admitted": true,
@@ -720,23 +826,21 @@ async fn admit_session(
         Some(payload),
     );
 
-    if pipeline_run_id.is_some() {
-        let workspace_payload = json!({
-            "sessionId": session_id,
-            "pipelineRunId": pipeline_run_id,
-            "state": "workspace_execution"
-        });
-        broadcast_collaboration_event(
-            &state,
-            &session_id,
-            "collaboration_workspace_started",
-            Some(workspace_payload),
-        );
-    }
+    let workspace_payload = json!({
+        "sessionId": session_id,
+        "pipelineRunId": pipeline_run_id,
+        "state": "workspace_execution"
+    });
+    broadcast_collaboration_event(
+        state,
+        &session_id,
+        "collaboration_workspace_started",
+        Some(workspace_payload),
+    );
 
     Ok(AdmitResponse {
         admitted: true,
-        pipeline_run_id,
+        pipeline_run_id: Some(pipeline_run_id),
         reason: readiness.reason,
         blocking_issues: None,
     })
@@ -866,7 +970,30 @@ fn evaluate_readiness(assignments: &[CollaborationAssignment]) -> ReadinessResul
 
 #[cfg(test)]
 mod tests {
-    use super::{COLLABORATION_PIPELINE_TYPE, COLLABORATION_TRIGGER_SOURCE};
+    use super::{
+        dependencies_satisfied, CollaborationAssignment, COLLABORATION_PIPELINE_TYPE,
+        COLLABORATION_TRIGGER_SOURCE,
+    };
+
+    fn assignment(agent_id: &str, status: &str, dependencies: &[&str]) -> CollaborationAssignment {
+        CollaborationAssignment {
+            id: format!("assignment-{agent_id}"),
+            session_id: "session-1".to_string(),
+            agent_id: agent_id.to_string(),
+            task_type: "design".to_string(),
+            goal: "test".to_string(),
+            input_json: None,
+            depends_on_json: (!dependencies.is_empty()).then(|| {
+                serde_json::to_string(dependencies).expect("dependencies should serialize")
+            }),
+            status: status.to_string(),
+            blocking_question_count: 0,
+            last_question_fingerprint: None,
+            ai_task_id: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
 
     #[test]
     fn collaboration_pipeline_type_matches_database_constraint() {
@@ -883,6 +1010,16 @@ mod tests {
         assert!(supported.contains(&COLLABORATION_PIPELINE_TYPE));
         assert!(supported_trigger_sources.contains(&COLLABORATION_TRIGGER_SOURCE));
     }
+
+    #[test]
+    fn dependent_assignment_waits_for_upstream_completion() {
+        let downstream = assignment("agent-b", "assigned", &["agent-a"]);
+        let mut assignments = vec![assignment("agent-a", "running", &[]), downstream.clone()];
+        assert!(!dependencies_satisfied(&downstream, &assignments));
+
+        assignments[0].status = "done".to_string();
+        assert!(dependencies_satisfied(&downstream, &assignments));
+    }
 }
 
 /// 协同入场后自动创建 pipeline_run
@@ -893,15 +1030,16 @@ async fn create_pipeline_from_collaboration(
     state: &AppState,
     session: &CollaborationSession,
     assignments: &[CollaborationAssignment],
-) -> Option<String> {
+) -> Result<String, AppError> {
     let ready_assignments: Vec<&CollaborationAssignment> = assignments
         .iter()
         .filter(|a| a.status == "ready" || a.status == "done")
         .collect();
 
     if ready_assignments.is_empty() {
-        tracing::warn!(session_id = %session.id, "无就绪任务，跳过 pipeline_run 创建");
-        return None;
+        return Err(AppError::BadRequest(
+            "没有可创建工作区流程的协同任务".to_string(),
+        ));
     }
 
     let step_keys = ready_assignments
@@ -948,58 +1086,40 @@ async fn create_pipeline_from_collaboration(
         steps,
     };
 
-    match crate::pipeline::handlers::create_pipeline_run_for_user(
+    let (_, run) = crate::pipeline::handlers::create_pipeline_run_for_user(
         &state.db,
         &session.user_id,
         req,
         false,
     )
+    .await?;
+    let run_id = run.id;
+    repo::update_session_pipeline_run_id(&state.db, &session.id, &run_id)
+        .await
+        .map_err(|error| AppError::Internal(error.to_string()))?;
+    repo::update_session_state(
+        &state.db,
+        &session.id,
+        SessionState::WorkspaceExecution.as_str(),
+    )
     .await
-    {
-        Ok((_, run)) => {
-            let run_id = run.id.clone();
-            if let Err(error) =
-                repo::update_session_pipeline_run_id(&state.db, &session.id, &run_id).await
-            {
-                tracing::error!(session_id = %session.id, error = %error, "保存协同 pipeline_run 关联失败");
-                return None;
-            }
-            if let Err(error) = repo::update_session_state(
-                &state.db,
-                &session.id,
-                SessionState::WorkspaceExecution.as_str(),
-            )
-            .await
-            {
-                tracing::error!(session_id = %session.id, error = %error, "推进协同工作区状态失败");
-                return None;
-            }
-            tracing::info!(
-                session_id = %session.id,
-                pipeline_run_id = %run_id,
-                "协同入场后自动创建 pipeline_run 成功"
-            );
-            let payload = json!({
-                "sessionId": session.id,
-                "pipelineRunId": run_id,
-                "state": SessionState::WorkspaceExecution.as_str(),
-            });
-            let _ = repo::create_event(
-                &state.db,
-                &session.id,
-                "collaboration_workspace_started",
-                Some(&payload.to_string()),
-            )
-            .await;
-            Some(run_id)
-        }
-        Err(e) => {
-            tracing::error!(
-                session_id = %session.id,
-                error = %e,
-                "协同入场后创建 pipeline_run 失败"
-            );
-            None
-        }
-    }
+    .map_err(|error| AppError::Internal(error.to_string()))?;
+    tracing::info!(
+        session_id = %session.id,
+        pipeline_run_id = %run_id,
+        "协同入场后自动创建 pipeline_run 成功"
+    );
+    let payload = json!({
+        "sessionId": session.id,
+        "pipelineRunId": run_id,
+        "state": SessionState::WorkspaceExecution.as_str(),
+    });
+    let _ = repo::create_event(
+        &state.db,
+        &session.id,
+        "collaboration_workspace_started",
+        Some(&payload.to_string()),
+    )
+    .await;
+    Ok(run_id)
 }

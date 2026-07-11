@@ -270,6 +270,23 @@ pub async fn update_assignment_status(
 }
 
 /// 将任务卡关联到真实 AI 任务，并进入运行态
+pub async fn claim_assignment_for_execution(
+    pool: &SqlitePool,
+    assignment_id: &str,
+) -> Result<Option<CollaborationAssignment>> {
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true) + "Z";
+    Ok(sqlx::query_as::<_, CollaborationAssignment>(
+        "UPDATE collaboration_assignments
+         SET status = 'running', updated_at = ?
+         WHERE id = ? AND status IN ('assigned', 'ready') AND ai_task_id IS NULL
+         RETURNING *",
+    )
+    .bind(&now)
+    .bind(assignment_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
 pub async fn link_assignment_ai_task(
     pool: &SqlitePool,
     assignment_id: &str,
@@ -278,8 +295,8 @@ pub async fn link_assignment_ai_task(
     let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true) + "Z";
     sqlx::query(
         "UPDATE collaboration_assignments
-         SET ai_task_id = ?, status = 'running', updated_at = ?
-         WHERE id = ?",
+         SET ai_task_id = ?, updated_at = ?
+         WHERE id = ? AND status = 'running'",
     )
     .bind(ai_task_id)
     .bind(&now)

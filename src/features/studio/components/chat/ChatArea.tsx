@@ -199,7 +199,13 @@ export const ChatArea: React.FC = () => {
   }, [activeCollaborationMessages, messageGroupsState.visibleMessageGroups]);
 
   useEffect(() => {
+    useAppStore.getState().clearCollaboration();
+    setCollaborationReadiness(null);
+  }, [activeProject?.id, activeState.chatSessionId]);
+
+  useEffect(() => {
     if (!activeProject || !activeState.chatSessionId || !isServerWorkspaceReady) {
+      useAppStore.getState().clearCollaboration();
       setCollaborationReadiness(null);
       return;
     }

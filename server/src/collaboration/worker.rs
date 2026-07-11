@@ -9,6 +9,7 @@ use super::{handlers, model::AssignmentStatus, repo};
 
 pub fn start_worker(state: AppState) {
     let startup_state = state.clone();
+    let retry_state = state.clone();
     tokio::spawn(async move {
         if let Err(error) = reconcile_active_sessions(&startup_state).await {
             tracing::warn!(error = %error, "failed to reconcile collaboration sessions");
@@ -16,6 +17,7 @@ pub fn start_worker(state: AppState) {
     });
 
     let mut receiver = state.ai_runtime.subscribe();
+    let event_state = state;
     tokio::spawn(async move {
         loop {
             match receiver.recv().await {
@@ -24,7 +26,9 @@ pub fn start_worker(state: AppState) {
                         envelope.event.task.status,
                         AiTaskStatus::Completed | AiTaskStatus::Failed
                     ) {
-                        if let Err(error) = sync_terminal_task(&state, &envelope.event.task).await {
+                        if let Err(error) =
+                            sync_terminal_task(&event_state, &envelope.event.task).await
+                        {
                             tracing::warn!(
                                 task_id = %envelope.event.task.id,
                                 error = %error,
@@ -34,7 +38,7 @@ pub fn start_worker(state: AppState) {
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    if let Err(error) = reconcile_active_sessions(&state).await {
+                    if let Err(error) = reconcile_active_sessions(&event_state).await {
                         tracing::warn!(error = %error, "failed to reconcile after task event lag");
                     }
                 }
@@ -42,10 +46,26 @@ pub fn start_worker(state: AppState) {
             }
         }
     });
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(error) = reconcile_active_sessions(&retry_state).await {
+                tracing::warn!(error = %error, "failed to periodically reconcile collaboration sessions");
+            }
+        }
+    });
 }
 
 async fn reconcile_active_sessions(state: &AppState) -> anyhow::Result<()> {
     for session in repo::list_active_sessions(&state.db).await? {
+        if let Err(error) =
+            handlers::dispatch_ready_assignments(state, &session.user_id, &session.id).await
+        {
+            tracing::warn!(session_id = %session.id, error = %error, "failed to dispatch ready collaboration assignments");
+        }
         let assignments = repo::list_assignments(&state.db, &session.id).await?;
         for assignment in assignments
             .iter()
@@ -89,7 +109,9 @@ async fn reconcile_active_sessions(state: &AppState) -> anyhow::Result<()> {
             handlers::halt_failed_session(state, &session.id, "服务恢复时发现协同任务已失败或丢失")
                 .await?;
         } else {
-            let _ = handlers::try_auto_admit(state, &session.id).await;
+            if let Err(error) = handlers::try_auto_admit(state, &session.id).await {
+                tracing::warn!(session_id = %session.id, error = %error, "failed to auto-admit collaboration session");
+            }
         }
     }
     Ok(())
@@ -160,7 +182,10 @@ pub(crate) async fn sync_terminal_task(state: &AppState, task: &AiTask) -> anyho
     );
 
     if matches!(task.status, AiTaskStatus::Completed) {
-        let _ = handlers::try_auto_admit(state, &assignment.session_id).await;
+        let session = repo::get_session(&state.db, &assignment.session_id).await?;
+        handlers::dispatch_ready_assignments(state, &session.user_id, &assignment.session_id)
+            .await?;
+        handlers::try_auto_admit(state, &assignment.session_id).await?;
     } else {
         handlers::halt_failed_session(state, &assignment.session_id, &content).await?;
     }
