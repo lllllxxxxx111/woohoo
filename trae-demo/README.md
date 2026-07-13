@@ -74,6 +74,7 @@ docker compose up --build
 
 - `submission-post.md`：可直接复制到 TRAE 论坛的作品帖草稿
 - `how-to-publish.md`：按官方发布指南整理的发帖步骤
+- `key-steps-prompts.md`：关键步骤截图和 TRAE Session ID 的提示词
 - `session-ids.md`：TRAE Session ID 和截图补充清单
 - `README.md`：本文件，包含运行方式和演示脚本
 - `screenshots/01-login.png`：已生成的登录页截图
