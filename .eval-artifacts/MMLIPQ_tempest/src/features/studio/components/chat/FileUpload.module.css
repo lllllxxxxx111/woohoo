@@ -1,0 +1,123 @@
+.uploadBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.uploadBtn:hover:not(:disabled) {
+  color: var(--bg-accent);
+  background: rgba(102, 126, 234, 0.08);
+  transform: translateY(-1px);
+}
+
+.uploadBtn:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+.uploadBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.previewContainer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 12px;
+  background: var(--color-fill-1);
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.previewItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--color-bg-2);
+  border-radius: 8px;
+  font-size: 12px;
+  max-width: 240px;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.previewItem:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.userSource {
+  border-left: 3px solid #3b82f6;
+}
+
+.aiGeneratedSource {
+  border-left: 3px solid #a855f7;
+  background: linear-gradient(135deg, rgba(168, 85, 247, 0.06), var(--color-bg-2));
+}
+
+.aiReferencedSource {
+  border-right: 3px solid #22c55e;
+}
+
+.fileIcon {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.fileName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.fileSize {
+  color: var(--text-quaternary);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.removeBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-quaternary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+  margin-left: 2px;
+}
+
+.removeBtn:hover {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+}
+
+.sourceTag {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--color-fill-3);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}

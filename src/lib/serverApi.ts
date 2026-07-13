@@ -401,6 +401,8 @@ const SERVER_PORT_SEARCH_LIMIT =
   Number.parseInt(import.meta.env.VITE_SERVER_PORT_SEARCH_LIMIT || '12', 10) || 12;
 const DEFAULT_SERVER_REQUEST_TIMEOUT_MS =
   Number.parseInt(import.meta.env.VITE_SERVER_REQUEST_TIMEOUT_MS || '10000', 10) || 10000;
+const DEFAULT_SERVER_BASE_URL_PROBE_TIMEOUT_MS =
+  Number.parseInt(import.meta.env.VITE_SERVER_BASE_URL_PROBE_TIMEOUT_MS || '800', 10) || 800;
 const SERVER_BASE_URL_PROBE_TTL_MS =
   Number.parseInt(import.meta.env.VITE_SERVER_BASE_URL_PROBE_TTL_MS || '30000', 10) || 30000;
 const SERVER_BASE_URL_FAILURE_BACKOFF_MS =
@@ -526,8 +528,7 @@ function getRecentServerBaseUrlDiscoveryFailureMessage() {
   }
 
   return (
-    serverBaseUrlDiscoveryFailureMessage ||
-    '本地后端不可达，请先检查后端是否正常运行，稍后重试。'
+    serverBaseUrlDiscoveryFailureMessage || '本地后端不可达，请先检查后端是否正常运行，稍后重试。'
   );
 }
 
@@ -603,10 +604,11 @@ function markServerBaseUrlReachable(baseUrl: string) {
 
 async function probeServerBaseUrl(baseUrl: string) {
   const controller = new AbortController();
+  const timeoutMs = Math.max(250, DEFAULT_SERVER_BASE_URL_PROBE_TIMEOUT_MS);
   const timeoutId =
     typeof window !== 'undefined'
-      ? window.setTimeout(() => controller.abort(), 3000)
-      : setTimeout(() => controller.abort(), 3000);
+      ? window.setTimeout(() => controller.abort(), timeoutMs)
+      : setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(`${baseUrl}/health`, {
@@ -651,16 +653,44 @@ async function probeServerBaseUrl(baseUrl: string) {
 }
 
 async function discoverServerBaseUrl() {
-  for (const candidate of getServerBaseUrlCandidates()) {
-    if (await probeServerBaseUrl(candidate)) {
+  const candidates = getServerBaseUrlCandidates();
+
+  const found = await new Promise<string | null>((resolve) => {
+    let pendingCount = candidates.length;
+
+    for (const candidate of candidates) {
+      void probeServerBaseUrl(candidate)
+        .then((isReachable) => {
+          if (isReachable) {
+            resolve(candidate);
+          }
+        })
+        .catch(() => {
+          // Ignore individual probe failures; discovery only needs one healthy server.
+        })
+        .finally(() => {
+          pendingCount -= 1;
+          if (pendingCount === 0) {
+            resolve(null);
+          }
+        });
+    }
+  });
+
+  if (found) {
+    persistServerBaseUrl(found);
+    return found;
+  }
+
+  for (const candidate of candidates) {
+    if (hasRecentServerBaseUrlProbe(candidate)) {
       persistServerBaseUrl(candidate);
       return candidate;
     }
   }
 
   clearStoredServerBaseUrl();
-  const errorMessage =
-    '本地后端不可达，系统已尝试自动切换端口但未发现可用服务';
+  const errorMessage = '本地后端不可达，系统已尝试自动切换端口但未发现可用服务';
   markServerBaseUrlDiscoveryFailure(errorMessage);
   throw new Error(errorMessage);
 }
@@ -1166,6 +1196,8 @@ async function requestApi<T>(path: string, init: RequestInit = {}, retry = true)
   return parseResponse<T>(response);
 }
 
+export const apiFetch = requestApi;
+
 async function requestApiBlob(path: string, init: RequestInit = {}, retry = true): Promise<Blob> {
   const session = await ensureServerSession(retry ? false : true);
   const headers = new Headers(init.headers);
@@ -1231,11 +1263,12 @@ export async function fetchServer(
         throw error; // 保持原始 AbortError 以便调用方识别
       }
       // 处理网络层中断（ERR_ABORTED 等），静默传递不输出控制台错误
-      if (error instanceof TypeError && (
-        error.message.includes('Failed to fetch') ||
-        error.message.includes('NetworkError') ||
-        error.message.includes('aborted')
-      )) {
+      if (
+        error instanceof TypeError &&
+        (error.message.includes('Failed to fetch') ||
+          error.message.includes('NetworkError') ||
+          error.message.includes('aborted'))
+      ) {
         throw new DOMException('Request aborted by user or system', 'AbortError');
       }
       if (error instanceof TypeError) {
@@ -1289,9 +1322,7 @@ async function parseResponse<T>(response: Response): Promise<T> {
 
   if (!response.ok) {
     const errorCode =
-      parsed && typeof parsed === 'object' && 'errorCode' in parsed
-        ? String(parsed.errorCode)
-        : '';
+      parsed && typeof parsed === 'object' && 'errorCode' in parsed ? String(parsed.errorCode) : '';
     if (errorCode === 'BUDGET_EXCEEDED' && typeof window !== 'undefined') {
       window.dispatchEvent(new Event(BUDGET_REFRESH_EVENT));
     }
@@ -1609,10 +1640,12 @@ export async function searchAssetsAcrossProjects(params: AssetSearchParams = {})
     `/api/assets/search${qs ? `?${qs}` : ''}`,
   );
 
-  return assets.map((asset): AssetWithProject => ({
-    ...mapAsset(asset),
-    projectName: asset.projectName,
-  }));
+  return assets.map(
+    (asset): AssetWithProject => ({
+      ...mapAsset(asset),
+      projectName: asset.projectName,
+    }),
+  );
 }
 
 export async function updateAssetTags(assetId: string, tags: string[]) {

@@ -1,0 +1,21 @@
+// Async Arco style entry for overlays/settings/auth that are lazy-loaded.
+import '@arco-design/web-react/es/Alert/style/css.js';
+import '@arco-design/web-react/es/Avatar/style/css.js';
+import '@arco-design/web-react/es/Button/style/css.js';
+import '@arco-design/web-react/es/Card/style/css.js';
+import '@arco-design/web-react/es/Divider/style/css.js';
+import '@arco-design/web-react/es/Form/style/css.js';
+import '@arco-design/web-react/es/Input/style/css.js';
+import '@arco-design/web-react/es/InputNumber/style/css.js';
+import '@arco-design/web-react/es/Message/style/css.js';
+import '@arco-design/web-react/es/Modal/style/css.js';
+import '@arco-design/web-react/es/Popconfirm/style/css.js';
+import '@arco-design/web-react/es/Select/style/css.js';
+import '@arco-design/web-react/es/Slider/style/css.js';
+import '@arco-design/web-react/es/Space/style/css.js';
+import '@arco-design/web-react/es/Switch/style/css.js';
+import '@arco-design/web-react/es/Table/style/css.js';
+import '@arco-design/web-react/es/Tabs/style/css.js';
+import '@arco-design/web-react/es/Tag/style/css.js';
+import '@arco-design/web-react/es/Tooltip/style/css.js';
+import '@arco-design/web-react/es/Typography/style/css.js';

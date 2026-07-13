@@ -162,6 +162,10 @@ async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<String>, sqlx::E
             "022_budget_control",
             include_str!("../migrations/022_budget_control.sql"),
         ),
+        (
+            "023_export_audit",
+            include_str!("../migrations/023_export_audit.sql"),
+        ),
     ] {
         if version == "020_asset_governance" {
             let tables = list_all_tables(pool)
@@ -2025,6 +2029,7 @@ mod tests {
                 "020_asset_governance".to_string(),
                 "021_pipeline_manual_reviews".to_string(),
                 "022_budget_control".to_string(),
+                "023_export_audit".to_string(),
             ]
         );
 

@@ -1,0 +1,204 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+}
+
+.heroCard {
+  padding: 20px 22px;
+  border: 1px solid var(--border-color);
+  border-radius: 20px;
+  background:
+    linear-gradient(135deg, rgba(102, 126, 234, 0.12), rgba(14, 165, 233, 0.04)),
+    color-mix(in srgb, var(--bg-card) 94%, white 6%);
+  box-shadow: var(--shadow-sm);
+}
+
+.heroRow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.heroTitle {
+  margin: 0;
+  font-size: 1.08rem;
+  color: var(--text-primary);
+}
+
+.heroDescription {
+  margin: 8px 0 0;
+  max-width: 68ch;
+  color: var(--text-secondary);
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
+.heroActions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.sectionCard {
+  border: 1px solid var(--border-color);
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--bg-card) 94%, white 6%);
+  box-shadow: var(--shadow-sm);
+}
+
+.splitGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(320px, 0.92fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.listStack {
+  display: grid;
+  gap: 12px;
+}
+
+.listCard {
+  padding: 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg-primary) 92%, white 8%);
+  transition:
+    border-color var(--transition-fast),
+    background-color var(--transition-fast),
+    transform var(--transition-fast);
+}
+
+.listCard:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-highlight);
+}
+
+.listCardActive {
+  border-color: var(--border-highlight);
+  background: color-mix(in srgb, var(--bg-primary) 86%, rgba(102, 126, 234, 0.08) 14%);
+}
+
+.listCardHead {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.listCardBody {
+  min-width: 0;
+}
+
+.listMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.listText {
+  display: block;
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.listActions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: none;
+}
+
+.emptyCard {
+  padding: 18px;
+  border: 1px dashed var(--border-color);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg-primary) 94%, white 6%);
+}
+
+.formGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.formGridFull {
+  display: grid;
+  gap: 16px;
+}
+
+.fieldNote {
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.tableShell {
+  overflow: hidden;
+}
+
+.tableShell :global(.arco-table-container) {
+  border-radius: 16px;
+}
+
+.auditList {
+  display: grid;
+  gap: 12px;
+}
+
+.auditCard {
+  padding: 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg-primary) 92%, white 8%);
+}
+
+.statusRow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.statusRow + .statusRow {
+  margin-top: 10px;
+}
+
+.statusLabel {
+  color: var(--text-secondary);
+}
+
+.statusValue {
+  color: var(--text-primary);
+  text-align: right;
+  word-break: break-word;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 960px) {
+  .splitGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .formGrid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "service": "woohoo-server",
+  "host": "127.0.0.1",
+  "port": 18080,
+  "baseUrl": "http://127.0.0.1:18080",
+  "healthUrl": "http://127.0.0.1:18080/health",
+  "pid": 29692,
+  "startedAt": 1783759842898
+}

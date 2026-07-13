@@ -1,0 +1,2 @@
+-- Link image generation tasks to projects and generated asset records.
+-- Runtime Rust backfills handle ALTER TABLE safely for existing SQLite databases.

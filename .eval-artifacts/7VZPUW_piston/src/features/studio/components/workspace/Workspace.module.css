@@ -1,0 +1,180 @@
+.workspace {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  background-color: var(--color-bg-1);
+  min-width: 0;
+}
+
+.bentoHeader {
+  height: 68px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  background: var(--bg-card);
+  backdrop-filter: var(--backdrop-blur);
+  border-bottom: 1px solid var(--border-soft);
+  box-shadow: var(--shadow-inset);
+  flex-wrap: nowrap;
+  z-index: 10;
+}
+
+.projectInfo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.mobileMenuBtn {
+  display: none !important;
+  color: var(--text-primary) !important;
+  margin-right: 4px;
+}
+
+.projectLogo {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, rgb(var(--arcoblue-6)), rgb(var(--purple-6)));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  flex-shrink: 0;
+}
+
+.statusDot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: rgb(var(--green-6));
+  margin-right: 4px;
+  animation: pulse 2s infinite;
+}
+
+.viewContext {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-primary-soft);
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-soft);
+  color: var(--text-secondary);
+  min-width: 0;
+}
+
+.viewContext span {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.viewContext strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.bentoContent {
+  flex: 1;
+  padding: 16px;
+  overflow: hidden;
+  background-color: var(--color-bg-1);
+  display: flex;
+  flex-direction: column;
+}
+
+.bentoGrid {
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+  gap: 16px;
+  height: 100%;
+  min-height: 0;
+}
+
+.bentoCardMain,
+.bentoCardFull {
+  background: var(--bg-card);
+  border-radius: 20px;
+  border: 1px solid var(--border-soft);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: var(--backdrop-blur);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  animation: cardFadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes cardFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+@media (max-width: 920px) {
+  .bentoHeader {
+    height: auto;
+    padding: 12px;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .viewContext {
+    order: 3;
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .mobileMenuBtn {
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .actions {
+    overflow-x: auto;
+    max-width: 100%;
+    padding-bottom: 4px;
+  }
+
+  .actions::-webkit-scrollbar {
+    display: none;
+  }
+
+  .bentoContent {
+    padding: 8px; /* Less padding on mobile */
+  }
+}

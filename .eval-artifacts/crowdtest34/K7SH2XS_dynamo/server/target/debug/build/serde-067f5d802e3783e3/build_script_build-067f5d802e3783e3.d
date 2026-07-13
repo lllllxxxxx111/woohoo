@@ -1,0 +1,5 @@
+C:\Users\lxy\Desktop\work\woohoo\.eval-artifacts\crowdtest34\K7SH2XS_dynamo\server\target\debug\build\serde-067f5d802e3783e3\build_script_build-067f5d802e3783e3.d: C:\Users\lxy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\build.rs
+
+C:\Users\lxy\Desktop\work\woohoo\.eval-artifacts\crowdtest34\K7SH2XS_dynamo\server\target\debug\build\serde-067f5d802e3783e3\build_script_build-067f5d802e3783e3.exe: C:\Users\lxy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\build.rs
+
+C:\Users\lxy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\build.rs:

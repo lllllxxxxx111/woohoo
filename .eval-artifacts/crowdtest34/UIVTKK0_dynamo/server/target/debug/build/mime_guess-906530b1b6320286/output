@@ -1,0 +1,1 @@
+cargo:rustc-env=MIME_TYPES_GENERATED_PATH=C:\Users\lxy\Desktop\work\woohoo\.eval-artifacts\crowdtest34\UIVTKK0_dynamo\server\target\debug\build\mime_guess-906530b1b6320286\out\mime_types_generated.rs
