@@ -194,7 +194,7 @@ export interface CreatePipelineRunInput {
     stepKey: string;
     stepName: string;
     stepOrder: number;
-    stepType?: 'design' | 'review' | 'system';
+    stepType?: 'design' | 'review' | 'system' | 'image_gen' | 'video_gen';
     dependsOn?: string[];
     reviewPolicy?: Record<string, unknown>;
     maxRetries?: number;

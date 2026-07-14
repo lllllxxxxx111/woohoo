@@ -19,65 +19,87 @@ use super::repo;
 
 const IMAGE_GEN_TIMEOUT_SECS: u64 = 3600;
 
-pub async fn create_generation(
-    State(state): State<AppState>,
-    axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
-    Json(req): Json<CreateImageGenerationReq>,
-) -> Result<Json<ImageGenerationResponse>, AppError> {
-    if req.prompt.trim().is_empty() {
+/**
+ * 图片生成任务入队公共入口
+ *
+ * 提取自 create_generation handler，供 orchestrator 在 dispatch_image_gen_step 中复用。
+ * 完整流程：项目权限校验 → 端点解析 → 扣费 → 建 DB 记录 → set_processing → spawn 后台任务。
+ *
+ * @param state 应用全局状态
+ * @param user_id 触发用户 ID
+ * @param project_id 关联项目 ID（可选）
+ * @param prompt 图片生成提示词
+ * @param size 图片尺寸，如 "1024x1024"
+ * @param n 生成数量（1-10）
+ * @param endpoint_id 指定端点 ID（可选，None 时自动解析）
+ * @param model 指定模型名（可选，None 时使用默认 dall-e-3）
+ * @returns 创建好的 ImageGeneration 记录（status=processing）
+ */
+pub(crate) async fn enqueue_image_generation(
+    state: &AppState,
+    user_id: &str,
+    project_id: Option<&str>,
+    prompt: &str,
+    size: &str,
+    n: i64,
+    endpoint_id: Option<&str>,
+    model: Option<&str>,
+) -> Result<ImageGeneration, AppError> {
+    if prompt.trim().is_empty() {
         return Err(AppError::BadRequest("prompt cannot be empty".to_string()));
     }
-
-    if req.n < 1 || req.n > 10 {
+    if n < 1 || n > 10 {
         return Err(AppError::BadRequest(
             "n must be between 1 and 10".to_string(),
         ));
     }
 
-    let project_id = normalize_project_id(req.project_id.as_deref());
-    if let Some(project_id) = project_id.as_deref() {
-        ensure_project_access(&state.db, &user_id.0, project_id).await?;
+    let normalized_project_id = normalize_project_id(project_id);
+    if let Some(pid) = normalized_project_id.as_deref() {
+        ensure_project_access(&state.db, user_id, pid).await?;
     }
 
+    let requested_model = model.unwrap_or("dall-e-3").to_string();
     let resolved = crate::ai::capabilities::resolve_image_generation_capability(
-        &state,
-        &user_id.0,
-        req.endpoint_id.as_deref(),
-        Some(&req.model),
+        state,
+        user_id,
+        endpoint_id,
+        Some(&requested_model),
     )
     .await
     .map_err(|error| {
         tracing::warn!(error = %error, "image generation endpoint resolution failed");
         let api_key = env::var("AI_API_KEY").unwrap_or_default();
         if api_key.is_empty() {
-            return AppError::Validation(
+            AppError::Validation(
                 "Please enable an image generation API channel in settings or configure AI_API_KEY."
                     .into(),
-            );
+            )
+        } else {
+            AppError::Internal(format!(
+                "image generation endpoint resolution failed: {}",
+                error
+            ))
         }
-        AppError::Internal(format!(
-            "image generation endpoint resolution failed: {}",
-            error
-        ))
     })?;
 
     let resolved_model = resolved.model.clone();
-    let cost = calculate_cost(&resolved_model, &req.size, req.n);
+    let cost = calculate_cost(&resolved_model, size, n);
 
     crate::billing::budget_enforce::enforce_budget(
         &state.db,
-        &user_id.0,
+        user_id,
         cost,
         "image_generation",
         true,
         Some(&resolved_model),
-        project_id.as_deref(),
+        normalized_project_id.as_deref(),
     )
     .await?;
 
     crate::billing::repo::check_and_deduct(
         &state.db,
-        &user_id.0,
+        user_id,
         cost,
         "image_generation",
         Some("image_generation"),
@@ -88,12 +110,12 @@ pub async fn create_generation(
 
     let generation = match repo::create_generation(
         &state.db,
-        &user_id.0,
-        project_id.as_deref(),
-        &req.prompt,
+        user_id,
+        normalized_project_id.as_deref(),
+        prompt,
         &resolved_model,
-        &req.size,
-        req.n,
+        size,
+        n,
         cost,
     )
     .await
@@ -102,7 +124,7 @@ pub async fn create_generation(
         Err(error) => {
             if let Err(refund_error) = crate::billing::repo::refund(
                 &state.db,
-                &user_id.0,
+                user_id,
                 cost,
                 "image_generation_record_create_failed",
                 None,
@@ -117,7 +139,7 @@ pub async fn create_generation(
 
     if let Err(error) = crate::billing::repo::update_spent_ref_id(
         &state.db,
-        &user_id.0,
+        user_id,
         "image_generation",
         &generation.id,
     )
@@ -127,20 +149,20 @@ pub async fn create_generation(
     }
 
     if let Err(error) = repo::set_processing(&state.db, &generation.id).await {
-        refund_and_fail(&state, &user_id.0, &generation.id, cost, &error.to_string()).await?;
+        refund_and_fail(state, user_id, &generation.id, cost, &error.to_string()).await?;
         return Err(AppError::Internal(error.to_string()));
     }
 
     let base_url = resolved.endpoint.base_url.clone();
     let api_key = resolved.endpoint.api_key.clone();
-    let model = resolved_model;
+    let task_model = resolved_model.clone();
     let task_state = state.clone();
-    let task_user_id = user_id.0.clone();
+    let task_user_id = user_id.to_string();
     let task_generation_id = generation.id.clone();
-    let task_project_id = project_id.clone();
-    let task_prompt = req.prompt.clone();
-    let task_size = req.size.clone();
-    let task_n = req.n;
+    let task_project_id = normalized_project_id.clone();
+    let task_prompt = prompt.to_string();
+    let task_size = size.to_string();
+    let task_n = n;
 
     tokio::spawn(async move {
         if let Err(error) = run_generation_task(
@@ -150,7 +172,7 @@ pub async fn create_generation(
             task_project_id,
             base_url,
             api_key,
-            model,
+            task_model,
             task_prompt,
             task_size,
             task_n,
@@ -165,6 +187,31 @@ pub async fn create_generation(
             );
         }
     });
+
+    Ok(generation)
+}
+
+/**
+ * POST /api/image-gen/generations
+ *
+ * HTTP handler，薄壳：解析 body → 调用 enqueue_image_generation → 返回响应。
+ */
+pub async fn create_generation(
+    State(state): State<AppState>,
+    axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
+    Json(req): Json<CreateImageGenerationReq>,
+) -> Result<Json<ImageGenerationResponse>, AppError> {
+    let generation = enqueue_image_generation(
+        &state,
+        &user_id.0,
+        req.project_id.as_deref(),
+        &req.prompt,
+        &req.size,
+        req.n,
+        req.endpoint_id.as_deref(),
+        Some(&req.model),
+    )
+    .await?;
 
     build_generation_response(&state.db, &generation.id, &user_id.0).await
 }

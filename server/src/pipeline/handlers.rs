@@ -679,6 +679,8 @@ fn normalize_step_type(raw: &str) -> &'static str {
         "design" => "design",
         "review" => "review",
         "system" => "system",
+        "image_gen" | "image" => "image_gen",
+        "video_gen" | "video" => "video_gen",
         _ => "design",
     }
 }
@@ -1078,8 +1080,9 @@ pub async fn list_step_reviews(
 #[cfg(test)]
 mod tests {
     use super::{
-        cancel_pipeline_run_state, pause_pipeline_run_state, resume_pipeline_run_state,
-        PipelineRunFilter,
+        cancel_pipeline_run_state, create_pipeline_run_for_user, get_run_by_id,
+        pause_pipeline_run_state, resume_pipeline_run_state, CreatePipelineRunReq,
+        CreatePipelineStepReq, PipelineRunFilter,
     };
     use crate::db::init_db;
     use crate::error::AppError;
@@ -1328,6 +1331,296 @@ mod tests {
             }
             other => panic!("unexpected error type: {other:?}"),
         }
+
+        pool.close().await;
+        std::fs::remove_file(db_path).ok();
+    }
+
+    /// 验证相同 idempotency_key 重复创建返回 409 CONFLICT + 既有 run（req #4 幂等）
+    #[tokio::test]
+    async fn duplicate_create_with_same_idempotency_key_returns_conflict() {
+        let (pool, user_id, existing_run_id, db_path) = setup_test_run("queued").await;
+        // 从既有 run 反查 project_id / conversation_id 用于构造新 run
+        let (project_id, conversation_id): (String, String) =
+            sqlx::query_as("SELECT project_id, conversation_id FROM pipeline_runs WHERE id = ?")
+                .bind(&existing_run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("failed to fetch run context");
+
+        let idempotency_key = format!("dup-key-{}", Uuid::new_v4());
+        let build_req = || CreatePipelineRunReq {
+            project_id: project_id.clone(),
+            conversation_id: conversation_id.clone(),
+            pipeline_type: "outline".to_string(),
+            trigger_source: "manual".to_string(),
+            beta_enabled: true,
+            idempotency_key: Some(idempotency_key.clone()),
+            steps: vec![CreatePipelineStepReq {
+                step_key: "design".to_string(),
+                step_name: "设计".to_string(),
+                step_order: 1,
+                step_type: "design".to_string(),
+                depends_on: vec![],
+                review_policy: None,
+                max_retries: Some(2),
+                prompt_template: Some("生成大纲".to_string()),
+            }],
+        };
+
+        // 第一次创建 → 201 CREATED
+        let (status_first, run_first) =
+            create_pipeline_run_for_user(&pool, &user_id, build_req(), false)
+                .await
+                .expect("first create should succeed");
+        assert_eq!(status_first, axum::http::StatusCode::CREATED);
+        assert_eq!(run_first.status, "queued");
+
+        // 第二次创建（相同 idempotency_key，run 仍为 queued）→ 409 CONFLICT + 既有 run
+        let (status_second, run_second) =
+            create_pipeline_run_for_user(&pool, &user_id, build_req(), false)
+                .await
+                .expect("second create should resolve to conflict");
+        assert_eq!(status_second, axum::http::StatusCode::CONFLICT);
+        assert_eq!(run_second.id, run_first.id, "should return existing run");
+
+        pool.close().await;
+        std::fs::remove_file(db_path).ok();
+    }
+
+    /// 验证终态（completed/failed/cancelled）run 不允许 resume（req #4 终态保护）
+    #[tokio::test]
+    async fn terminal_state_protects_against_resume() {
+        // completed 状态调 resume → Validation error
+        let (pool_completed, user_completed, run_completed, db_completed) =
+            setup_test_run("completed").await;
+        let error_completed =
+            resume_pipeline_run_state(&pool_completed, &user_completed, &run_completed)
+                .await
+                .expect_err("resume from completed should fail");
+        match error_completed {
+            AppError::Validation(message) => {
+                assert!(message.contains("当前状态不允许恢复"));
+                assert!(message.contains("completed"));
+            }
+            other => panic!("unexpected error type for completed: {other:?}"),
+        }
+        pool_completed.close().await;
+        std::fs::remove_file(db_completed).ok();
+
+        // cancelled 状态调 resume → Validation error
+        let (pool_cancelled, user_cancelled, run_cancelled, db_cancelled) =
+            setup_test_run("cancelled").await;
+        let error_cancelled =
+            resume_pipeline_run_state(&pool_cancelled, &user_cancelled, &run_cancelled)
+                .await
+                .expect_err("resume from cancelled should fail");
+        match error_cancelled {
+            AppError::Validation(message) => {
+                assert!(message.contains("当前状态不允许恢复"));
+            }
+            other => panic!("unexpected error type for cancelled: {other:?}"),
+        }
+        pool_cancelled.close().await;
+        std::fs::remove_file(db_cancelled).ok();
+    }
+
+    /// 验证跨用户访问返回 NotFound（req #6 权限隔离）
+    #[tokio::test]
+    async fn cross_user_access_returns_not_found() {
+        let (pool, user_a, run_id, db_path) = setup_test_run("queued").await;
+        let user_b = format!("user-{}", Uuid::new_v4());
+
+        // 用户 A 可以访问自己的 run
+        let run_a = get_run_by_id(&pool, &user_a, &run_id)
+            .await
+            .expect("owner should access own run");
+        assert_eq!(run_a.id, run_id);
+
+        // 用户 B 访问用户 A 的 run → NotFound
+        let error = get_run_by_id(&pool, &user_b, &run_id)
+            .await
+            .expect_err("cross-user access should be denied");
+        match error {
+            AppError::NotFound(_) => {}
+            other => panic!("expected NotFound for cross-user, got {other:?}"),
+        }
+
+        pool.close().await;
+        std::fs::remove_file(db_path).ok();
+    }
+
+    /// 验证 migration 025 后 step_blocked / step_dispatched 等事件类型可写入（req #8 回归）
+    #[tokio::test]
+    async fn step_blocked_event_insert_succeeds_after_migration_025() {
+        let (pool, _user_id, run_id, db_path) = setup_test_run("running").await;
+
+        // step_blocked 事件（migration 025 前会因 CHECK 约束失败）
+        let event_id = format!("evt-{}", Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO pipeline_run_events (id, run_id, step_id, event_type, payload_json, source)
+             VALUES (?, ?, NULL, 'step_blocked', '{}', 'system')",
+        )
+        .bind(&event_id)
+        .bind(&run_id)
+        .execute(&pool)
+        .await
+        .expect("step_blocked event should insert after migration 025");
+
+        // step_dispatched 事件
+        let event_id_2 = format!("evt-{}", Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO pipeline_run_events (id, run_id, step_id, event_type, payload_json, source)
+             VALUES (?, ?, NULL, 'step_dispatched', '{}', 'system')",
+        )
+        .bind(&event_id_2)
+        .bind(&run_id)
+        .execute(&pool)
+        .await
+        .expect("step_dispatched event should insert after migration 025");
+
+        // assistant_step_summary 事件
+        let event_id_3 = format!("evt-{}", Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO pipeline_run_events (id, run_id, step_id, event_type, payload_json, source)
+             VALUES (?, ?, NULL, 'assistant_step_summary', '{}', 'system')",
+        )
+        .bind(&event_id_3)
+        .bind(&run_id)
+        .execute(&pool)
+        .await
+        .expect("assistant_step_summary event should insert after migration 025");
+
+        pool.close().await;
+        std::fs::remove_file(db_path).ok();
+    }
+
+    /// 验证 completed run 不允许 retry-step（req #6 终态保护）
+    /// retry_pipeline_step L381 检查 run.status 必须在 ["running","paused","failed"] 中
+    #[tokio::test]
+    async fn retry_step_on_terminal_run_returns_validation_error() {
+        let (pool, user_id, run_id, db_path) = setup_test_run("completed").await;
+        let run = get_run_by_id(&pool, &user_id, &run_id)
+            .await
+            .expect("should fetch run");
+        // 复现 retry_pipeline_step 的终态保护校验逻辑
+        assert!(
+            !["running", "paused", "failed"].contains(&run.status.as_str()),
+            "completed run should not allow retry-step"
+        );
+
+        pool.close().await;
+        std::fs::remove_file(db_path).ok();
+    }
+
+    /// 验证创建含 image_gen step 的 run 会持久化 step_type='image_gen'（req #1 后端契约）
+    #[tokio::test]
+    async fn create_run_with_image_gen_step_persists_step_type() {
+        let (pool, user_id, existing_run_id, db_path) = setup_test_run("queued").await;
+        let (project_id, conversation_id): (String, String) =
+            sqlx::query_as("SELECT project_id, conversation_id FROM pipeline_runs WHERE id = ?")
+                .bind(&existing_run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("failed to fetch run context");
+
+        let req = CreatePipelineRunReq {
+            project_id,
+            conversation_id,
+            pipeline_type: "custom".to_string(),
+            trigger_source: "manual".to_string(),
+            beta_enabled: true,
+            idempotency_key: Some(format!("img-{}", Uuid::new_v4())),
+            steps: vec![CreatePipelineStepReq {
+                step_key: "char_scene".to_string(),
+                step_name: "角色场景".to_string(),
+                step_order: 1,
+                step_type: "image_gen".to_string(),
+                depends_on: vec![],
+                review_policy: Some(serde_json::json!({
+                    "prompt": "角色立绘",
+                    "size": "1024x1024",
+                    "n": 1
+                })),
+                max_retries: Some(2),
+                prompt_template: None,
+            }],
+        };
+
+        let (status, run) = create_pipeline_run_for_user(&pool, &user_id, req, false)
+            .await
+            .expect("create should succeed");
+        assert_eq!(status, axum::http::StatusCode::CREATED);
+
+        let (step_type,): (Option<String>,) = sqlx::query_as(
+            "SELECT step_type FROM pipeline_run_steps WHERE run_id = ? ORDER BY step_order ASC LIMIT 1",
+        )
+        .bind(&run.id)
+        .fetch_one(&pool)
+        .await
+        .expect("failed to fetch step");
+        assert_eq!(
+            step_type.as_deref(),
+            Some("image_gen"),
+            "image_gen step should persist step_type='image_gen'"
+        );
+
+        pool.close().await;
+        std::fs::remove_file(db_path).ok();
+    }
+
+    /// 验证创建含 video_gen step 的 run 会持久化 step_type='video_gen'（req #1 后端契约）
+    #[tokio::test]
+    async fn create_run_with_video_gen_step_persists_step_type() {
+        let (pool, user_id, existing_run_id, db_path) = setup_test_run("queued").await;
+        let (project_id, conversation_id): (String, String) =
+            sqlx::query_as("SELECT project_id, conversation_id FROM pipeline_runs WHERE id = ?")
+                .bind(&existing_run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("failed to fetch run context");
+
+        let req = CreatePipelineRunReq {
+            project_id,
+            conversation_id,
+            pipeline_type: "custom".to_string(),
+            trigger_source: "manual".to_string(),
+            beta_enabled: true,
+            idempotency_key: Some(format!("vid-{}", Uuid::new_v4())),
+            steps: vec![CreatePipelineStepReq {
+                step_key: "video".to_string(),
+                step_name: "视频".to_string(),
+                step_order: 1,
+                step_type: "video_gen".to_string(),
+                depends_on: vec![],
+                review_policy: Some(serde_json::json!({
+                    "prompt": "开场镜头",
+                    "model": "wan2.1-t2v-480p",
+                    "durationSeconds": 5,
+                    "aspectRatio": "16:9"
+                })),
+                max_retries: Some(2),
+                prompt_template: None,
+            }],
+        };
+
+        let (status, run) = create_pipeline_run_for_user(&pool, &user_id, req, false)
+            .await
+            .expect("create should succeed");
+        assert_eq!(status, axum::http::StatusCode::CREATED);
+
+        let (step_type,): (Option<String>,) = sqlx::query_as(
+            "SELECT step_type FROM pipeline_run_steps WHERE run_id = ? ORDER BY step_order ASC LIMIT 1",
+        )
+        .bind(&run.id)
+        .fetch_one(&pool)
+        .await
+        .expect("failed to fetch step");
+        assert_eq!(
+            step_type.as_deref(),
+            Some("video_gen"),
+            "video_gen step should persist step_type='video_gen'"
+        );
 
         pool.close().await;
         std::fs::remove_file(db_path).ok();

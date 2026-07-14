@@ -1,25 +1,43 @@
-import React, { useCallback, useMemo, useState } from 'react';
-import { LoaderCircle, Map, Send, UserPlus } from 'lucide-react';
+import React, { useMemo } from 'react';
+import { LoaderCircle, Map, Play, PauseCircle, RotateCw, Send, UserPlus, XCircle } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 
 import { useAppStore } from '../../../../../store';
-import { useToast } from '../../../../../context/useToast';
-import { createImageGeneration } from '../../../../../lib/serverApi';
+import {
+  usePipelineRunController,
+  type PipelineStepInput,
+} from './usePipelineRunController';
+import { getErrorCodePreset } from './pipelineStatusPresets';
 import styles from './PipelineSteps.module.css';
 import { createProjectSnapshot } from '../workspaceMvp';
 
 export const CharSceneView: React.FC = () => {
-  const { activeProject, activeScript, activeStoryboard, activeAssets, activeState } = useAppStore(
+  const { activeProject, activeScript, activeStoryboard, activeAssets } = useAppStore(
     useShallow((state) => ({
       activeProject: state.projects.find((project) => project.id === state.activeState.projectId) ?? null,
       activeScript: state.activeScript,
       activeStoryboard: state.activeStoryboard,
       activeAssets: state.activeAssets,
-      activeState: state.activeState,
     })),
   );
-  const { showToast } = useToast();
-  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // 接入共享 Pipeline Run 控制器（req #1：角色/场景接入真实 image_gen step）
+  // pipelineType='custom'（DB 白名单限制），用 triggerSource='char_scene' 区分
+  const {
+    currentRun,
+    isSubmitting,
+    displayState,
+    displayPreset,
+    currentStep,
+    launch,
+    pause,
+    resume,
+    cancel,
+    retryStep,
+  } = usePipelineRunController({
+    pipelineType: 'custom',
+    triggerSource: 'char_scene',
+  });
 
   const snapshot = useMemo(() => {
     if (!activeProject) {
@@ -35,43 +53,60 @@ export const CharSceneView: React.FC = () => {
     });
   }, [activeAssets, activeProject, activeScript, activeStoryboard]);
 
-  /** 生成角色人设资产：调用图片生成 API */
-  const handleGenerateCharacterAsset = useCallback(async (name: string, prompt: string) => {
-    setIsSubmitting(true);
-    try {
-      await createImageGeneration({
-        projectId: activeState.projectId ?? '',
-        prompt: `角色三视图人设：${name}。${prompt}。输出正面、侧面、背面三个角度，电影质感，高细节`,
-        model: 'dall-e-3',
-        size: '1024x1792',
-        n: 1,
-      });
-      showToast({ type: 'success', title: '人物资产任务已提交', message: `角色「${name}」人设生成任务已创建。` });
-    } catch (error) {
-      showToast({ type: 'error', title: '人物资产生成失败', message: error instanceof Error ? error.message : '提交失败' });
-    } finally {
-      setIsSubmitting(false);
-    }
-  }, [activeState.projectId, showToast]);
+  /**
+   * 生成角色人设资产（req #1：image_gen step，reviewPolicy 与后端 parse_image_gen_params 契约对齐）
+   *
+   * @param name 角色名
+   * @param prompt 角色描述
+   */
+  const handleGenerateCharacterAsset = (name: string, prompt: string) => {
+    const steps: PipelineStepInput[] = [
+      {
+        stepKey: 'char_scene_character',
+        stepName: `角色人设：${name}`,
+        stepOrder: 1,
+        stepType: 'image_gen',
+        maxRetries: 2,
+        reviewPolicy: {
+          prompt: `角色三视图人设：${name}。${prompt}。输出正面、侧面、背面三个角度，电影质感，高细节`,
+          size: '1024x1792',
+          n: 1,
+          model: 'dall-e-3',
+        },
+        dependsOn: [],
+      },
+    ];
+    void launch(steps, { idempotencyScope: `character:${name}` });
+  };
 
-  /** 生成场景环境资产：调用图片生成 API */
-  const handleGenerateSceneAsset = useCallback(async (sceneName: string, prompt: string) => {
-    setIsSubmitting(true);
-    try {
-      await createImageGeneration({
-        projectId: activeState.projectId ?? '',
-        prompt: `场景环境概念图：${sceneName}。${prompt}。广角全景，电影级光影，16:9`,
-        model: 'dall-e-3',
-        size: '1792x1024',
-        n: 1,
-      });
-      showToast({ type: 'success', title: '场景资产任务已提交', message: `场景「${sceneName}」环境生成任务已创建。` });
-    } catch (error) {
-      showToast({ type: 'error', title: '场景资产生成失败', message: error instanceof Error ? error.message : '提交失败' });
-    } finally {
-      setIsSubmitting(false);
-    }
-  }, [activeState.projectId, showToast]);
+  /**
+   * 生成场景环境资产（req #1：image_gen step，reviewPolicy 与后端 parse_image_gen_params 契约对齐）
+   *
+   * @param sceneName 场景名
+   * @param prompt 场景描述
+   */
+  const handleGenerateSceneAsset = (sceneName: string, prompt: string) => {
+    const steps: PipelineStepInput[] = [
+      {
+        stepKey: 'char_scene_environment',
+        stepName: `场景环境：${sceneName}`,
+        stepOrder: 1,
+        stepType: 'image_gen',
+        maxRetries: 2,
+        reviewPolicy: {
+          prompt: `场景环境概念图：${sceneName}。${prompt}。广角全景，电影级光影，16:9`,
+          size: '1792x1024',
+          n: 1,
+          model: 'dall-e-3',
+        },
+        dependsOn: [],
+      },
+    ];
+    void launch(steps, { idempotencyScope: `scene:${sceneName}` });
+  };
+
+  // 错误码对应的可操作提示（req #3：前端展示可操作提示，不静默失败）
+  const errorCodePreset = getErrorCodePreset(currentRun?.run.errorCode ?? null);
 
   if (!activeProject || !snapshot) {
     return (
@@ -86,13 +121,54 @@ export const CharSceneView: React.FC = () => {
 
   return (
     <div className={styles.scrollContainer}>
+      {/* 流程状态面板（req #5：统一状态文案、进度、下一步操作） */}
       <div className={styles.areaHeader}>
         <UserPlus size={18} />
         <div style={{ flex: 1 }}>
           <h3>人物资产生成</h3>
-          <p className={styles.subText}>优先显示从现有剧本、分镜和资产中提取出的真实角色候选。</p>
+          <p className={styles.subText}>
+            状态：{displayPreset.label} · {displayPreset.hint}
+          </p>
+        </div>
+        <div className={styles.panelActions}>
+          {displayPreset.nextActions.includes('pause') ? (
+            <button className={styles.btnPrimary} onClick={() => void pause()} disabled={isSubmitting}>
+              <PauseCircle size={14} /> 暂停
+            </button>
+          ) : null}
+          {displayPreset.nextActions.includes('resume') ? (
+            <button className={styles.btnPrimary} onClick={() => void resume()} disabled={isSubmitting}>
+              <Play size={14} /> 恢复
+            </button>
+          ) : null}
+          {displayPreset.nextActions.includes('retry_step') && currentStep ? (
+            <button
+              className={styles.btnPrimary}
+              onClick={() => void retryStep(currentStep.id)}
+              disabled={isSubmitting}
+            >
+              <RotateCw size={14} /> 重试
+            </button>
+          ) : null}
+          {displayPreset.nextActions.includes('cancel') ? (
+            <button className={styles.btnPrimary} onClick={() => void cancel()} disabled={isSubmitting}>
+              <XCircle size={14} /> 取消
+            </button>
+          ) : null}
         </div>
       </div>
+
+      {errorCodePreset ? (
+        <p className={styles.infoText} style={{ color: 'var(--danger-text, #d4380d)' }}>
+          {errorCodePreset.label}：{errorCodePreset.hint}
+        </p>
+      ) : null}
+
+      {currentStep ? (
+        <p className={styles.infoText}>
+          当前步骤：{currentStep.stepName}（{currentStep.status}）
+        </p>
+      ) : null}
 
       <div className={styles.cardsGrid}>
         {snapshot.characters.length > 0 ? (
@@ -115,7 +191,7 @@ export const CharSceneView: React.FC = () => {
               <div className={styles.cardActions}>
                 <button
                   className={styles.btnPrimary}
-                  onClick={() => void handleGenerateCharacterAsset(character.name, character.prompt)}
+                  onClick={() => handleGenerateCharacterAsset(character.name, character.prompt)}
                   disabled={isSubmitting}
                 >
                   {isSubmitting ? <LoaderCircle size={12} className={styles.iconSpin} /> : <Send size={12} />} 生成人设
@@ -160,7 +236,7 @@ export const CharSceneView: React.FC = () => {
               <div className={styles.cardActions}>
                 <button
                   className={styles.btnPrimary}
-                  onClick={() => void handleGenerateSceneAsset(scene.name, scene.prompt)}
+                  onClick={() => handleGenerateSceneAsset(scene.name, scene.prompt)}
                   disabled={isSubmitting}
                 >
                   {isSubmitting ? <LoaderCircle size={12} className={styles.iconSpin} /> : <Send size={12} />} 生成场景

@@ -29,6 +29,7 @@ const RUN_ERROR_DEPENDENCY_UNSATISFIED: &str = "DEPENDENCY_UNSATISFIED";
 const RUN_ERROR_RETRY_SCHEDULED: &str = "RETRY_SCHEDULED";
 const RUN_ERROR_MANUAL_REVIEW_REQUIRED: &str = "MANUAL_REVIEW_REQUIRED";
 const RUN_ERROR_EXECUTION_FAILED: &str = "EXECUTION_FAILED";
+const RUN_ERROR_MISSING_PREREQUISITE: &str = "MISSING_PREREQUISITE";
 const RETRY_BASE_DELAY_SECS: i64 = 4;
 const RETRY_REVIEW_BASE_DELAY_SECS: i64 = 3;
 const RETRY_NETWORK_BASE_DELAY_SECS: i64 = 6;
@@ -63,6 +64,25 @@ struct PipelineStepRow {
     input_summary: Option<String>,
     error_message: Option<String>,
     last_error_at: Option<String>,
+}
+
+/**
+ * pipeline_step_external_jobs 表行模型
+ *
+ * 用于把 image_gen / video_gen 步骤关联到 image_generations / video_generations 表记录。
+ * orchestrator 在 dispatch_image_gen_step / dispatch_video_gen_step 中写入，
+ * 在 handle_external_gen_step 中轮询 status 字段。
+ */
+#[derive(Debug, Clone, FromRow)]
+#[allow(dead_code)] // FromRow 需字段与 SQL 列一一对应，部分字段仅用于反序列化而非业务读取
+struct PipelineStepExternalJobRow {
+    id: String,
+    run_id: String,
+    step_id: String,
+    job_kind: String,
+    job_id: String,
+    status: String,
+    error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -190,16 +210,27 @@ async fn advance_run_once(state: &AppState, run: &PipelineRunRow) -> Result<()> 
     }
 
     if let Some(step) = pick_next_dispatchable_step(&steps) {
-        match dispatch_step_task(state, run, &step, &steps).await {
-            Ok(_) => {
-                steps = load_run_steps(&state.db, &run.id).await?;
-            }
-            Err(error) => {
-                if is_missing_ai_endpoint_error(&error) {
-                    mark_step_blocked_missing_endpoint(&state.db, run, &step).await?;
+        // 业务级依赖门控：检查 step.review_policy.requires 中列出的上游资产是否齐备
+        if let Some(missing) = validate_business_prerequisites(&state.db, run, &step).await? {
+            tracing::info!(
+                run_id = %run.id,
+                step_id = %step.id,
+                missing = ?missing,
+                "step blocked by missing business prerequisites"
+            );
+            steps = load_run_steps(&state.db, &run.id).await?;
+        } else {
+            match dispatch_step_task(state, run, &step, &steps).await {
+                Ok(_) => {
                     steps = load_run_steps(&state.db, &run.id).await?;
-                } else {
-                    return Err(error);
+                }
+                Err(error) => {
+                    if is_missing_ai_endpoint_error(&error) {
+                        mark_step_blocked_missing_endpoint(&state.db, run, &step).await?;
+                        steps = load_run_steps(&state.db, &run.id).await?;
+                    } else {
+                        return Err(error);
+                    }
                 }
             }
         }
@@ -719,6 +750,11 @@ async fn handle_running_step(
     step: &PipelineStepRow,
     steps: &[PipelineStepRow],
 ) -> Result<bool> {
+    // image_gen / video_gen 步骤走外部任务轮询分支
+    if is_external_gen_step(step) {
+        return handle_external_gen_step(state, run, step).await;
+    }
+
     let Some(task_id) = step.ai_task_id.as_deref() else {
         mark_step_failed(&state.db, &run.id, &step.id, "步骤 running 但缺少 aiTaskId").await?;
         return Ok(true);
@@ -1431,6 +1467,25 @@ async fn dispatch_step_task(
     step: &PipelineStepRow,
     steps: &[PipelineStepRow],
 ) -> Result<()> {
+    let step_kind = normalize_step_type(step);
+    match step_kind {
+        "image_gen" => dispatch_image_gen_step(state, run, step, steps).await,
+        "video_gen" => dispatch_video_gen_step(state, run, step, steps).await,
+        _ => dispatch_text_step_task(state, run, step, steps).await,
+    }
+}
+
+/**
+ * 原始文本步骤 dispatch（design / review / system）
+ *
+ * 解析 agent → 构造 prompt → 调用 enqueue_ai_task_for_request → mark_step_running。
+ */
+async fn dispatch_text_step_task(
+    state: &AppState,
+    run: &PipelineRunRow,
+    step: &PipelineStepRow,
+    steps: &[PipelineStepRow],
+) -> Result<()> {
     let agent_id = resolve_step_agent_id(&state.db, &run.user_id, &run.project_id, step).await?;
     let content = build_step_prompt(&state.db, run, step, steps).await?;
 
@@ -1468,6 +1523,538 @@ async fn dispatch_step_task(
     Ok(())
 }
 
+/**
+ * dispatch image_gen 步骤：解析参数 → 调 enqueue_image_generation → 写 external_job → 标记 running
+ * （parse_image_gen_params / parse_video_gen_params 已下沉到 helpers 模块以便单测）
+ */
+async fn dispatch_image_gen_step(
+    state: &AppState,
+    run: &PipelineRunRow,
+    step: &PipelineStepRow,
+    _steps: &[PipelineStepRow],
+) -> Result<()> {
+    let (prompt, size, n, model, endpoint_id) = helpers::parse_image_gen_params(step);
+
+    let generation = crate::image_gen::enqueue_image_generation(
+        state,
+        &run.user_id,
+        Some(&run.project_id),
+        &prompt,
+        &size,
+        n,
+        endpoint_id.as_deref(),
+        model.as_deref(),
+    )
+    .await?;
+
+    insert_external_job(
+        &state.db,
+        &run.id,
+        &step.id,
+        "image",
+        &generation.id,
+    )
+    .await?;
+
+    mark_step_running_external(&state.db, &run.id, &step.id).await?;
+
+    append_pipeline_event(
+        &state.db,
+        &run.id,
+        Some(&step.id),
+        "step_dispatched",
+        json!({
+            "stepId": step.id,
+            "stepKey": step.step_key,
+            "stepType": "image_gen",
+            "jobKind": "image",
+            "jobId": generation.id,
+        }),
+        "system",
+    )
+    .await?;
+
+    Ok(())
+}
+
+/**
+ * dispatch video_gen 步骤：解析参数 → 调 enqueue_video_generation → 写 external_job → 标记 running
+ */
+async fn dispatch_video_gen_step(
+    state: &AppState,
+    run: &PipelineRunRow,
+    step: &PipelineStepRow,
+    _steps: &[PipelineStepRow],
+) -> Result<()> {
+    let (prompt, model, duration_seconds, aspect_ratio) = helpers::parse_video_gen_params(step);
+
+    let generation = crate::video_gen::enqueue_video_generation(
+        state,
+        &run.user_id,
+        Some(&run.project_id),
+        &prompt,
+        &model,
+        duration_seconds,
+        &aspect_ratio,
+    )
+    .await?;
+
+    insert_external_job(
+        &state.db,
+        &run.id,
+        &step.id,
+        "video",
+        &generation.id,
+    )
+    .await?;
+
+    mark_step_running_external(&state.db, &run.id, &step.id).await?;
+
+    append_pipeline_event(
+        &state.db,
+        &run.id,
+        Some(&step.id),
+        "step_dispatched",
+        json!({
+            "stepId": step.id,
+            "stepKey": step.step_key,
+            "stepType": "video_gen",
+            "jobKind": "video",
+            "jobId": generation.id,
+        }),
+        "system",
+    )
+    .await?;
+
+    Ok(())
+}
+
+/**
+ * 处理 image_gen / video_gen 步骤的运行中状态
+ *
+ * 查询 pipeline_step_external_jobs → 查 image_generations / video_generations 表状态
+ * → completed 时持久化 step output + asset → mark_step_completed
+ * → failed 时复用 handle_task_failure
+ */
+async fn handle_external_gen_step(
+    state: &AppState,
+    run: &PipelineRunRow,
+    step: &PipelineStepRow,
+) -> Result<bool> {
+    let Some(job) = load_external_job(&state.db, &run.id, &step.id).await? else {
+        mark_step_failed(
+            &state.db,
+            &run.id,
+            &step.id,
+            "外部任务步骤 running 但缺少 pipeline_step_external_jobs 记录",
+        )
+        .await?;
+        return Ok(true);
+    };
+
+    match job.job_kind.as_str() {
+        "image" => handle_image_gen_status(state, run, step, &job).await,
+        "video" => handle_video_gen_status(state, run, step, &job).await,
+        other => {
+            mark_step_failed(
+                &state.db,
+                &run.id,
+                &step.id,
+                &format!("未知的外部任务类型：{}", other),
+            )
+            .await?;
+            Ok(true)
+        }
+    }
+}
+
+/**
+ * 查询 image_generations 表状态并驱动 step 状态迁移
+ */
+async fn handle_image_gen_status(
+    state: &AppState,
+    run: &PipelineRunRow,
+    step: &PipelineStepRow,
+    job: &PipelineStepExternalJobRow,
+) -> Result<bool> {
+    let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+        "SELECT status, result_urls, asset_ids, revised_prompt
+         FROM image_generations
+         WHERE id = ? AND user_id = ?",
+    )
+    .bind(&job.job_id)
+    .bind(&run.user_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let Some((status, result_urls_json, asset_ids_json, revised_prompt)) = row else {
+        // image_generations 记录被删除，标记 step 失败
+        mark_step_failed(
+            &state.db,
+            &run.id,
+            &step.id,
+            "image_generations 记录不存在或已被删除",
+        )
+        .await?;
+        return Ok(true);
+    };
+
+    match status.as_str() {
+        "pending" | "processing" => {
+            // 仍在执行，更新 external_job status（防漂移）
+            update_external_job_status(&state.db, &job.id, "running", None).await?;
+            Ok(false)
+        }
+        "completed" => {
+            handle_image_gen_completion(
+                state,
+                run,
+                step,
+                &job.job_id,
+                result_urls_json.as_deref(),
+                asset_ids_json.as_deref(),
+                revised_prompt.as_deref(),
+            )
+            .await
+        }
+        "failed" => {
+            let error_msg = sqlx::query_as::<_, (Option<String>,)>(
+                "SELECT error_message FROM image_generations WHERE id = ?",
+            )
+            .bind(&job.job_id)
+            .fetch_optional(&state.db)
+            .await?
+            .map(|(msg,)| msg.unwrap_or_else(|| "图片生成失败".to_string()))
+            .unwrap_or_else(|| "图片生成失败".to_string());
+            update_external_job_status(&state.db, &job.id, "failed", Some(&error_msg)).await?;
+            handle_task_failure(&state.db, run, step, Some(error_msg)).await
+        }
+        _ => Ok(false),
+    }
+}
+
+/**
+ * 处理 image generation 完成：解析 urls + asset_ids → 写 step output → mark_step_completed
+ */
+async fn handle_image_gen_completion(
+    state: &AppState,
+    run: &PipelineRunRow,
+    step: &PipelineStepRow,
+    generation_id: &str,
+    result_urls_json: Option<&str>,
+    asset_ids_json: Option<&str>,
+    revised_prompt: Option<&str>,
+) -> Result<bool> {
+    let urls: Vec<String> = result_urls_json
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+        .unwrap_or_default();
+    let asset_ids: Vec<String> = asset_ids_json
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+        .unwrap_or_default();
+
+    let output_json = serde_json::to_string(&json!({
+        "format": "image",
+        "generationId": generation_id,
+        "urls": urls,
+        "assetIds": asset_ids,
+        "revisedPrompt": revised_prompt,
+        "stepKey": step.step_key,
+        "stepName": step.step_name,
+    }))?;
+
+    let output_id = insert_step_output(
+        &state.db,
+        &run.id,
+        &step.id,
+        Some(generation_id),
+        "image",
+        Some(&output_json),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    if let Some(job) = load_external_job(&state.db, &run.id, &step.id).await? {
+        update_external_job_status(&state.db, &job.id, "completed", None).await?;
+    }
+
+    append_pipeline_event(
+        &state.db,
+        &run.id,
+        Some(&step.id),
+        "pipeline_asset_created",
+        json!({
+            "outputId": output_id,
+            "assetIds": asset_ids,
+            "urls": urls,
+            "generationId": generation_id,
+            "stepId": step.id,
+            "stepKey": step.step_key,
+            "stepName": step.step_name,
+        }),
+        "system",
+    )
+    .await?;
+
+    let preview = if urls.is_empty() {
+        "图片已生成".to_string()
+    } else {
+        format!("图片已生成，共 {} 张", urls.len())
+    };
+
+    mark_step_completed(&state.db, &run.id, &step.id, Some(&output_id)).await?;
+    append_assistant_step_summary(
+        &state.db,
+        run,
+        step,
+        format!("图像步骤「{}」已完成：{}", step.step_name, preview),
+        "等待依赖该步骤的下游阶段自动调度".to_string(),
+    )
+    .await?;
+    Ok(true)
+}
+
+/**
+ * 查询 video_generations 表状态并驱动 step 状态迁移
+ */
+async fn handle_video_gen_status(
+    state: &AppState,
+    run: &PipelineRunRow,
+    step: &PipelineStepRow,
+    job: &PipelineStepExternalJobRow,
+) -> Result<bool> {
+    let row = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+        "SELECT status, result_url, error_message
+         FROM video_generations
+         WHERE id = ? AND user_id = ?",
+    )
+    .bind(&job.job_id)
+    .bind(&run.user_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let Some((status, result_url, error_message)) = row else {
+        mark_step_failed(
+            &state.db,
+            &run.id,
+            &step.id,
+            "video_generations 记录不存在或已被删除",
+        )
+        .await?;
+        return Ok(true);
+    };
+
+    match status.as_str() {
+        "pending" | "processing" => {
+            update_external_job_status(&state.db, &job.id, "running", None).await?;
+            Ok(false)
+        }
+        "completed" => {
+            handle_video_gen_completion(state, run, step, &job.job_id, result_url.as_deref()).await
+        }
+        "failed" => {
+            let error_msg = error_message.unwrap_or_else(|| "视频生成失败".to_string());
+            update_external_job_status(&state.db, &job.id, "failed", Some(&error_msg)).await?;
+            handle_task_failure(&state.db, run, step, Some(error_msg)).await
+        }
+        _ => Ok(false),
+    }
+}
+
+/**
+ * 处理 video generation 完成：写 step output → mark_step_completed
+ */
+async fn handle_video_gen_completion(
+    state: &AppState,
+    run: &PipelineRunRow,
+    step: &PipelineStepRow,
+    generation_id: &str,
+    result_url: Option<&str>,
+) -> Result<bool> {
+    let output_json = serde_json::to_string(&json!({
+        "format": "video",
+        "generationId": generation_id,
+        "url": result_url,
+        "stepKey": step.step_key,
+        "stepName": step.step_name,
+    }))?;
+
+    let output_id = insert_step_output(
+        &state.db,
+        &run.id,
+        &step.id,
+        Some(generation_id),
+        "video",
+        Some(&output_json),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    if let Some(job) = load_external_job(&state.db, &run.id, &step.id).await? {
+        update_external_job_status(&state.db, &job.id, "completed", None).await?;
+    }
+
+    append_pipeline_event(
+        &state.db,
+        &run.id,
+        Some(&step.id),
+        "pipeline_asset_created",
+        json!({
+            "outputId": output_id,
+            "url": result_url,
+            "generationId": generation_id,
+            "stepId": step.id,
+            "stepKey": step.step_key,
+            "stepName": step.step_name,
+        }),
+        "system",
+    )
+    .await?;
+
+    let preview = if result_url.is_some() {
+        "视频已生成".to_string()
+    } else {
+        "视频任务已完成（无 URL）".to_string()
+    };
+
+    mark_step_completed(&state.db, &run.id, &step.id, Some(&output_id)).await?;
+    append_assistant_step_summary(
+        &state.db,
+        run,
+        step,
+        format!("视频步骤「{}」已完成：{}", step.step_name, preview),
+        "等待依赖该步骤的下游阶段自动调度".to_string(),
+    )
+    .await?;
+    Ok(true)
+}
+
+/**
+ * 写入 pipeline_step_external_jobs 记录
+ */
+async fn insert_external_job(
+    pool: &SqlitePool,
+    run_id: &str,
+    step_id: &str,
+    job_kind: &str,
+    job_id: &str,
+) -> Result<()> {
+    let id = Uuid::new_v4().to_string();
+    let now = now_iso();
+    sqlx::query(
+        "INSERT INTO pipeline_step_external_jobs
+            (id, run_id, step_id, job_kind, job_id, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)",
+    )
+    .bind(&id)
+    .bind(run_id)
+    .bind(step_id)
+    .bind(job_kind)
+    .bind(job_id)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/**
+ * 查询步骤最新的 external job 记录
+ */
+async fn load_external_job(
+    pool: &SqlitePool,
+    run_id: &str,
+    step_id: &str,
+) -> Result<Option<PipelineStepExternalJobRow>> {
+    let row = sqlx::query_as::<_, PipelineStepExternalJobRow>(
+        "SELECT id, run_id, step_id, job_kind, job_id, status, error_message
+         FROM pipeline_step_external_jobs
+         WHERE run_id = ? AND step_id = ?
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(run_id)
+    .bind(step_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+/**
+ * 更新 external job 状态
+ */
+async fn update_external_job_status(
+    pool: &SqlitePool,
+    job_id: &str,
+    status: &str,
+    error_message: Option<&str>,
+) -> Result<()> {
+    let now = now_iso();
+    sqlx::query(
+        "UPDATE pipeline_step_external_jobs
+         SET status = ?, error_message = COALESCE(?, error_message), updated_at = ?
+         WHERE id = ?",
+    )
+    .bind(status)
+    .bind(error_message)
+    .bind(&now)
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/**
+ * 标记步骤 running（不写 ai_task_id，用于 image_gen / video_gen 外部任务）
+ */
+async fn mark_step_running_external(
+    pool: &SqlitePool,
+    run_id: &str,
+    step_id: &str,
+) -> Result<()> {
+    let now = now_iso();
+    let affected = sqlx::query(
+        "UPDATE pipeline_run_steps
+         SET status = 'running',
+             attempt_count = attempt_count + 1,
+             started_at = COALESCE(started_at, ?),
+             error_message = NULL,
+             last_error_at = NULL,
+             run_version = COALESCE(run_version, 1) + 1,
+             updated_at = ?
+         WHERE id = ? AND run_id = ?",
+    )
+    .bind(&now)
+    .bind(&now)
+    .bind(step_id)
+    .bind(run_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    if affected > 0 {
+        append_pipeline_event(
+            pool,
+            run_id,
+            Some(step_id),
+            "step_started",
+            json!({
+                "stepId": step_id,
+                "externalJob": true,
+            }),
+            "system",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn mark_step_blocked_missing_endpoint(
     pool: &SqlitePool,
     run: &PipelineRunRow,
@@ -1482,6 +2069,190 @@ async fn mark_step_blocked_missing_endpoint(
         false,
     )
     .await
+}
+
+/**
+ * 业务级依赖门控
+ *
+ * 解析 step.review_policy_json 中的 `requires` 字段（字符串数组），
+ * 校验每个 require 是否在 pipeline_run_steps / pipeline_step_outputs 中已产出。
+ * 任一缺失则把 step 置为 blocked，error_message 写 JSON {code, missing}，
+ * 并 append_pipeline_event；返回 Some(missing_list) 让 advance_run_once 跳过 dispatch。
+ *
+ * require 的语义：
+ * - 当作 step_key 的子串匹配（如 "outline" 匹配 step_key="outline_design"）
+ * - 检查该步骤 status=completed 且 pipeline_step_outputs 中存在产出记录
+ *
+ * @returns None 表示通过；Some(missing) 表示已阻塞，missing 为缺失项列表
+ */
+async fn validate_business_prerequisites(
+    pool: &SqlitePool,
+    run: &PipelineRunRow,
+    step: &PipelineStepRow,
+) -> Result<Option<Vec<String>>> {
+    let Some(requires) = helpers::parse_business_requires(&step.review_policy_json) else {
+        return Ok(None);
+    };
+    if requires.is_empty() {
+        return Ok(None);
+    }
+
+    let mut missing = Vec::new();
+    for require in &requires {
+        if !is_business_prerequisite_satisfied(pool, &run.id, require).await? {
+            missing.push(require.clone());
+        }
+    }
+
+    if missing.is_empty() {
+        return Ok(None);
+    }
+
+    let error_payload = serde_json::to_string(&json!({
+        "code": RUN_ERROR_MISSING_PREREQUISITE,
+        "missing": missing.clone(),
+        "message": format!("前置资产缺失：{}", missing.join(", ")),
+    }))?;
+
+    set_step_status(
+        pool,
+        &run.id,
+        &step.id,
+        "blocked",
+        Some(&error_payload),
+        false,
+    )
+    .await?;
+
+    append_pipeline_event(
+        pool,
+        &run.id,
+        Some(&step.id),
+        "step_blocked",
+        json!({
+            "stepId": step.id,
+            "stepKey": step.step_key,
+            "errorCode": RUN_ERROR_MISSING_PREREQUISITE,
+            "missing": missing,
+        }),
+        "system",
+    )
+    .await?;
+
+    Ok(Some(missing))
+}
+
+/**
+ * 检查单个业务依赖是否满足
+ *
+ * 匹配规则：
+ * - `project:` 前缀项：跨阶段依赖，转交 is_project_prerequisite_satisfied 查项目级产出。
+ * - 无前缀项：查找当前 run 中是否存在 step_key LIKE %require% 且 status='completed' 的步骤，
+ *   且该步骤在 pipeline_step_outputs 中有产出记录。
+ */
+async fn is_business_prerequisite_satisfied(
+    pool: &SqlitePool,
+    run_id: &str,
+    require: &str,
+) -> Result<bool> {
+    if let Some(kind) = require.strip_prefix("project:") {
+        return is_project_prerequisite_satisfied(pool, run_id, kind).await;
+    }
+
+    let pattern = format!("%{}%", require);
+    let step_id: Option<String> = sqlx::query_scalar::<_, String>(
+        "SELECT s.id FROM pipeline_run_steps s
+         WHERE s.run_id = ?
+           AND s.status = 'completed'
+           AND LOWER(s.step_key) LIKE LOWER(?)
+         ORDER BY s.completed_at DESC NULLS LAST
+         LIMIT 1",
+    )
+    .bind(run_id)
+    .bind(&pattern)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(step_id) = step_id else {
+        return Ok(false);
+    };
+
+    let output_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(1) FROM pipeline_step_outputs
+         WHERE run_id = ? AND step_id = ?",
+    )
+    .bind(run_id)
+    .bind(&step_id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(output_count > 0)
+}
+
+/**
+ * 查询项目级跨阶段依赖是否满足
+ *
+ * 先从 run_id 反查 project_id，再按 kind 分类校验：
+ * - `storyboard`：storyboards + storyboard_lines 是否有分镜行。
+ * - `script_text`：scripts 表该 project 是否有非空 content。
+ * - 其他（outline/script/char_scene/keyframe/video 等）：pipeline_runs 表是否
+ *   存在 pipeline_type=kind 且 status='completed' 的同项目 run。
+ *
+ * @param pool 数据库连接池
+ * @param run_id 当前 run ID（用于反查 project_id）
+ * @param kind project: 前缀去掉后的依赖种类字符串
+ * @returns true 表示依赖已满足
+ */
+async fn is_project_prerequisite_satisfied(
+    pool: &SqlitePool,
+    run_id: &str,
+    kind: &str,
+) -> Result<bool> {
+    let project_id: Option<String> =
+        sqlx::query_scalar::<_, String>("SELECT project_id FROM pipeline_runs WHERE id = ?")
+            .bind(run_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some(project_id) = project_id else {
+        return Ok(false);
+    };
+
+    let satisfied = match kind {
+        "storyboard" => {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(1) FROM storyboards s
+                 INNER JOIN storyboard_lines l ON l.storyboard_id = s.id
+                 WHERE s.project_id = ?",
+            )
+            .bind(&project_id)
+            .fetch_one(pool)
+            .await?;
+            count > 0
+        }
+        "script_text" => {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(1) FROM scripts
+                 WHERE project_id = ? AND COALESCE(length(content), 0) > 0",
+            )
+            .bind(&project_id)
+            .fetch_one(pool)
+            .await?;
+            count > 0
+        }
+        other => {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(1) FROM pipeline_runs
+                 WHERE project_id = ? AND pipeline_type = ? AND status = 'completed'",
+            )
+            .bind(&project_id)
+            .bind(other)
+            .fetch_one(pool)
+            .await?;
+            count > 0
+        }
+    };
+
+    Ok(satisfied)
 }
 
 async fn has_available_endpoint(pool: &SqlitePool, user_id: &str) -> Result<bool> {

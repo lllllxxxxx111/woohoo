@@ -88,25 +88,25 @@ npm run dev:all
 
 关键步骤：
 
-1. 提交材料审查与缺口补齐：用 TRAE 对照官方要求检查作品帖结构、截图、Session ID、报名链接和体验方式。
-2. GitHub + Docker 可运行路径验证：用 TRAE 检查 `docker-compose.yml`、Dockerfile、Nginx 反向代理和评审可复制运行命令。
-3. 核心产品体验闭环演示：用 TRAE 梳理 3 分钟 Demo 路径，覆盖登录、创意对话、多智能体、制作流程、资产库和导出。
-4. 发帖前最终检查：用 TRAE 做发布前清单确认，避免漏掉截图、Session ID、报名帖链接和赛道标签。
+1. 增加 Demo 一键体验模式：用 TRAE 基于当前工作台补示例项目 / Demo 入口，让评审进入后能快速看到核心能力。
+2. 补齐 GitHub + Docker 评审运行闭环：用 TRAE 检查并修复 Dockerfile、Compose、Nginx 反向代理和运行文档。
+3. 打磨核心工作台演示流程：用 TRAE 优化真实工作台中的演示路径、空状态和关键操作文案。
+4. 完成参赛提交前质量门禁：用 TRAE 执行 typecheck、build、Docker 配置验证，并确认提交材料一致。
 
 关键截图：
 
-1. TRAE 会话：官方要求拆解和提交材料更新：待上传
-2. TRAE 会话：Docker 运行路径检查：待上传
+1. TRAE 会话：Demo 一键体验 / 示例项目实现：待上传
+2. 终端：Docker 运行路径验证或 compose config：待上传
 3. Woohoo 登录后工作台首页：待上传
 4. 创意对话 + 多智能体侧栏：待上传
 5. 制作流程 / 管线预览 / 资产库：可选
 
 Session ID：
 
-1. 提交材料审查与缺口补齐：待填写
-2. GitHub + Docker 可运行路径验证：待填写
-3. 核心产品体验闭环演示：待填写
-4. 发帖前最终检查：可选
+1. 增加 Demo 一键体验模式：待填写
+2. 补齐 GitHub + Docker 评审运行闭环：待填写
+3. 打磨核心工作台演示流程：待填写
+4. 完成参赛提交前质量门禁：可选
 
 Session ID 获取方式：在 TRAE 里找到关键任务会话，双击会话头像复制 Session ID。
 

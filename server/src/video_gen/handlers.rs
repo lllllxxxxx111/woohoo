@@ -15,16 +15,35 @@ use super::repo;
 
 const VIDEO_GEN_TIMEOUT_SECS: u64 = 3600;
 
-pub async fn create_generation(
-    State(state): State<AppState>,
-    axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
-    Json(req): Json<CreateVideoGenerationReq>,
-) -> Result<Json<VideoGenerationResponse>, AppError> {
-    if req.prompt.trim().is_empty() {
+/**
+ * 视频生成任务入队公共入口
+ *
+ * 提取自 create_generation handler，供 orchestrator 在 dispatch_video_gen_step 中复用。
+ * 完整流程：参数校验 → 端点解析 → 扣费 → 建 DB 记录 → set_processing → spawn 后台任务。
+ *
+ * @param state 应用全局状态
+ * @param user_id 触发用户 ID
+ * @param project_id 关联项目 ID（可选）
+ * @param prompt 视频生成提示词
+ * @param model 模型名
+ * @param duration_seconds 视频时长（秒，0-60）
+ * @param aspect_ratio 宽高比，如 "16:9"
+ * @returns 创建好的 VideoGeneration 记录（status=processing）
+ */
+pub(crate) async fn enqueue_video_generation(
+    state: &AppState,
+    user_id: &str,
+    project_id: Option<&str>,
+    prompt: &str,
+    model: &str,
+    duration_seconds: Option<f64>,
+    aspect_ratio: &str,
+) -> Result<VideoGeneration, AppError> {
+    if prompt.trim().is_empty() {
         return Err(AppError::BadRequest("prompt cannot be empty".to_string()));
     }
 
-    if let Some(duration) = req.duration_seconds {
+    if let Some(duration) = duration_seconds {
         if duration <= 0.0 || duration > 60.0 {
             return Err(AppError::BadRequest(
                 "duration_seconds must be between 0 and 60".to_string(),
@@ -33,10 +52,10 @@ pub async fn create_generation(
     }
 
     let resolved = crate::ai::capabilities::resolve_video_generation_capability(
-        &state,
-        &user_id.0,
+        state,
+        user_id,
         None,
-        Some(&req.model),
+        Some(model),
     )
     .await
     .map_err(|error| {
@@ -54,22 +73,23 @@ pub async fn create_generation(
         ))
     })?;
 
-    let cost = calculate_cost(&req.model, req.duration_seconds);
+    let resolved_model = resolved.model.clone();
+    let cost = calculate_cost(&resolved_model, duration_seconds);
 
     crate::billing::budget_enforce::enforce_budget(
         &state.db,
-        &user_id.0,
+        user_id,
         cost,
         "video_generation",
         true,
-        Some(&resolved.model),
-        req.project_id.as_deref(),
+        Some(&resolved_model),
+        project_id,
     )
     .await?;
 
     crate::billing::repo::check_and_deduct(
         &state.db,
-        &user_id.0,
+        user_id,
         cost,
         "video_generation",
         Some("video_generation"),
@@ -80,12 +100,12 @@ pub async fn create_generation(
 
     let generation = match repo::create_generation(
         &state.db,
-        &user_id.0,
-        req.project_id.as_deref(),
-        &req.prompt,
-        &req.model,
-        req.duration_seconds,
-        &req.aspect_ratio,
+        user_id,
+        project_id,
+        prompt,
+        &resolved_model,
+        duration_seconds,
+        aspect_ratio,
         cost,
     )
     .await
@@ -94,7 +114,7 @@ pub async fn create_generation(
         Err(error) => {
             if let Err(refund_error) = crate::billing::repo::refund_with_ref_type(
                 &state.db,
-                &user_id.0,
+                user_id,
                 cost,
                 "video_generation_record_create_failed",
                 "video_generation",
@@ -110,7 +130,7 @@ pub async fn create_generation(
 
     if let Err(error) = crate::billing::repo::update_spent_ref_id(
         &state.db,
-        &user_id.0,
+        user_id,
         "video_generation",
         &generation.id,
     )
@@ -120,13 +140,13 @@ pub async fn create_generation(
     }
 
     if let Err(error) = repo::set_processing(&state.db, &generation.id).await {
-        refund_and_fail(&state, &user_id.0, &generation.id, cost, &error.to_string()).await?;
+        refund_and_fail(state, user_id, &generation.id, cost, &error.to_string()).await?;
         return Err(AppError::Internal(error.to_string()));
     }
 
     let base_url = resolved.endpoint.base_url.clone();
     let api_key = resolved.endpoint.api_key.clone();
-    let model = resolved.model.clone();
+    let task_model = resolved_model.clone();
     let video_api_url = resolved
         .capability
         .as_ref()
@@ -149,8 +169,16 @@ pub async fn create_generation(
             })
         });
 
+    let task_req = CreateVideoGenerationReq {
+        prompt: prompt.to_string(),
+        model: task_model.clone(),
+        duration_seconds,
+        aspect_ratio: aspect_ratio.to_string(),
+        project_id: project_id.map(str::to_string),
+    };
+
     let task_state = state.clone();
-    let task_user_id = user_id.0.clone();
+    let task_user_id = user_id.to_string();
     let task_generation_id = generation.id.clone();
 
     tokio::spawn(async move {
@@ -160,8 +188,8 @@ pub async fn create_generation(
             task_generation_id.clone(),
             video_api_url,
             api_key,
-            model,
-            req,
+            task_model,
+            task_req,
             cost,
         )
         .await
@@ -173,6 +201,30 @@ pub async fn create_generation(
             );
         }
     });
+
+    Ok(generation)
+}
+
+/**
+ * POST /api/video-gen/generations
+ *
+ * HTTP handler，薄壳：解析 body → 调用 enqueue_video_generation → 返回响应。
+ */
+pub async fn create_generation(
+    State(state): State<AppState>,
+    axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
+    Json(req): Json<CreateVideoGenerationReq>,
+) -> Result<Json<VideoGenerationResponse>, AppError> {
+    let generation = enqueue_video_generation(
+        &state,
+        &user_id.0,
+        req.project_id.as_deref(),
+        &req.prompt,
+        &req.model,
+        req.duration_seconds,
+        &req.aspect_ratio,
+    )
+    .await?;
 
     build_generation_response(&state.db, &generation.id, &user_id.0).await
 }
