@@ -19,6 +19,8 @@ use crate::{
     AppState,
 };
 
+use super::prompt_optimizations::load_applied_optimization_patch;
+
 const ORCHESTRATOR_INTERVAL_SECS: u64 = 3;
 const MAX_RUNS_PER_TICK: i64 = 24;
 const MISSING_AI_ENDPOINT_REASON: &str = "缺少可用 AI 端点，请先在设置中配置并激活端点后重试";
@@ -2383,6 +2385,28 @@ async fn build_step_prompt(
 
     if !dep_outputs.is_empty() {
         sections.push(dep_outputs.join("\n\n"));
+    }
+
+    // 消费已应用的 Prompt 优化 patch（req #4）
+    // - 按 (project_id, step_key) 查询当前生效的 applied patch
+    // - 运行中步骤不受影响：本函数仅在 dispatch 前调用，运行中步骤已通过 mark_step_running 持有 ai_task_id，
+    //   pick_next_dispatchable_step 不会重新选中它，所以 patch 变更不会静默篡改运行中任务
+    if let Some(patch) = load_applied_optimization_patch(pool, &run.project_id, &step.step_key)
+        .await
+        .map_err(|e| anyhow::anyhow!("加载已应用优化 patch 失败: {}", e))?
+    {
+        let step_type = normalize_step_type(step);
+        let patch_text = if step_type == "review" {
+            patch.review_prompt_patch.as_deref().unwrap_or("")
+        } else {
+            patch.design_prompt_patch.as_deref().unwrap_or("")
+        };
+        if !patch_text.is_empty() {
+            sections.push(format!(
+                "[已应用 Prompt 优化 v{}]\n{}",
+                patch.version, patch_text
+            ));
+        }
     }
 
     if normalize_step_type(step) == "review" {

@@ -465,6 +465,33 @@ async fn main() {
             "/api/pipelines/runs/{id}/optimizations",
             get(pipeline::handlers::list_pipeline_optimizations),
         )
+        // Prompt 优化建议：应用 / 回滚 / 版本差异 / 效果对比 / 回滚建议
+        .route(
+            "/api/pipelines/runs/{id}/optimizations/{optimization_id}/apply",
+            post(pipeline::prompt_optimizations::apply_optimization),
+        )
+        .route(
+            "/api/pipelines/runs/{id}/optimizations/{optimization_id}/rollback",
+            post(pipeline::prompt_optimizations::rollback_optimization),
+        )
+        .route(
+            "/api/pipelines/runs/{id}/optimizations/{optimization_id}/diff",
+            get(pipeline::prompt_optimizations::get_optimization_diff),
+        )
+        .route(
+            "/api/pipelines/runs/{id}/optimizations/{optimization_id}/effect",
+            get(pipeline::prompt_optimizations::get_effect_comparison),
+        )
+        .route(
+            "/api/pipelines/runs/{id}/optimizations/{optimization_id}/rollback-recommendation",
+            get(pipeline::prompt_optimizations::get_rollback_recommendation),
+        )
+        // 项目级 / 步骤级 Prompt 自动应用配置（默认关闭）
+        .route(
+            "/api/pipelines/projects/{project_id}/prompt-auto-apply",
+            get(pipeline::prompt_optimizations::get_auto_apply_config)
+                .put(pipeline::prompt_optimizations::set_auto_apply_config),
+        )
         .route(
             "/api/pipelines/runs/{id}/pause",
             post(pipeline::handlers::pause_pipeline_run),

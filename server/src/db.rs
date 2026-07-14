@@ -174,6 +174,14 @@ async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<String>, sqlx::E
             "025_pipeline_events_constraint_relax",
             include_str!("../migrations/025_pipeline_events_constraint_relax.sql"),
         ),
+        (
+            "026_pipeline_prompt_optimization_versions",
+            include_str!("../migrations/026_pipeline_prompt_optimization_versions.sql"),
+        ),
+        (
+            "027_collaboration_governance",
+            include_str!("../migrations/027_collaboration_governance.sql"),
+        ),
     ] {
         if version == "020_asset_governance" {
             let tables = list_all_tables(pool)

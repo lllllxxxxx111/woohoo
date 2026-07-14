@@ -21,6 +21,11 @@ import {
   createPipelineRun,
   getPipelineRun,
   getPipelineOptimizations,
+  applyPipelineOptimization,
+  rollbackPipelineOptimization,
+  getOptimizationDiff,
+  getOptimizationEffectComparison,
+  getRollbackRecommendation,
   getAiTask,
   getServerAssetBlob,
   listPipelineRuns,
@@ -33,6 +38,9 @@ import {
   type PipelineRunSummary,
   type PipelineStepOutput,
   type PipelineStepStatus,
+  type OptimizationVersionDiff,
+  type OptimizationEffectComparison,
+  type RollbackRecommendation,
 } from '../../../../../lib/serverApi';
 import { logger } from '../../../../../lib/logger';
 import { useAppActions } from '../../../../../context/useAppActions';
@@ -390,6 +398,14 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // Prompt 优化版本差异 / 效果对比 / 回滚建议
+  const [optimizationDiff, setOptimizationDiff] = useState<OptimizationVersionDiff | null>(null);
+  const [effectComparison, setEffectComparison] = useState<OptimizationEffectComparison | null>(
+    null,
+  );
+  const [rollbackRecommendation, setRollbackRecommendation] =
+    useState<RollbackRecommendation | null>(null);
+  const [optimizationActionInProgress, setOptimizationActionInProgress] = useState(false);
   const [manualReviewOwner, setManualReviewOwner] = useState('');
   const [manualReviewNote, setManualReviewNote] = useState('');
   const [isReviewPanelCollapsed, setIsReviewPanelCollapsed] = useState(true);
@@ -854,18 +870,200 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
     void createOutlinePipelineRun('review_only');
   };
 
-  const handleRegenerateWithOptimization = () => {
-    if (!latestOptimization) {
-      return;
+  /**
+   * 一键应用 Prompt 优化建议（持久化到 DB，后续 run 自动消费）
+   */
+  const handleApplyOptimization = async () => {
+    if (!currentRun || !latestOptimization) return;
+    setOptimizationActionInProgress(true);
+    try {
+      const updated = await applyPipelineOptimization(
+        currentRun.run.id,
+        latestOptimization.id,
+      );
+      setPromptOptimizations((prev) =>
+        prev.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      setOptimizationDiff(null);
+      setEffectComparison(null);
+      setRollbackRecommendation(null);
+      showToast({
+        type: 'success',
+        title: '优化建议已应用',
+        message: `版本 v${updated.version} 已生效，后续流程将自动使用该优化。`,
+      });
+    } catch (error) {
+      showToast({
+        type: 'error',
+        title: '应用失败',
+        message: error instanceof Error ? error.message : '无法应用优化建议，请稍后重试',
+      });
+    } finally {
+      setOptimizationActionInProgress(false);
     }
-    void createOutlinePipelineRun('full', latestOptimization);
   };
 
-  const handleReviewWithOptimization = () => {
-    if (!latestOptimization) {
+  /**
+   * 回滚到应用前版本（保留历史记录）
+   */
+  const handleRollbackOptimization = async () => {
+    if (!currentRun || !latestOptimization) return;
+    const reason = window.prompt('请输入回滚原因（将记录到审计日志）', '质量下降或失败率上升');
+    if (!reason) return;
+    setOptimizationActionInProgress(true);
+    try {
+      const updated = await rollbackPipelineOptimization(currentRun.run.id, latestOptimization.id, {
+        reason,
+      });
+      setPromptOptimizations((prev) =>
+        prev.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      setOptimizationDiff(null);
+      setEffectComparison(null);
+      setRollbackRecommendation(null);
+      showToast({
+        type: 'success',
+        title: '已回滚到应用前版本',
+        message: `版本 v${updated.version} 已回滚，后续流程将使用原始 prompt。`,
+      });
+    } catch (error) {
+      showToast({
+        type: 'error',
+        title: '回滚失败',
+        message: error instanceof Error ? error.message : '无法回滚优化建议，请稍后重试',
+      });
+    } finally {
+      setOptimizationActionInProgress(false);
+    }
+  };
+
+  /**
+   * 查看版本差异（原 prompt vs 优化后 prompt）
+   */
+  const handleViewDiff = async () => {
+    if (!currentRun || !latestOptimization) return;
+    setOptimizationActionInProgress(true);
+    try {
+      const diff = await getOptimizationDiff(currentRun.run.id, latestOptimization.id);
+      setOptimizationDiff(diff);
+      setEffectComparison(null);
+      setRollbackRecommendation(null);
+    } catch (error) {
+      showToast({
+        type: 'error',
+        title: '加载差异失败',
+        message: error instanceof Error ? error.message : '无法加载版本差异',
+      });
+    } finally {
+      setOptimizationActionInProgress(false);
+    }
+  };
+
+  /**
+   * 查看效果对比（baseline vs optimized 指标聚合）
+   */
+  const handleViewEffectComparison = async () => {
+    if (!currentRun || !latestOptimization) return;
+    setOptimizationActionInProgress(true);
+    try {
+      const effect = await getOptimizationEffectComparison(
+        currentRun.run.id,
+        latestOptimization.id,
+      );
+      setEffectComparison(effect);
+      setOptimizationDiff(null);
+      setRollbackRecommendation(null);
+    } catch (error) {
+      showToast({
+        type: 'error',
+        title: '加载效果对比失败',
+        message: error instanceof Error ? error.message : '无法加载效果对比数据',
+      });
+    } finally {
+      setOptimizationActionInProgress(false);
+    }
+  };
+
+  /**
+   * 查看回滚建议（基于失败率/manual_review/评分下降）
+   */
+  const handleViewRollbackRecommendation = async () => {
+    if (!currentRun || !latestOptimization) return;
+    setOptimizationActionInProgress(true);
+    try {
+      const recommendation = await getRollbackRecommendation(
+        currentRun.run.id,
+        latestOptimization.id,
+      );
+      setRollbackRecommendation(recommendation);
+      setOptimizationDiff(null);
+      setEffectComparison(null);
+    } catch (error) {
+      showToast({
+        type: 'error',
+        title: '加载回滚建议失败',
+        message: error instanceof Error ? error.message : '无法加载回滚建议',
+      });
+    } finally {
+      setOptimizationActionInProgress(false);
+    }
+  };
+
+  /**
+   * 按建议重新生成：先应用优化（持久化），再创建新 run（orchestrator 自动消费已应用 patch）
+   */
+  const handleRegenerateWithOptimization = async () => {
+    if (!latestOptimization || !currentRun) {
       return;
     }
-    void createOutlinePipelineRun('review_only', latestOptimization);
+    setOptimizationActionInProgress(true);
+    try {
+      const updated = await applyPipelineOptimization(
+        currentRun.run.id,
+        latestOptimization.id,
+      );
+      setPromptOptimizations((prev) =>
+        prev.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      // 应用成功后创建新 run，不再本地传参 —— orchestrator 会通过 load_applied_optimization_patch 消费
+      void createOutlinePipelineRun('full');
+    } catch (error) {
+      showToast({
+        type: 'error',
+        title: '应用优化失败',
+        message: error instanceof Error ? error.message : '无法应用优化建议',
+      });
+    } finally {
+      setOptimizationActionInProgress(false);
+    }
+  };
+
+  /**
+   * 按建议重新复审：先应用优化（持久化），再创建 review_only run
+   */
+  const handleReviewWithOptimization = async () => {
+    if (!latestOptimization || !currentRun) {
+      return;
+    }
+    setOptimizationActionInProgress(true);
+    try {
+      const updated = await applyPipelineOptimization(
+        currentRun.run.id,
+        latestOptimization.id,
+      );
+      setPromptOptimizations((prev) =>
+        prev.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      void createOutlinePipelineRun('review_only');
+    } catch (error) {
+      showToast({
+        type: 'error',
+        title: '应用优化失败',
+        message: error instanceof Error ? error.message : '无法应用优化建议',
+      });
+    } finally {
+      setOptimizationActionInProgress(false);
+    }
   };
 
   /**
@@ -1825,10 +2023,224 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
 
         {latestOptimization && (
           <div className={styles.panelBlock}>
-            <h4 className={styles.panelTitle}>下一轮优化建议</h4>
+            <h4 className={styles.panelTitle}>Prompt 优化建议</h4>
             <div className={styles.infoText}>
-              这些建议会在你点击下方按钮后自动带入下一次生成或复审。
+              当前状态：
+              <strong>
+                {latestOptimization.decision === 'applied'
+                  ? `已应用 v${latestOptimization.version}`
+                  : latestOptimization.decision === 'rolled_back'
+                    ? `已回滚 v${latestOptimization.version}`
+                    : '待应用'}
+              </strong>
+              {latestOptimization.rolledBackReason && (
+                <span style={{ marginLeft: 8, color: 'var(--color-warning, #d97706)' }}>
+                  回滚原因：{latestOptimization.rolledBackReason}
+                </span>
+              )}
             </div>
+
+            {/* 操作按钮：一键应用 / 回滚 / 查看差异 / 效果对比 / 回滚建议 */}
+            <div className={styles.panelActions} style={{ gap: 8, marginBottom: 12 }}>
+              {latestOptimization.decision !== 'applied' && (
+                <button
+                  type="button"
+                  className={styles.btnPrimary}
+                  onClick={handleApplyOptimization}
+                  disabled={optimizationActionInProgress || isSubmitting}
+                >
+                  <CheckCircle size={14} /> 一键应用
+                </button>
+              )}
+              {latestOptimization.decision === 'applied' && (
+                <button
+                  type="button"
+                  className={styles.btnSecondary}
+                  onClick={handleRollbackOptimization}
+                  disabled={optimizationActionInProgress || isSubmitting}
+                >
+                  <RotateCw size={14} /> 恢复到应用前版本
+                </button>
+              )}
+              <button
+                type="button"
+                className={styles.btnSecondary}
+                onClick={handleViewDiff}
+                disabled={optimizationActionInProgress}
+              >
+                <Eye size={14} /> 查看版本差异
+              </button>
+              {latestOptimization.decision === 'applied' && (
+                <>
+                  <button
+                    type="button"
+                    className={styles.btnSecondary}
+                    onClick={handleViewEffectComparison}
+                    disabled={optimizationActionInProgress}
+                  >
+                    <Eye size={14} /> 效果对比
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.btnSecondary}
+                    onClick={handleViewRollbackRecommendation}
+                    disabled={optimizationActionInProgress}
+                  >
+                    <AlertCircle size={14} /> 回滚建议
+                  </button>
+                </>
+              )}
+            </div>
+
+            {/* 版本差异展示 */}
+            {optimizationDiff && (
+              <div className={styles.optimizationCard}>
+                <div className={styles.eventHeader}>
+                  <span className={styles.eventType}>版本差异 v{optimizationDiff.version}</span>
+                  {optimizationDiff.appliedAt && (
+                    <span className={styles.eventTime}>
+                      应用于 {formatEventTime(optimizationDiff.appliedAt)}
+                    </span>
+                  )}
+                </div>
+                {optimizationDiff.originalPrompt && (
+                  <div className={styles.eventText}>
+                    <strong>原 Prompt：</strong>
+                    {optimizationDiff.originalPrompt.slice(0, 240)}
+                    {optimizationDiff.originalPrompt.length > 240 ? '...' : ''}
+                  </div>
+                )}
+                {optimizationDiff.optimizedPrompt && (
+                  <div className={styles.eventText}>
+                    <strong>优化后 Prompt：</strong>
+                    {optimizationDiff.optimizedPrompt.slice(0, 240)}
+                    {optimizationDiff.optimizedPrompt.length > 240 ? '...' : ''}
+                  </div>
+                )}
+                {optimizationDiff.designPromptPatch && (
+                  <div className={styles.eventText}>
+                    <strong>设计 patch：</strong>
+                    {optimizationDiff.designPromptPatch.slice(0, 180)}
+                    {optimizationDiff.designPromptPatch.length > 180 ? '...' : ''}
+                  </div>
+                )}
+                {optimizationDiff.reviewPromptPatch && (
+                  <div className={styles.eventText}>
+                    <strong>审核 patch：</strong>
+                    {optimizationDiff.reviewPromptPatch.slice(0, 180)}
+                    {optimizationDiff.reviewPromptPatch.length > 180 ? '...' : ''}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* 效果对比展示 */}
+            {effectComparison && (
+              <div className={styles.optimizationCard}>
+                <div className={styles.eventHeader}>
+                  <span className={styles.eventType}>效果对比 v{effectComparison.version}</span>
+                  {effectComparison.appliedAt && (
+                    <span className={styles.eventTime}>
+                      应用于 {formatEventTime(effectComparison.appliedAt)}
+                    </span>
+                  )}
+                </div>
+                <div className={styles.eventText}>
+                  <strong>基线（应用前）：</strong>
+                  样本 {effectComparison.baseline.sampleCount}，成功{' '}
+                  {effectComparison.baseline.successCount}，失败{' '}
+                  {effectComparison.baseline.failedCount}，平均耗时{' '}
+                  {effectComparison.baseline.avgDurationMs != null
+                    ? `${Math.round(effectComparison.baseline.avgDurationMs)}ms`
+                    : 'N/A'}
+                  ，平均评分{' '}
+                  {effectComparison.baseline.avgReviewScore != null
+                    ? effectComparison.baseline.avgReviewScore.toFixed(2)
+                    : 'N/A'}
+                  ，token{' '}
+                  {effectComparison.baseline.totalTokens != null
+                    ? effectComparison.baseline.totalTokens
+                    : 'N/A'}
+                </div>
+                <div className={styles.eventText}>
+                  <strong>优化后（应用后）：</strong>
+                  样本 {effectComparison.optimized.sampleCount}，成功{' '}
+                  {effectComparison.optimized.successCount}，失败{' '}
+                  {effectComparison.optimized.failedCount}，平均耗时{' '}
+                  {effectComparison.optimized.avgDurationMs != null
+                    ? `${Math.round(effectComparison.optimized.avgDurationMs)}ms`
+                    : 'N/A'}
+                  ，平均评分{' '}
+                  {effectComparison.optimized.avgReviewScore != null
+                    ? effectComparison.optimized.avgReviewScore.toFixed(2)
+                    : 'N/A'}
+                  ，token{' '}
+                  {effectComparison.optimized.totalTokens != null
+                    ? effectComparison.optimized.totalTokens
+                    : 'N/A'}
+                </div>
+                <div
+                  className={styles.eventText}
+                  style={{
+                    color: effectComparison.sampleSufficient
+                      ? 'var(--color-success, #16a34a)'
+                      : 'var(--color-warning, #d97706)',
+                  }}
+                >
+                  {effectComparison.sampleSufficient
+                    ? '样本充足，结论可信'
+                    : '样本不足，结论仅供参考'}
+                  ：{effectComparison.note}
+                </div>
+              </div>
+            )}
+
+            {/* 回滚建议展示 */}
+            {rollbackRecommendation && (
+              <div className={styles.optimizationCard}>
+                <div className={styles.eventHeader}>
+                  <span className={styles.eventType}>
+                    回滚建议 v{rollbackRecommendation.version}
+                  </span>
+                </div>
+                <div
+                  className={styles.eventText}
+                  style={{
+                    color: rollbackRecommendation.recommendRollback
+                      ? 'var(--color-danger, #dc2626)'
+                      : 'var(--color-success, #16a34a)',
+                  }}
+                >
+                  <strong>
+                    {rollbackRecommendation.recommendRollback
+                      ? '建议回滚'
+                      : '暂不建议回滚'}
+                  </strong>
+                  ：近期失败 {rollbackRecommendation.recentFailureCount} 次，人工复核{' '}
+                  {rollbackRecommendation.recentManualReviewCount} 次
+                </div>
+                {rollbackRecommendation.reasons.length > 0 && (
+                  <ul className={styles.eventText} style={{ margin: '4px 0 0 16px' }}>
+                    {rollbackRecommendation.reasons.map((reason, idx) => (
+                      <li key={idx}>{reason}</li>
+                    ))}
+                  </ul>
+                )}
+                {rollbackRecommendation.recommendRollback && (
+                  <button
+                    type="button"
+                    className={styles.btnSmall}
+                    onClick={handleRollbackOptimization}
+                    disabled={optimizationActionInProgress || isSubmitting}
+                    style={{ marginTop: 8 }}
+                  >
+                    <RotateCw size={12} /> 立即回滚
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* 建议内容展示 */}
             {latestOptimization.designPromptPatch && (
               <div className={styles.optimizationCard}>
                 <div className={styles.eventHeader}>
@@ -1843,7 +2255,9 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
                   type="button"
                   className={styles.btnSmall}
                   onClick={handleRegenerateWithOptimization}
-                  disabled={isSubmitting || isLoading || !multiAgentBetaEnabled}
+                  disabled={
+                    isSubmitting || isLoading || !multiAgentBetaEnabled || optimizationActionInProgress
+                  }
                 >
                   <RotateCw size={12} /> 按建议重新生成
                 </button>
@@ -1863,7 +2277,9 @@ export const OutlineView: React.FC<OutlineViewProps> = ({ onAdvanceToScript }) =
                   type="button"
                   className={styles.btnSmall}
                   onClick={handleReviewWithOptimization}
-                  disabled={isSubmitting || isLoading || !multiAgentBetaEnabled}
+                  disabled={
+                    isSubmitting || isLoading || !multiAgentBetaEnabled || optimizationActionInProgress
+                  }
                 >
                   <CheckCircle size={12} /> 按建议重新复审
                 </button>

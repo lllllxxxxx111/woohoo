@@ -89,6 +89,14 @@ export type {
   ReviewQueueParams,
   SubmitReviewDecisionInput,
   SubmitReviewDecisionResult,
+  ApplyOptimizationInput,
+  RollbackOptimizationInput,
+  OptimizationVersionDiff,
+  EffectMetricGroup,
+  OptimizationEffectComparison,
+  RollbackRecommendation,
+  PipelinePromptAutoApplyConfig,
+  SetAutoApplyConfigInput,
 } from './serverApi.pipeline';
 
 type AuthResponse = {
@@ -2029,6 +2037,13 @@ export const getAiTask = usageTaskPipelineApi.getAiTask;
 export const createPipelineRun = usageTaskPipelineApi.createPipelineRun;
 export const getPipelineRun = usageTaskPipelineApi.getPipelineRun;
 export const getPipelineOptimizations = usageTaskPipelineApi.getPipelineOptimizations;
+export const applyPipelineOptimization = usageTaskPipelineApi.applyPipelineOptimization;
+export const rollbackPipelineOptimization = usageTaskPipelineApi.rollbackPipelineOptimization;
+export const getOptimizationDiff = usageTaskPipelineApi.getOptimizationDiff;
+export const getOptimizationEffectComparison = usageTaskPipelineApi.getOptimizationEffectComparison;
+export const getRollbackRecommendation = usageTaskPipelineApi.getRollbackRecommendation;
+export const getPromptAutoApplyConfig = usageTaskPipelineApi.getPromptAutoApplyConfig;
+export const setPromptAutoApplyConfig = usageTaskPipelineApi.setPromptAutoApplyConfig;
 export const listPipelineRuns = usageTaskPipelineApi.listPipelineRuns;
 export const pausePipelineRun = usageTaskPipelineApi.pausePipelineRun;
 export const resumePipelineRun = usageTaskPipelineApi.resumePipelineRun;
