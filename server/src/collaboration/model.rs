@@ -28,6 +28,11 @@ impl SessionState {
     }
 
     /// 校验状态迁移是否合法
+    ///
+    /// halted 是人工暂停状态，resume/restart 操作可将其迁移回任意非终态工作状态
+    /// （人工恢复特权，需配合审计记录）。restart 回到 discovery 重新发现；
+    /// resume 回到 delegating/resolving_questions/workspace_admission/workspace_execution
+    /// 继续 halted 前的工作阶段。
     pub fn can_transition_to(&self, target: &SessionState) -> bool {
         matches!(
             (self, target),
@@ -52,6 +57,10 @@ impl SessionState {
                 | (SessionState::WorkspaceExecution, SessionState::Completed)
                 | (SessionState::WorkspaceExecution, SessionState::Halted)
                 | (SessionState::Halted, SessionState::Discovery)
+                | (SessionState::Halted, SessionState::Delegating)
+                | (SessionState::Halted, SessionState::ResolvingQuestions)
+                | (SessionState::Halted, SessionState::WorkspaceAdmission)
+                | (SessionState::Halted, SessionState::WorkspaceExecution)
         )
     }
 }
@@ -194,6 +203,17 @@ pub struct CollaborationSession {
     pub pipeline_run_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    // 027 迁移新增：halt 追踪
+    pub halt_reason: Option<String>,
+    pub halted_by: Option<String>,
+    pub halted_at: Option<String>,
+    // 027 迁移新增：恢复审计
+    pub recovery_audited: i64,
+    pub recovery_action: Option<String>,
+    pub recovery_operator_user_id: Option<String>,
+    pub recovery_note: Option<String>,
+    // 027 迁移新增：可配置轮次上限
+    pub max_round_limit: i64,
 }
 
 /// 任务卡数据库模型
@@ -213,6 +233,9 @@ pub struct CollaborationAssignment {
     pub ai_task_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    // 027 迁移新增：失败原因 + 语义指纹
+    pub failure_reason: Option<String>,
+    pub semantic_fingerprint: Option<String>,
 }
 
 /// 协同消息数据库模型
@@ -229,6 +252,8 @@ pub struct CollaborationMessage {
     pub reply_to_message_id: Option<String>,
     pub queue_order: i64,
     pub created_at: String,
+    // 027 迁移新增：语义哈希
+    pub semantic_hash: Option<String>,
 }
 
 /// 协同事件数据库模型
@@ -363,6 +388,81 @@ pub struct DispatchResponse {
     pub assignments: Vec<CollaborationAssignment>,
 }
 
+/// 恢复协同会话请求
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeReq {
+    /// 恢复动作：restart（回到 discovery 重新开始）/ resume（尝试继续当前阶段）
+    pub action: String,
+    /// 操作者备注
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// 队列可视化视图
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueVisualization {
+    pub session_id: String,
+    pub current_speaker: Option<QueueSpeaker>,
+    pub pending_queue: Vec<QueueSpeaker>,
+    pub completed_members: Vec<CompletedMember>,
+    pub blocked_members: Vec<BlockedMember>,
+}
+
+/// 当前/待发言者
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueSpeaker {
+    pub agent_id: String,
+    pub intent: String,
+}
+
+/// 已完成成员
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletedMember {
+    pub agent_id: String,
+    pub goal: String,
+    pub completed_at: String,
+}
+
+/// 阻塞成员
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockedMember {
+    pub agent_id: String,
+    pub goal: String,
+    pub blocking_reason: String,
+    pub blocking_question_count: i64,
+}
+
+/// 协同状态机错误码（稳定，前端可据此分支处理）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaborationStateError {
+    pub error_code: String,
+    pub message: String,
+    pub current_state: String,
+    pub target_state: String,
+}
+
+/// 协同状态机错误码常量
+pub mod error_codes {
+    /// 非法状态迁移
+    pub const INVALID_TRANSITION: &str = "COLLABORATION_INVALID_TRANSITION";
+    /// 未知状态值
+    pub const UNKNOWN_STATE: &str = "COLLABORATION_UNKNOWN_STATE";
+    /// 达到轮次上限
+    pub const ROUND_LIMIT_REACHED: &str = "COLLABORATION_ROUND_LIMIT_REACHED";
+    /// 同智能体重复追问超限
+    pub const QUESTION_LIMIT_REACHED: &str = "COLLABORATION_QUESTION_LIMIT_REACHED";
+    /// 语义近似重复问题
+    pub const SEMANTIC_DUPLICATE_QUESTION: &str = "COLLABORATION_SEMANTIC_DUPLICATE";
+    /// 任务无法恢复（AI task 缺失）
+    pub const TASK_UNRECOVERABLE: &str = "COLLABORATION_TASK_UNRECOVERABLE";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,7 +486,12 @@ mod tests {
             (SessionState::WorkspaceAdmission, SessionState::Halted),
             (SessionState::WorkspaceExecution, SessionState::Completed),
             (SessionState::WorkspaceExecution, SessionState::Halted),
+            // halted 人工恢复迁移（resume/restart 特权操作）
             (SessionState::Halted, SessionState::Discovery),
+            (SessionState::Halted, SessionState::Delegating),
+            (SessionState::Halted, SessionState::ResolvingQuestions),
+            (SessionState::Halted, SessionState::WorkspaceAdmission),
+            (SessionState::Halted, SessionState::WorkspaceExecution),
         ];
         for (from, to) in &valid {
             assert!(

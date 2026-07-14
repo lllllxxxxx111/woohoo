@@ -276,13 +276,13 @@ export type ActiveState = {
   projectId: string | null;
   chatSessionId: string | null;
   currentTab:
-    | 'chat'
-    | 'pipeline'
-    | 'imageGeneration'
-    | 'assets'
-    | 'automation'
-    | 'skills'
-    | 'preview';
+  | 'chat'
+  | 'pipeline'
+  | 'imageGeneration'
+  | 'assets'
+  | 'automation'
+  | 'skills'
+  | 'preview';
 };
 
 export interface AgentProjectHistory {
@@ -400,6 +400,17 @@ export interface CollaborationSession {
   roundCount: number;
   createdAt: string;
   updatedAt: string;
+  // 027 迁移新增：halt 追踪
+  haltReason?: string;
+  haltedBy?: string;
+  haltedAt?: string;
+  // 027 迁移新增：恢复审计
+  recoveryAudited?: number;
+  recoveryAction?: string;
+  recoveryOperatorUserId?: string;
+  recoveryNote?: string;
+  // 027 迁移新增：可配置轮次上限
+  maxRoundLimit?: number;
 }
 
 export interface CollaborationAssignment {
@@ -416,6 +427,9 @@ export interface CollaborationAssignment {
   aiTaskId?: string;
   createdAt: string;
   updatedAt: string;
+  // 027 迁移新增：失败原因 + 语义指纹
+  failureReason?: string;
+  semanticFingerprint?: string;
 }
 
 export interface CollaborationMessage {
@@ -508,3 +522,53 @@ export interface HaltReq {
   reason: string;
   detail?: string;
 }
+
+/** 恢复协同会话请求 */
+export interface ResumeReq {
+  /** 恢复动作：restart（回到 discovery）/ resume（继续当前阶段） */
+  action: 'restart' | 'resume';
+  note?: string;
+}
+
+/** 队列可视化：当前发言者/待发言/已完成/阻塞 */
+export interface QueueVisualization {
+  sessionId: string;
+  currentSpeaker?: QueueSpeaker;
+  pendingQueue: QueueSpeaker[];
+  completedMembers: CompletedMember[];
+  blockedMembers: BlockedMember[];
+}
+
+/** 当前/待发言者 */
+export interface QueueSpeaker {
+  agentId: string;
+  intent: string;
+}
+
+/** 已完成成员 */
+export interface CompletedMember {
+  agentId: string;
+  goal: string;
+  completedAt: string;
+}
+
+/** 阻塞成员 */
+export interface BlockedMember {
+  agentId: string;
+  goal: string;
+  blockingReason: string;
+  blockingQuestionCount: number;
+}
+
+/** 协同稳定错误码（前端可据此分支处理） */
+export const COLLABORATION_ERROR_CODES = {
+  INVALID_TRANSITION: 'COLLABORATION_INVALID_TRANSITION',
+  UNKNOWN_STATE: 'COLLABORATION_UNKNOWN_STATE',
+  ROUND_LIMIT_REACHED: 'COLLABORATION_ROUND_LIMIT_REACHED',
+  QUESTION_LIMIT_REACHED: 'COLLABORATION_QUESTION_LIMIT_REACHED',
+  SEMANTIC_DUPLICATE: 'COLLABORATION_SEMANTIC_DUPLICATE',
+  TASK_UNRECOVERABLE: 'COLLABORATION_TASK_UNRECOVERABLE',
+} as const;
+
+export type CollaborationErrorCode =
+  (typeof COLLABORATION_ERROR_CODES)[keyof typeof COLLABORATION_ERROR_CODES];

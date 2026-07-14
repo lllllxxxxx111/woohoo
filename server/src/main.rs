@@ -579,6 +579,14 @@ async fn main() {
             "/api/collaboration/sessions/{id}/halt",
             post(collaboration::handlers::halt),
         )
+        .route(
+            "/api/collaboration/sessions/{id}/resume",
+            post(collaboration::handlers::resume),
+        )
+        .route(
+            "/api/collaboration/sessions/{id}/queue",
+            get(collaboration::handlers::get_queue),
+        )
         .route("/api/ops/overview", get(ops::handlers::overview))
         .route("/api/ops/heartbeats", get(ops::handlers::list_heartbeats))
         .route("/api/ops/findings", get(ops::handlers::list_findings))

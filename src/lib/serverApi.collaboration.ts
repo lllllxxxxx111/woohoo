@@ -11,6 +11,8 @@ import type {
   AdmitResponse,
   HaltReq,
   CollaborationReadiness,
+  ResumeReq,
+  QueueVisualization,
 } from '../types';
 
 type RequestApi = <T>(path: string, init?: RequestInit, retry?: boolean) => Promise<T>;
@@ -88,6 +90,22 @@ export function createCollaborationApi({ requestApi }: CreateCollaborationApiInp
     });
   };
 
+  /** 恢复已暂停的协同会话（人工恢复流程） */
+  const resume = async (sessionId: string, req: ResumeReq) => {
+    return requestApi<CollaborationSession>(
+      `/api/collaboration/sessions/${sessionId}/resume`,
+      {
+        method: 'POST',
+        body: JSON.stringify(req),
+      },
+    );
+  };
+
+  /** 获取队列可视化（当前发言者/待发言/已完成/阻塞） */
+  const getQueue = async (sessionId: string) => {
+    return requestApi<QueueVisualization>(`/api/collaboration/sessions/${sessionId}/queue`);
+  };
+
   /**
    * 订阅协作事件的 SSE 流
    * 返回 AbortController 供调用方取消订阅
@@ -161,6 +179,8 @@ export function createCollaborationApi({ requestApi }: CreateCollaborationApiInp
     loopCheck,
     admit,
     halt,
+    resume,
+    getQueue,
     streamEvents,
   };
 }

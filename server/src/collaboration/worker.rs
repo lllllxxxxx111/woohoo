@@ -5,8 +5,17 @@ use crate::{
     AppState,
 };
 
-use super::{handlers, model::AssignmentStatus, repo};
+use super::{
+    handlers,
+    model::{error_codes, AssignmentStatus},
+    queue::ReplyQueueManager,
+    repo,
+};
 
+/// 启动协同会话 worker：
+/// 1. 启动时恢复（reconcile_active_sessions）
+/// 2. 订阅 AI task 事件，及时同步终态任务
+/// 3. 定时（10s）兜底 reconcile，处理服务重启后的非终态会话
 pub fn start_worker(state: AppState) {
     let startup_state = state.clone();
     let retry_state = state.clone();
@@ -59,61 +68,179 @@ pub fn start_worker(state: AppState) {
     });
 }
 
+/// 恢复所有活跃协同会话：
+/// - 重建回复队列
+/// - 校验关联 AI task 状态
+/// - 修正 assignment/session 状态
+/// - 任务无法恢复时给出可操作错误（带稳定错误码），不静默标失败
 async fn reconcile_active_sessions(state: &AppState) -> anyhow::Result<()> {
     for session in repo::list_active_sessions(&state.db).await? {
-        if let Err(error) =
-            handlers::dispatch_ready_assignments(state, &session.user_id, &session.id).await
-        {
-            tracing::warn!(session_id = %session.id, error = %error, "failed to dispatch ready collaboration assignments");
+        let session_id = session.id.clone();
+        let user_id = session.user_id.clone();
+        let session_state = session.state.clone();
+
+        if let Err(error) = recover_session(state, &session).await {
+            tracing::warn!(
+                session_id = %session_id,
+                state = %session_state,
+                error = %error,
+                "failed to recover collaboration session"
+            );
         }
-        let assignments = repo::list_assignments(&state.db, &session.id).await?;
+
+        // 派发就绪任务（依赖已完成）
+        if let Err(error) =
+            handlers::dispatch_ready_assignments(state, &user_id, &session_id).await
+        {
+            tracing::warn!(session_id = %session_id, error = %error, "failed to dispatch ready collaboration assignments");
+        }
+
+        // 检查每个 assignment 的 AI task 状态
+        let assignments = repo::list_assignments(&state.db, &session_id).await?;
         for assignment in assignments
             .iter()
             .filter(|assignment| matches!(assignment.status.as_str(), "assigned" | "running"))
         {
-            let Some(task_id) = assignment.ai_task_id.as_deref() else {
-                let updated = repo::update_assignment_status(
-                    &state.db,
-                    &assignment.id,
-                    AssignmentStatus::Failed.as_str(),
-                )
-                .await?;
-                broadcast_assignment_update(state, &updated, None);
-                continue;
-            };
-
-            match state.ai_runtime.get_task(&session.user_id, task_id).await {
-                Some(task)
-                    if matches!(task.status, AiTaskStatus::Completed | AiTaskStatus::Failed) =>
-                {
-                    sync_terminal_task(state, &task).await?;
-                }
-                Some(_) => {}
-                None => {
-                    let updated = repo::update_assignment_status(
-                        &state.db,
-                        &assignment.id,
-                        AssignmentStatus::Failed.as_str(),
-                    )
-                    .await?;
-                    broadcast_assignment_update(state, &updated, Some(task_id));
-                }
+            if let Err(error) =
+                reconcile_assignment(state, &user_id, &session_id, assignment).await
+            {
+                tracing::warn!(
+                    session_id = %session_id,
+                    assignment_id = %assignment.id,
+                    error = %error,
+                    "failed to reconcile collaboration assignment"
+                );
             }
         }
 
-        let refreshed = repo::list_assignments(&state.db, &session.id).await?;
-        if refreshed
-            .iter()
-            .any(|assignment| assignment.status == "failed")
-        {
-            handlers::halt_failed_session(state, &session.id, "服务恢复时发现协同任务已失败或丢失")
+        // 重新评估是否需要 halt / 自动入场
+        let refreshed = repo::list_assignments(&state.db, &session_id).await?;
+        if refreshed.iter().any(|assignment| assignment.status == "failed") {
+            handlers::halt_failed_session(state, &session_id, "服务恢复时发现协同任务已失败或丢失")
                 .await?;
         } else {
-            if let Err(error) = handlers::try_auto_admit(state, &session.id).await {
-                tracing::warn!(session_id = %session.id, error = %error, "failed to auto-admit collaboration session");
+            if let Err(error) = handlers::try_auto_admit(state, &session_id).await {
+                tracing::warn!(session_id = %session_id, error = %error, "failed to auto-admit collaboration session");
             }
         }
     }
+    Ok(())
+}
+
+/// 恢复单个会话：重建队列 + 状态一致性校验
+async fn recover_session(
+    state: &AppState,
+    session: &super::model::CollaborationSession,
+) -> anyhow::Result<()> {
+    let session_id = &session.id;
+
+    // 1. 重建回复队列：当 queue 为空但存在运行中/就绪任务时
+    let existing_queue = ReplyQueueManager::load_queue(&state.db, session_id).await?;
+    if existing_queue.is_empty() {
+        let _ = ReplyQueueManager::initialize_from_assignments(&state.db, session_id).await?;
+        let _ = repo::create_event(
+            &state.db,
+            session_id,
+            "collaboration_queue_updated",
+            Some(
+                &json!({
+                    "sessionId": session_id,
+                    "action": "recovered_on_restart",
+                    "reason": "reply queue rebuilt during service restart"
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        tracing::info!(session_id = %session_id, "协同会话回复队列已在重启后重建");
+    }
+
+    // 2. 状态一致性校验：resolving_questions/workspace_admission 必须有 assignment
+    let assignments = repo::list_assignments(&state.db, session_id).await?;
+    if matches!(
+        session.state.as_str(),
+        "resolving_questions" | "workspace_admission" | "workspace_execution"
+    ) && assignments.is_empty()
+    {
+        // 没有任务卡但状态进入中段，halt 并给出可操作错误
+        let reason = format!(
+            "{}: 会话状态 {} 但无任务卡，无法恢复，请人工介入",
+            error_codes::TASK_UNRECOVERABLE,
+            session.state
+        );
+        let _ = repo::update_assignment_failure_reason(
+            &state.db,
+            session_id,
+            &reason,
+        )
+        .await;
+        let _ =
+            handlers::halt_failed_session(state, session_id, &reason).await?;
+        return Ok(());
+    }
+
+    Ok(())
+}
+
+/// 校验单个 assignment 的 AI task 状态
+/// - AI task 缺失：记录可操作错误（含错误码），halt 会话，不静默标 failed
+/// - AI task 已终态：同步到 assignment
+/// - AI task 进行中：不做处理
+async fn reconcile_assignment(
+    state: &AppState,
+    user_id: &str,
+    session_id: &str,
+    assignment: &super::model::CollaborationAssignment,
+) -> anyhow::Result<()> {
+    let Some(task_id) = assignment.ai_task_id.as_deref() else {
+        // ai_task_id 为空但状态为 running：服务重启丢失关联
+        let reason = format!(
+            "{}: assignment {} 处于 running 但缺少 ai_task_id，可能服务重启导致丢失，需人工裁决",
+            error_codes::TASK_UNRECOVERABLE,
+            assignment.id
+        );
+        let _ = repo::update_assignment_failure_reason(&state.db, &assignment.id, &reason).await;
+        broadcast_assignment_update(
+            state,
+            &repo::update_assignment_status(
+                &state.db,
+                &assignment.id,
+                AssignmentStatus::Failed.as_str(),
+            )
+            .await?,
+            None,
+        );
+        return Ok(());
+    };
+
+    match state.ai_runtime.get_task(user_id, task_id).await {
+        Some(task)
+            if matches!(task.status, AiTaskStatus::Completed | AiTaskStatus::Failed) =>
+        {
+            sync_terminal_task(state, &task).await?;
+        }
+        Some(_) => {}
+        None => {
+            // AI task 缺失：服务重启丢失了 in-memory AI task
+            let reason = format!(
+                "{}: assignment {} 关联的 AI task {} 不存在（服务重启导致 in-memory 任务丢失），需人工恢复或重试分派",
+                error_codes::TASK_UNRECOVERABLE,
+                assignment.id,
+                task_id
+            );
+            tracing::warn!(session_id = %session_id, assignment_id = %assignment.id, task_id = %task_id, "AI task missing during reconcile");
+            let _ = repo::update_assignment_failure_reason(&state.db, &assignment.id, &reason)
+                .await;
+            let updated = repo::update_assignment_status(
+                &state.db,
+                &assignment.id,
+                AssignmentStatus::Failed.as_str(),
+            )
+            .await?;
+            broadcast_assignment_update(state, &updated, Some(task_id));
+        }
+    }
+
     Ok(())
 }
 
@@ -147,6 +274,17 @@ pub(crate) async fn sync_terminal_task(state: &AppState, task: &AiTask) -> anyho
 
     let updated =
         repo::update_assignment_status(&state.db, &assignment.id, status.as_str()).await?;
+
+    // 记录失败原因（仅 failed）
+    if matches!(task.status, AiTaskStatus::Failed) {
+        let _ = repo::update_assignment_failure_reason(
+            &state.db,
+            &assignment.id,
+            task.error.as_deref().unwrap_or("AI task 执行失败"),
+        )
+        .await;
+    }
+
     broadcast_assignment_update(state, &updated, Some(&task.id));
 
     let next_order = repo::get_next_queue_order(&state.db, &assignment.session_id).await?;
@@ -203,10 +341,54 @@ fn broadcast_assignment_update(
         "agentId": assignment.agent_id,
         "newStatus": assignment.status,
         "aiTaskId": task_id,
+        "failureReason": assignment.failure_reason,
     });
     state.collaboration_broadcaster.broadcast(
         assignment.session_id.clone(),
         "collaboration_assignment_updated",
         Some(payload),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 验证稳定错误码常量存在且未被改动
+    #[test]
+    fn error_codes_are_stable() {
+        assert_eq!(
+            error_codes::TASK_UNRECOVERABLE,
+            "COLLABORATION_TASK_UNRECOVERABLE"
+        );
+        assert_eq!(
+            error_codes::INVALID_TRANSITION,
+            "COLLABORATION_INVALID_TRANSITION"
+        );
+        assert_eq!(
+            error_codes::QUESTION_LIMIT_REACHED,
+            "COLLABORATION_QUESTION_LIMIT_REACHED"
+        );
+        assert_eq!(
+            error_codes::SEMANTIC_DUPLICATE_QUESTION,
+            "COLLABORATION_SEMANTIC_DUPLICATE"
+        );
+        assert_eq!(
+            error_codes::ROUND_LIMIT_REACHED,
+            "COLLABORATION_ROUND_LIMIT_REACHED"
+        );
+        assert_eq!(error_codes::UNKNOWN_STATE, "COLLABORATION_UNKNOWN_STATE");
+    }
+
+    /// 验证 halt_session_with_audit 错误消息格式（包含错误码前缀）
+    #[test]
+    fn failure_reason_includes_error_code_prefix() {
+        let reason = format!(
+            "{}: assignment {} 处于 running 但缺少 ai_task_id，可能服务重启导致丢失，需人工裁决",
+            error_codes::TASK_UNRECOVERABLE,
+            "assignment-1"
+        );
+        assert!(reason.starts_with("COLLABORATION_TASK_UNRECOVERABLE:"));
+        assert!(reason.contains("assignment-1"));
+    }
 }

@@ -2048,6 +2048,8 @@ mod tests {
                 "023_export_audit".to_string(),
                 "024_pipeline_external_jobs".to_string(),
                 "025_pipeline_events_constraint_relax".to_string(),
+                "026_pipeline_prompt_optimization_versions".to_string(),
+                "027_collaboration_governance".to_string(),
             ]
         );
 

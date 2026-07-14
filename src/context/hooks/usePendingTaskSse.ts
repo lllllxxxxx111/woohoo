@@ -1,4 +1,4 @@
-import { useEffect, type MutableRefObject } from 'react';
+import { useEffect, useRef, type MutableRefObject } from 'react';
 import {
   type AiTask,
   ensureServerSession,
@@ -612,6 +612,11 @@ export function usePendingTaskSse({
    * 实际事件类型在 eventType 字段中，数据在 payload 子对象中
    */
   const activeCollaborationSession = useAppStore((state) => state.activeCollaborationSession);
+  /**
+   * 已处理过的 collaboration_workspace_started 事件 pipelineRunId 集合
+   * 用于 SSE 重放幂等：同一 pipelineRunId 的事件不会重复触发 switchTab
+   */
+  const processedWorkspaceStartedRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (!activeCollaborationSession || !isServerWorkspaceReady || !isAuthenticated) {
@@ -651,10 +656,10 @@ export function usePendingTaskSse({
                 const updated = existing.map((a) =>
                   a.id === payload.assignmentId
                     ? {
-                        ...a,
-                        status: payload.newStatus || a.status,
-                        aiTaskId: payload.aiTaskId || a.aiTaskId,
-                      }
+                      ...a,
+                      status: payload.newStatus || a.status,
+                      aiTaskId: payload.aiTaskId || a.aiTaskId,
+                    }
                     : a,
                 );
                 if (!existing.some((a) => a.id === payload.assignmentId)) {
@@ -742,12 +747,22 @@ export function usePendingTaskSse({
               if (sessionId) {
                 const session = useAppStore.getState().activeCollaborationSession;
                 if (session && session.id === sessionId) {
+                  const incomingRunId = payload.pipelineRunId as string | undefined;
+                  // SSE 重放幂等：仅在首次见到该 pipelineRunId 时切换 tab
+                  const alreadyProcessed =
+                    !!incomingRunId &&
+                    processedWorkspaceStartedRef.current.has(incomingRunId);
                   useAppStore.getState().setCollaborationSession({
                     ...session,
                     state: 'workspace_execution',
-                    pipelineRunId: payload.pipelineRunId || session.pipelineRunId,
+                    pipelineRunId: incomingRunId || session.pipelineRunId,
                   });
-                  useAppStore.getState().switchTab('pipeline');
+                  if (!alreadyProcessed) {
+                    if (incomingRunId) {
+                      processedWorkspaceStartedRef.current.add(incomingRunId);
+                    }
+                    useAppStore.getState().switchTab('pipeline');
+                  }
                 }
               }
               break;

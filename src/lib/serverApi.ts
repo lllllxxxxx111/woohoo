@@ -2072,6 +2072,8 @@ export const listCollaborationMessages = collaborationApi.listMessages;
 export const checkCollaborationLoop = collaborationApi.loopCheck;
 export const admitCollaboration = collaborationApi.admit;
 export const haltCollaboration = collaborationApi.halt;
+export const resumeCollaboration = collaborationApi.resume;
+export const getCollaborationQueue = collaborationApi.getQueue;
 export const streamCollaborationEvents = collaborationApi.streamEvents;
 
 const imageGenApi = createImageGenApi(requestApi, {

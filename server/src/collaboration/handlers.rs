@@ -672,9 +672,14 @@ pub(crate) async fn halt_failed_session(
     if matches!(session.state.as_str(), "completed" | "halted") {
         return Ok(());
     }
-    let updated =
-        repo::update_session_state(&state.db, session_id, SessionState::Halted.as_str()).await?;
-    let payload = json!({ "reason": reason, "state": updated.state });
+    let updated = repo::halt_session_with_audit(
+        &state.db,
+        session_id,
+        reason,
+        "system",
+    )
+    .await?;
+    let payload = json!({ "reason": reason, "state": updated.state, "haltedBy": "system" });
     let _ = repo::create_event(
         &state.db,
         session_id,
@@ -865,13 +870,19 @@ pub async fn halt(
         )));
     }
 
-    let session = repo::update_session_state(&state.db, &session_id, SessionState::Halted.as_str())
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let session = repo::halt_session_with_audit(
+        &state.db,
+        &session_id,
+        &req.reason,
+        &user_id.0,
+    )
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let payload = json!({
         "reason": req.reason,
-        "detail": req.detail
+        "detail": req.detail,
+        "haltedBy": user_id.0,
     });
 
     if let Err(e) = repo::create_event(
@@ -893,6 +904,127 @@ pub async fn halt(
     );
 
     Ok(Json(session))
+}
+
+/// 恢复已暂停的协同会话（人工恢复流程）
+/// POST /api/collaboration/sessions/{id}/resume
+pub async fn resume(
+    State(state): State<AppState>,
+    axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
+    Path(session_id): Path<String>,
+    Json(req): Json<ResumeReq>,
+) -> Result<Json<CollaborationSession>, AppError> {
+    let session = verify_session_owner(&state, &session_id, &user_id).await?;
+
+    if session.state != "halted" {
+        return Err(AppError::BadRequest(format!(
+            "当前状态 {} 不允许恢复，仅 halted 状态可恢复",
+            session.state
+        )));
+    }
+
+    let session = repo::resume_session(
+        &state.db,
+        &session_id,
+        &req.action,
+        &user_id.0,
+        req.note.as_deref(),
+    )
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let payload = json!({
+        "action": req.action,
+        "operatorUserId": user_id.0,
+        "note": req.note,
+        "newState": session.state,
+    });
+
+    let _ = repo::create_event(
+        &state.db,
+        &session_id,
+        "collaboration_session_resumed",
+        Some(&payload.to_string()),
+    )
+    .await;
+
+    broadcast_collaboration_event(
+        &state,
+        &session_id,
+        "collaboration_session_resumed",
+        Some(payload),
+    );
+
+    // 恢复后尝试重新分派就绪任务
+    if let Err(e) = dispatch_ready_assignments(&state, &user_id.0, &session_id).await {
+        tracing::warn!(session_id = %session_id, error = %e, "恢复后重新分派失败");
+    }
+
+    Ok(Json(session))
+}
+
+/// 获取队列可视化（当前发言者/待发言/已完成/阻塞）
+/// GET /api/collaboration/sessions/{id}/queue
+pub async fn get_queue(
+    State(state): State<AppState>,
+    axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
+    Path(session_id): Path<String>,
+) -> Result<Json<QueueVisualization>, AppError> {
+    let session = verify_session_owner(&state, &session_id, &user_id).await?;
+    let assignments = repo::list_assignments(&state.db, &session_id)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    // 从持久化的 reply_queue_json 加载队列
+    let queue = super::queue::ReplyQueueManager::load_queue(&state.db, &session_id)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let current_speaker = queue.first().map(|entry| QueueSpeaker {
+        agent_id: entry.agent_id.clone(),
+        intent: entry.intent.clone(),
+    });
+
+    let pending_queue: Vec<QueueSpeaker> = queue
+        .iter()
+        .skip(1)
+        .map(|entry| QueueSpeaker {
+            agent_id: entry.agent_id.clone(),
+            intent: entry.intent.clone(),
+        })
+        .collect();
+
+    let completed_members: Vec<CompletedMember> = assignments
+        .iter()
+        .filter(|a| a.status == "done")
+        .map(|a| CompletedMember {
+            agent_id: a.agent_id.clone(),
+            goal: a.goal.clone(),
+            completed_at: a.updated_at.clone(),
+        })
+        .collect();
+
+    let blocked_members: Vec<BlockedMember> = assignments
+        .iter()
+        .filter(|a| a.status == "blocked" || a.status == "questioning")
+        .map(|a| BlockedMember {
+            agent_id: a.agent_id.clone(),
+            goal: a.goal.clone(),
+            blocking_reason: a
+                .failure_reason
+                .clone()
+                .unwrap_or_else(|| format!("智能体 {} 有 {} 个未解决问题", a.agent_id, a.blocking_question_count)),
+            blocking_question_count: a.blocking_question_count,
+        })
+        .collect();
+
+    Ok(Json(QueueVisualization {
+        session_id: session.id,
+        current_speaker,
+        pending_queue,
+        completed_members,
+        blocked_members,
+    }))
 }
 
 /// 协同事件 SSE 流
@@ -992,6 +1124,8 @@ mod tests {
             ai_task_id: None,
             created_at: String::new(),
             updated_at: String::new(),
+            failure_reason: None,
+            semantic_fingerprint: None,
         }
     }
 
