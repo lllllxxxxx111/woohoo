@@ -1,8 +1,6 @@
 # 〖学习工作赛道〗Woohoo Studio：AI 多智能体短剧创作工作台 Demo
 
 > 发帖标签请选择：`学习工作`
->
-> 提交前请替换：体验地址、报名帖链接、Session ID、截图。
 
 ## 1. Demo 简介
 
@@ -95,17 +93,17 @@ npm run dev:all
 
 关键截图：
 
-1. TRAE 会话：Demo 一键体验 / 示例项目实现：待上传
-2. 终端：Docker 运行路径验证或 compose config：待上传
-3. Woohoo 登录后工作台首页：待上传
-4. 创意对话 + 多智能体侧栏：待上传
-5. 制作流程 / 管线预览 / 资产库：可选
+1. TRAE 会话：Pipeline Prompt 优化模型与后端实现：见附件 `01-trae-pipeline-prompt-backend.png`
+2. TRAE 会话：Pipeline 权限与状态流转逻辑：见附件 `02-trae-pipeline-permission-status.png`
+3. TRAE 会话：前端 VideoView / Pipeline 演示流程：见附件 `03-trae-frontend-video-pipeline.png`
+4. Woohoo 登录后工作台首页：见附件或源码内 `trae-demo/screenshots/01-login.png`
+5. 制作流程 / 管线预览 / 资产库：见 GitHub 分支源码与 Demo 运行结果
 
 Session ID：
 
-1. 增加 Demo 一键体验模式：待填写
-2. 补齐 GitHub + Docker 评审运行闭环：待填写
-3. 打磨核心工作台演示流程：待填写
+1. Pipeline Prompt 优化模型与后端实现：`.3200005213814259:f7522136da8f8f9f2effa572a1e83fa5_6a54fe05cd3222231d080122.6a558ee0b5727afd05da6751.6a558edf476339d2e175fa88:Trae CN.T(2026/7/14 09:20:32)`
+2. Pipeline 权限与状态流转逻辑：`.3200005213814259:3b0236247ea1c5c2b931794619290ec9_6a5638af9e2bc13f547a0cdf.6a5645069e2bc13f547a0fcd.6a56450363cc3a63a82ad6ab:Trae CN.T(2026/7/14 22:17:42)`
+3. 前端 VideoView / Pipeline 演示流程：`.3200005213814259:4a3f589dc4b35f1a96aa52d70178bbc3_6a5638af9e2bc13f547a0cdf.6a5638b49e2bc13f547a0ce1.6a5638b263cc3a63a82ad6aa:Trae CN.T(2026/7/14 21:25:08)`
 4. 完成参赛提交前质量门禁：可选
 
 Session ID 获取方式：在 TRAE 里找到关键任务会话，双击会话头像复制 Session ID。
@@ -130,4 +128,4 @@ Session ID 获取方式：在 TRAE 里找到关键任务会话，双击会话头
 
 ## 7. 报名帖链接
 
-通过审核的报名帖链接：待填写
+通过审核的报名帖链接：https://forum.trae.cn/t/topic/25030
