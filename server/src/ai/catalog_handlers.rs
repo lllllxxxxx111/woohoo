@@ -88,7 +88,7 @@ pub async fn create_endpoint(
     if req.name.trim().is_empty() {
         return Err(AppError::Validation("端点名称不能为空".into()));
     }
-    validate_connection_fields(&req.provider, &req.base_url, &req.api_key)?;
+    validate_connection_fields(&req.provider, &req.base_url, &req.api_key).await?;
 
     let id = Uuid::new_v4().to_string();
     let endpoint = sqlx::query_as::<_, AiEndpoint>(
@@ -138,7 +138,7 @@ pub async fn update_endpoint(
         .map(str::to_owned)
         .unwrap_or_else(|| existing.api_key.clone());
 
-    validate_connection_fields(&req.provider, &req.base_url, &next_api_key)?;
+    validate_connection_fields(&req.provider, &req.base_url, &next_api_key).await?;
 
     let endpoint = sqlx::query_as::<_, AiEndpoint>(
         "UPDATE ai_endpoints
@@ -247,6 +247,12 @@ pub async fn upsert_endpoint_capability(
         None => existing.as_ref().and_then(|item| item.config_json.clone()),
     };
 
+    // SSRF 防护：path_override 若为绝对 URL，必须独立校验
+    // 防止攻击者用绝对 URL 绕过已校验的 base_url，直连内网/云元数据
+    if let Some(path_override) = next_path_override.as_deref() {
+        super::ssrf_guard::validate_path_override(path_override).await?;
+    }
+
     let capability_id = Uuid::new_v4().to_string();
     let record = sqlx::query_as::<_, AiEndpointCapability>(
         "INSERT INTO ai_endpoint_capabilities (
@@ -334,7 +340,7 @@ pub async fn list_endpoint_models(
     let base_url = normalize_optional(req.base_url).unwrap_or(endpoint.base_url);
     let api_key = normalize_optional(req.api_key).unwrap_or(endpoint.api_key);
 
-    validate_connection_fields(&provider, &base_url, &api_key)?;
+    validate_connection_fields(&provider, &base_url, &api_key).await?;
 
     let models = state.ai_client.list_models(&base_url, &api_key).await?;
 

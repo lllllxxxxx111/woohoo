@@ -139,6 +139,10 @@ impl AiClient {
         n: u32,
         _response_format: &str,
     ) -> AppResult<ImageGenerateResponse> {
+        // SSRF 运行时校验：防止 DNS rebinding（写入时 DNS 解析到公网，
+        // 请求时 DNS 切换到内网）。每次请求前重新解析并校验目标 IP。
+        crate::ai::ssrf_guard::validate_endpoint_url(base_url).await?;
+
         let (url, api_kind) = build_image_generation_url(base_url);
 
         let mut request = self
@@ -589,6 +593,12 @@ impl AiClient {
             http: Client::builder()
                 .use_rustls_tls()
                 .timeout(std::time::Duration::from_secs(120))
+                // SSRF 防护：禁止自动跟随重定向。
+                // 攻击者可能将 base_url 指向公网服务器，再 302 重定向到内网 IP
+                // （如 169.254.169.254 云元数据）以绕过初始 URL 校验。
+                // 禁用重定向后，3xx 响应会原样返回，由调用方决定是否跟随，
+                // 跟随时应通过 ssrf_guard::validate_endpoint_url 重新校验 Location 头。
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("Failed to create HTTP client"),
             fallback_state: Arc::new(Mutex::new(HashMap::new())),
@@ -596,6 +606,9 @@ impl AiClient {
     }
 
     pub async fn list_models(&self, base_url: &str, api_key: &str) -> AppResult<Vec<String>> {
+        // SSRF 运行时校验：防止 DNS rebinding
+        crate::ai::ssrf_guard::validate_endpoint_url(base_url).await?;
+
         let url = build_models_url(base_url);
         let mut request = self
             .http
@@ -651,6 +664,9 @@ impl AiClient {
         max_tokens: Option<i64>,
         stream_fallback_mode: StreamFallbackMode,
     ) -> AppResult<AiResponse> {
+        // SSRF 运行时校验：防止 DNS rebinding
+        crate::ai::ssrf_guard::validate_endpoint_url(base_url).await?;
+
         let fallback_key = build_stream_fallback_cache_key(base_url, model, api_key);
         let prefer_stream_by_cache = matches!(stream_fallback_mode, StreamFallbackMode::Auto)
             && self.is_stream_preferred(&fallback_key);
@@ -969,6 +985,9 @@ impl AiClient {
         frequency_penalty: Option<f64>,
         max_tokens: Option<i64>,
     ) -> AppResult<impl futures::Stream<Item = Result<String, AppError>>> {
+        // SSRF 运行时校验：防止 DNS rebinding
+        crate::ai::ssrf_guard::validate_endpoint_url(base_url).await?;
+
         let url = build_chat_url(base_url);
 
         let req = ChatRequest {

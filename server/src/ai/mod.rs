@@ -7,6 +7,7 @@ pub mod mock;
 pub mod policy;
 pub mod policy_handlers;
 pub mod runtime;
+pub mod ssrf_guard;
 pub mod task_handlers;
 pub mod task_persistence;
 pub mod usage;

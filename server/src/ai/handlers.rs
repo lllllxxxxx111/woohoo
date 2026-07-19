@@ -905,7 +905,7 @@ pub async fn test_endpoint(
     headers: HeaderMap,
     Json(req): Json<AiTestReq>,
 ) -> AppResult<Json<serde_json::Value>> {
-    validate_connection_fields(&req.provider, &req.base_url, &req.api_key)?;
+    validate_connection_fields(&req.provider, &req.base_url, &req.api_key).await?;
 
     if req.model.trim().is_empty() {
         return Err(AppError::Validation("model 不能为空".into()));

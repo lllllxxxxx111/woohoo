@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::ai::ssrf_guard;
+
 pub(crate) fn compact_text(value: &str) -> String {
     value
         .split_whitespace()
@@ -541,7 +543,7 @@ pub(crate) fn parse_bool_flag(value: &str) -> Option<bool> {
     }
 }
 
-pub(crate) fn validate_connection_fields(
+pub(crate) async fn validate_connection_fields(
     provider: &str,
     base_url: &str,
     api_key: &str,
@@ -557,6 +559,13 @@ pub(crate) fn validate_connection_fields(
     if provider_requires_api_key(provider) && api_key.trim().is_empty() {
         return Err(AppError::Validation("apiKey 不能为空".into()));
     }
+
+    // SSRF 防护：校验 base_url 的 scheme、host 和解析后的 IP
+    // - 仅允许 http/https
+    // - 禁止 loopback / 私网 / 链路本地 / 组播 / 云元数据
+    // - DNS 解析后所有 IP 必须通过黑名单（防 DNS rebinding）
+    // - 开发模式（WOOHOO_DEV_ALLOW_PRIVATE_ENDPOINTS=true）下放行私网
+    ssrf_guard::validate_endpoint_url(base_url).await?;
 
     Ok(())
 }

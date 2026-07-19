@@ -67,6 +67,19 @@ async fn main() {
         subscriber.with_writer(std::io::sink).init();
     }
 
+    // ─── SSRF 防护：开发模式开关生产安全检查 ──────────────
+    //
+    // 启动时拦截最严重的 SSRF 防护失效配置：
+    // 若 `WOOHOO_DEV_ALLOW_PRIVATE_ENDPOINTS=true` 且 `RUST_ENV=production`，
+    // 直接 panic 拒绝启动。
+    //
+    // 必须在 AiClient 创建、数据库初始化、任何 HTTP 请求发起之前执行。
+    // 检查本身只读环境变量，无副作用，开销可忽略。
+    if let Err(error) = ai::ssrf_guard::assert_dev_mode_safe_at_startup() {
+        tracing::error!("{}", error);
+        panic!("{}", error);
+    }
+
     // 加载配置
     let mut config = AppConfig::from_env();
     tracing::info!("Starting Woohoo Server on {}:{}", config.host, config.port);
