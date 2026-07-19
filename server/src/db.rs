@@ -196,6 +196,25 @@ async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<String>, sqlx::E
                 continue;
             }
         }
+        if version == "025_pipeline_events_constraint_relax" {
+            // 025 对 pipeline_run_events 表的存在性有分支处理（重建 vs
+            // fresh-create），不能走统一的 run_sql_migration 路径，否则
+            // 缺表旧库 / 测试夹具会在 INSERT...SELECT / DROP TABLE 上报错。
+            if apply_migration_025_pipeline_events_constraint_relax(pool).await? {
+                applied_versions.push(version.to_string());
+            }
+            continue;
+        }
+        if version == "026_pipeline_prompt_optimization_versions" {
+            // 026 对 pipeline_prompt_optimizations 表的存在性与列状态有分支处理
+            // （缺表恢复 + 逐列 ALTER 检查），不能走统一的 run_sql_migration 路径，
+            // 否则缺表旧库 / 部分执行后重启会以 "no such table" 或 "duplicate column"
+            // 永久失败。
+            if apply_migration_026_pipeline_prompt_optimization_versions(pool).await? {
+                applied_versions.push(version.to_string());
+            }
+            continue;
+        }
         if run_sql_migration(pool, version, migration_sql).await? {
             applied_versions.push(version.to_string());
         }
@@ -229,6 +248,17 @@ async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<String>, sqlx::E
         applied_versions.push(version);
     }
 
+    // 026 may run before pipeline_run_steps is restored; retry its data backfill
+    // on startup so step_key is not permanently left NULL.
+    ensure_pipeline_prompt_optimization_step_keys(pool).await?;
+
+    // 跨阶段索引补建：025 的 idx_pipeline_runs_project_type_status 依赖 pipeline_runs
+    // 表与 project_id/pipeline_type/status 三列同时存在。025 记录为已应用时这些前置
+    // 条件可能尚未具备（缺表 / 缺列），导致索引被跳过且不会重试。
+    // 此处在所有 backfill 完成后幂等调用 ensure 函数，确保索引最终一致；缺条件时
+    // 仍安全跳过，下次启动继续重试。
+    ensure_idx_pipeline_runs_project_type_status(pool).await?;
+
     Ok(applied_versions)
 }
 
@@ -247,6 +277,313 @@ async fn run_sql_migration(
     Ok(true)
 }
 
+/**
+ * 应用 migration 025：放宽 pipeline_run_events.event_type 约束
+ *
+ * 背景：原 025 SQL 假设 pipeline_run_events 表一定存在（由 002 创建），
+ *   直接执行 `INSERT ... FROM pipeline_run_events` 与 `DROP TABLE
+ *   pipeline_run_events`。但旧库 / 测试夹具可能记录了 002 已应用却
+ *   实际未建表（或 002 尚未执行），导致 025 以 "no such table" 失败。
+ *
+ * 兼容策略（按表是否存在分支处理，非忽略错误）：
+ *   1. 已应用过 025（schema_migrations 有记录）→ 直接返回，幂等。
+ *   2. pipeline_run_events 存在 → 执行 025 SQL 文件的重建分支：
+ *      事务内 INSERT...SELECT 全量复制 → DROP 旧表 → RENAME → 重建索引，
+ *      移除 event_type CHECK，保留 source CHECK 与全部列/FK/默认值。
+ *   3. pipeline_run_events 缺失（旧库 / 测试夹具）→ 走 fresh-create 分支：
+ *      直接以宽松 schema 建空表（无数据可迁），不触发对缺失表的 INSERT/DROP。
+ *
+ * 跨阶段依赖索引 idx_pipeline_runs_project_type_status（服务于
+ *   is_project_prerequisite_satisfied）依赖 pipeline_runs 表存在，
+ *   仅在 pipeline_runs 存在时创建；缺表旧库待 005 backfill 建 pipeline_runs
+ *   后由下次启动重试补建。
+ *
+ * 失败传播：每个分支的 SQL 在其前置条件下必应成功；任何错误直接向上传播，
+ *   不通过 catch_unwind / IGNORE 掩盖真实迁移失败。
+ */
+/**
+ * 幂等地确保 idx_pipeline_runs_project_type_status 索引存在。
+ *
+ * 该索引服务于 is_project_prerequisite_satisfied 查询，原属 025 范畴，
+ * 但跨阶段依赖 pipeline_runs 表与 project_id/pipeline_type/status 三列同时存在。
+ * 025 记录为已应用时这些前置条件可能尚未具备（旧库 / 测试夹具中 pipeline_runs
+ * 缺失或列不全），导致索引永久缺失。
+ *
+ * 兼容策略（基于 schema 条件分支，非吞没错误）：
+ *   1. pipeline_runs 不存在 → 跳过（下次启动重试），返回 Ok。
+ *   2. pipeline_runs 缺三列之一 → 跳过并记录缺失列，返回 Ok。
+ *   3. 三列齐全 → CREATE INDEX IF NOT EXISTS 幂等建索引。
+ *
+ * 调用点：
+ *   - apply_migration_025 内（首次尝试建索引）
+ *   - run_schema_migrations 末尾（所有 backfill 后幂等补建，确保索引最终一致）
+ */
+async fn ensure_idx_pipeline_runs_project_type_status(
+    pool: &SqlitePool,
+) -> Result<(), sqlx::Error> {
+    let tables: HashSet<String> = list_all_tables(pool).await?.into_iter().collect();
+    if !tables.contains("pipeline_runs") {
+        tracing::info!(
+            "跳过 idx_pipeline_runs_project_type_status：pipeline_runs 尚不存在，待 005 backfill 后下次启动补建"
+        );
+        return Ok(());
+    }
+    let columns = list_table_columns(pool, "pipeline_runs").await?;
+    let required: [&str; 3] = ["project_id", "pipeline_type", "status"];
+    let missing: Vec<&str> = required
+        .iter()
+        .filter(|c| !columns.contains(**c))
+        .copied()
+        .collect();
+    if !missing.is_empty() {
+        tracing::info!(
+            ?missing,
+            "跳过 idx_pipeline_runs_project_type_status：pipeline_runs 缺少所需列，待列补齐后下次启动补建"
+        );
+        return Ok(());
+    }
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_pipeline_runs_project_type_status \
+         ON pipeline_runs(project_id, pipeline_type, status)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+/// Retry the 026 data backfill after pipeline_run_steps becomes available.
+async fn ensure_pipeline_prompt_optimization_step_keys(
+    pool: &SqlitePool,
+) -> Result<(), sqlx::Error> {
+    let tables: HashSet<String> = list_all_tables(pool).await?.into_iter().collect();
+    if !tables.contains("pipeline_prompt_optimizations")
+        || !tables.contains("pipeline_run_steps")
+    {
+        return Ok(());
+    }
+
+    let optimization_columns = list_table_columns(pool, "pipeline_prompt_optimizations").await?;
+    let step_columns = list_table_columns(pool, "pipeline_run_steps").await?;
+    if !optimization_columns.contains("step_key")
+        || !optimization_columns.contains("step_id")
+        || !step_columns.contains("id")
+        || !step_columns.contains("step_key")
+    {
+        return Ok(());
+    }
+
+    sqlx::query(
+        "UPDATE pipeline_prompt_optimizations
+         SET step_key = (
+             SELECT s.step_key
+             FROM pipeline_run_steps s
+             WHERE s.id = pipeline_prompt_optimizations.step_id
+         )
+         WHERE step_key IS NULL
+           AND EXISTS (
+               SELECT 1
+               FROM pipeline_run_steps s
+               WHERE s.id = pipeline_prompt_optimizations.step_id
+           )",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+async fn apply_migration_025_pipeline_events_constraint_relax(
+    pool: &SqlitePool,
+) -> Result<bool, sqlx::Error> {
+    const VERSION: &str = "025_pipeline_events_constraint_relax";
+    const REBUILD_SQL: &str =
+        include_str!("../migrations/025_pipeline_events_constraint_relax.sql");
+
+    // fresh-create 分支：旧表缺失时直接以宽松 schema 建空表 + 事件索引。
+    // 与 025 重建分支、005 backfill 的 pipeline_run_events 定义保持一致，
+    // 不含 event_type CHECK；FK 指向 pipeline_runs（SQLite 在 foreign_keys
+    // 关闭时允许引用尚不存在的表，由 005 backfill 后续建表补齐）。
+    const FRESH_CREATE_SQL: &str = "-- 025 fresh-create: pipeline_run_events 缺失时以宽松 schema 直接建表
+CREATE TABLE IF NOT EXISTS pipeline_run_events (
+    id              TEXT PRIMARY KEY NOT NULL,
+    run_id          TEXT NOT NULL REFERENCES pipeline_runs(id) ON DELETE CASCADE,
+    step_id         TEXT,
+    event_type      TEXT NOT NULL,
+    payload_json    TEXT,
+    source          TEXT NOT NULL DEFAULT 'system'
+                    CHECK (source IN ('system', 'user', 'scheduler', 'api')),
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_pipeline_run_events_run ON pipeline_run_events(run_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_pipeline_run_events_type ON pipeline_run_events(run_id, event_type, created_at DESC);";
+
+    if has_schema_migration(pool, VERSION).await? {
+        return Ok(false);
+    }
+
+    let tables: HashSet<String> = list_all_tables(pool).await?.into_iter().collect();
+    let events_exists = tables.contains("pipeline_run_events");
+
+    if events_exists {
+        tracing::info!(
+            version = VERSION,
+            "重建 pipeline_run_events 表以移除 event_type CHECK 约束（事务保护 + 数据迁移）"
+        );
+        sqlx::raw_sql(REBUILD_SQL).execute(pool).await?;
+    } else {
+        tracing::info!(
+            version = VERSION,
+            "pipeline_run_events 不存在（旧库/测试夹具），走 fresh-create 分支以宽松 schema 直接建表"
+        );
+        sqlx::raw_sql(FRESH_CREATE_SQL).execute(pool).await?;
+    }
+
+    // 跨阶段依赖索引：幂等调用 ensure 函数。
+    // 025 记录为已应用时 pipeline_runs 可能尚未存在或缺列，索引会跳过。
+    // 后续 005 backfill 建 pipeline_runs 后，run_schema_migrations 末尾会
+    // 再次调用 ensure 函数补建，避免索引永久缺失。
+    ensure_idx_pipeline_runs_project_type_status(pool).await?;
+
+    record_schema_migration(pool, VERSION, "sql").await?;
+    Ok(true)
+}
+
+/**
+ * 应用 migration 026：pipeline_prompt_optimizations 版本化与应用记录扩展
+ *
+ * 背景：原 026 SQL 假设 pipeline_prompt_optimizations 表一定存在（由 004 创建），
+ *   直接执行 13 个 `ALTER TABLE pipeline_prompt_optimizations ADD COLUMN`。
+ *   但旧库 / 测试夹具可能记录了 004 已应用却实际未建表，导致 026 以
+ *   "no such table" 失败；若 ALTER 部分执行后中断，下次启动会以
+ *   "duplicate column name" 永久失败。
+ *
+ * 兼容策略（基于 schema 条件分支，非吞没错误）：
+ *   1. 已应用过 026 → 直接返回，幂等。
+ *   2. pipeline_prompt_optimizations 缺失 → 先执行 004 SQL 的
+ *      `CREATE TABLE IF NOT EXISTS` 恢复基础表，再继续后续步骤。
+ *   3. 逐列检查：已存在则跳过 ALTER，不存在则执行 ADD COLUMN，
+ *      避免 "duplicate column name" 导致部分执行后永久失败。
+ *   4. UPDATE step_key 回填、CREATE INDEX、CREATE TABLE auto_apply_config
+ *      均为幂等语句，可安全重复执行。
+ *
+ * 失败传播：每个 ALTER / UPDATE / CREATE 在其前置条件下必应成功；任何错误
+ *   直接向上传播，不通过 catch_unwind / IGNORE 掩盖真实迁移失败。
+ */
+async fn apply_migration_026_pipeline_prompt_optimization_versions(
+    pool: &SqlitePool,
+) -> Result<bool, sqlx::Error> {
+    const VERSION: &str = "026_pipeline_prompt_optimization_versions";
+    const BASE_TABLE_SQL: &str =
+        include_str!("../migrations/004_pipeline_prompt_optimizations.sql");
+
+    if has_schema_migration(pool, VERSION).await? {
+        return Ok(false);
+    }
+
+    // 缺表恢复：若 004 已记录但表未真正建立，先执行 004 SQL 的
+    // CREATE TABLE IF NOT EXISTS 幂等建表（不重复记录 004 版本）。
+    let tables: HashSet<String> = list_all_tables(pool).await?.into_iter().collect();
+    if !tables.contains("pipeline_prompt_optimizations") {
+        tracing::info!(
+            version = VERSION,
+            "pipeline_prompt_optimizations 缺失，先执行 004 CREATE TABLE IF NOT EXISTS 恢复基础表"
+        );
+        sqlx::raw_sql(BASE_TABLE_SQL).execute(pool).await?;
+    }
+
+    // 逐列检查 ALTER：已存在则跳过，不存在则 ADD COLUMN。
+    // 026 原 SQL 的 13 个 ADD COLUMN 定义（与 026 SQL 完全一致）。
+    let existing_columns = list_table_columns(pool, "pipeline_prompt_optimizations").await?;
+    // 列名 + 类型定义（与 026 SQL 一致）。列名硬编码，无 SQL 注入风险。
+    let alter_columns: [(&str, &str); 13] = [
+        ("step_key", "TEXT"),
+        ("version", "INTEGER NOT NULL DEFAULT 0"),
+        ("strategy", "TEXT NOT NULL DEFAULT 'manual'"),
+        ("operator_user_id", "TEXT"),
+        ("applied_at", "TEXT"),
+        ("applied_request_id", "TEXT"),
+        ("original_prompt", "TEXT"),
+        ("optimized_prompt", "TEXT"),
+        ("previous_version_id", "TEXT"),
+        ("rolled_back_at", "TEXT"),
+        ("rolled_back_by", "TEXT"),
+        ("rolled_back_reason", "TEXT"),
+        ("rollback_request_id", "TEXT"),
+    ];
+    for (col, type_def) in alter_columns {
+        if existing_columns.contains(col) {
+            tracing::info!(
+                version = VERSION,
+                col,
+                "列已存在，跳过 ALTER TABLE ADD COLUMN"
+            );
+            continue;
+        }
+        let sql = format!(
+            "ALTER TABLE pipeline_prompt_optimizations ADD COLUMN {} {}",
+            col, type_def
+        );
+        sqlx::query(&sql).execute(pool).await?;
+    }
+
+    // 幂等回填 step_key：仅在 step_key IS NULL 且 pipeline_run_steps 存在时反查填充。
+    // SQLite 在子查询引用不存在的表时会直接抛 no such table，而非返回 NULL，
+    // 因此必须显式检查 pipeline_run_steps 是否存在。
+    // 缺表时跳过回填（step_key 保持 NULL，待后续 backfill 建表后下次启动补建），
+    // 不记录 026 为已应用之外的其他状态，下次启动会因 026 已记录而跳过本函数，
+    // 此时由 run_schema_migrations 末尾的跨阶段补建逻辑兜底（见 ensure_*）。
+    if tables.contains("pipeline_run_steps") {
+        sqlx::query(
+            "UPDATE pipeline_prompt_optimizations
+             SET step_key = (
+                 SELECT s.step_key FROM pipeline_run_steps s
+                 WHERE s.id = pipeline_prompt_optimizations.step_id
+             )
+             WHERE step_key IS NULL",
+        )
+        .execute(pool)
+        .await?;
+    } else {
+        tracing::info!(
+            version = VERSION,
+            "跳过 step_key 回填：pipeline_run_steps 尚不存在，待后续 backfill 后下次启动补建"
+        );
+    }
+
+    // 幂等索引：CREATE INDEX IF NOT EXISTS
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_pipeline_prompt_opt_project_step \
+         ON pipeline_prompt_optimizations(project_id, step_key, decision, created_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    // 幂等独立表：CREATE TABLE IF NOT EXISTS
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS pipeline_prompt_auto_apply_config (
+            id                  TEXT PRIMARY KEY NOT NULL,
+            user_id             TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            project_id          TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            step_key            TEXT,
+            enabled             INTEGER NOT NULL DEFAULT 0,
+            risk_acknowledged   INTEGER NOT NULL DEFAULT 0,
+            operator_user_id    TEXT NOT NULL,
+            created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_pipeline_prompt_auto_apply_project_step \
+         ON pipeline_prompt_auto_apply_config(project_id, step_key)",
+    )
+    .execute(pool)
+    .await?;
+
+    record_schema_migration(pool, VERSION, "rust").await?;
+    Ok(true)
+}
 async fn run_legacy_schema_backfill_migration(
     pool: &SqlitePool,
 ) -> Result<Option<String>, sqlx::Error> {
@@ -2965,6 +3302,1158 @@ mod tests {
         assert!(report
             .applied_migrations
             .contains(&"011_updated_at_column_backfills".to_string()));
+
+        cleanup_test_pool(pool, db_path).await;
+    }
+    /// 在测试夹具中创建带 CHECK 白名单的旧版 pipeline_run_events 表（模拟 002 原始 schema），
+    /// 同时创建最小化的 pipeline_runs 父表以满足 FK 引用与 025 索引创建需求。
+    /// 父表含 project_id/pipeline_type/status 三列以触发 025 的跨阶段索引建立。
+    /// 注意：调用前需确保 PRAGMA foreign_keys = OFF（001_init 默认开启 FK）。
+    async fn seed_legacy_pipeline_run_events_with_check(pool: &SqlitePool) {
+        // 最小化父表：含 025 索引所需的 project_id/pipeline_type/status 三列
+        sqlx::query(
+            "CREATE TABLE pipeline_runs (
+                id              TEXT PRIMARY KEY NOT NULL,
+                user_id         TEXT NOT NULL,
+                project_id      TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                pipeline_type   TEXT NOT NULL DEFAULT 'one_click',
+                status          TEXT NOT NULL DEFAULT 'queued',
+                created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            )",
+        )
+        .execute(pool)
+        .await
+        .expect("failed to create legacy pipeline_runs fixture");
+
+        // 旧版事件表：含 event_type CHECK 白名单（与 002 完全一致）
+        sqlx::query(
+            "CREATE TABLE pipeline_run_events (
+                id              TEXT PRIMARY KEY NOT NULL,
+                run_id          TEXT NOT NULL REFERENCES pipeline_runs(id) ON DELETE CASCADE,
+                step_id         TEXT,
+                event_type      TEXT NOT NULL
+                                CHECK (event_type IN (
+                                    'created','started','paused','resumed','cancelled',
+                                    'step_queued','step_started','step_completed',
+                                    'step_failed','step_retry','completed','failed'
+                                )),
+                payload_json    TEXT,
+                source          TEXT NOT NULL DEFAULT 'system'
+                                CHECK (source IN ('system','user','scheduler','api')),
+                created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            )",
+        )
+        .execute(pool)
+        .await
+        .expect("failed to create legacy pipeline_run_events with CHECK");
+
+        sqlx::query(
+            "CREATE INDEX idx_pipeline_run_events_run ON pipeline_run_events(run_id, created_at DESC)",
+        )
+        .execute(pool)
+        .await
+        .expect("failed to create legacy index");
+
+        // 父表种子行：供事件 FK 引用
+        sqlx::query(
+            "INSERT INTO pipeline_runs (id, user_id, project_id, conversation_id, pipeline_type, status, created_at)
+             VALUES ('run-1','user-1','project-1','conv-1','one_click','completed','2026-04-14T00:00:00Z')",
+        )
+        .execute(pool)
+        .await
+        .expect("failed to seed pipeline_runs row");
+    }
+
+    /// 尝试插入 event_type='step_blocked'（不在 002 白名单内）的事件。
+    /// 返回 true 表示插入成功（CHECK 已被 025 移除）；false 表示违反 CHECK 失败。
+    async fn try_insert_non_whitelist_event(pool: &SqlitePool, id: &str) -> bool {
+        sqlx::query(
+            "INSERT INTO pipeline_run_events (id, run_id, event_type, source, created_at)
+             VALUES (?, 'run-1', 'step_blocked', 'system', '2026-04-14T00:00:00Z')",
+        )
+        .bind(id)
+        .execute(pool)
+        .await
+        .is_ok()
+    }
+
+    /// 空库场景：全新数据库运行迁移，025 应通过 fresh-create 分支创建宽松 schema 的事件表，
+    /// 移除 event_type CHECK 约束，并建立事件索引与跨阶段索引 idx_pipeline_runs_project_type_status。
+    #[tokio::test]
+    async fn migration_025_fresh_db_relaxes_check_and_creates_index() {
+        let (pool, db_path) = create_test_pool("woohoo-mig025-fresh").await;
+
+        run_schema_migrations(&pool)
+            .await
+            .expect("fresh db migrations should succeed");
+
+        // 025 已记录到 schema_migrations
+        assert!(
+            has_schema_migration(&pool, "025_pipeline_events_constraint_relax")
+                .await
+                .expect("failed to query 025")
+        );
+
+        // pipeline_run_events 表存在（由 fresh-create 分支建立）
+        let tables: HashSet<String> = list_all_tables(&pool)
+            .await
+            .expect("failed to list tables")
+            .into_iter()
+            .collect();
+        assert!(
+            tables.contains("pipeline_run_events"),
+            "fresh-create 后 pipeline_run_events 应存在"
+        );
+
+        // 关闭 FK 检查以便插入最小化父表行（001_init 默认开启 foreign_keys）
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .expect("failed to disable foreign_keys");
+
+        // 插入父表行后，应能插入白名单外的 step_blocked 事件
+        sqlx::query(
+            "INSERT INTO pipeline_runs (id, user_id, project_id, conversation_id)
+             VALUES ('run-1','user-1','project-1','conv-1')",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to seed pipeline_runs");
+
+        assert!(
+            try_insert_non_whitelist_event(&pool, "evt-fresh-1").await,
+            "fresh-create 后应允许插入 step_blocked 事件（CHECK 已移除）"
+        );
+
+        // 事件索引存在
+        let indexes = list_table_indexes(&pool, "pipeline_run_events")
+            .await
+            .expect("failed to list indexes");
+        assert!(indexes.contains("idx_pipeline_run_events_run"));
+        assert!(indexes.contains("idx_pipeline_run_events_type"));
+
+        // 跨阶段索引：fresh 库的 pipeline_runs 由 002 建表含三列，应建 idx_pipeline_runs_project_type_status
+        let runs_indexes = list_table_indexes(&pool, "pipeline_runs")
+            .await
+            .expect("failed to list pipeline_runs indexes");
+        assert!(
+            runs_indexes.contains("idx_pipeline_runs_project_type_status"),
+            "fresh 库应建立 idx_pipeline_runs_project_type_status 索引"
+        );
+
+        cleanup_test_pool(pool, db_path).await;
+    }
+
+    /// 旧库场景：002 已建带 CHECK 白名单的 pipeline_run_events，025 应通过 rebuild 分支
+    /// 重建表移除 CHECK 约束，保留 source CHECK、FK、索引等其余 schema。
+    /// 直接调用 apply_migration_025 而非 run_schema_migrations，避开 027 等其他迁移的副作用，
+    /// 聚焦验证 025 的 rebuild 分支逻辑。
+    #[tokio::test]
+    async fn migration_025_old_db_with_check_rebuilds_and_preserves_schema() {
+        let (pool, db_path) = create_test_pool("woohoo-mig025-old").await;
+
+        // 创建 schema_migrations 表（apply_migration_025 内部 has_schema_migration 依赖）
+        sqlx::query(
+            "CREATE TABLE schema_migrations (
+                version    TEXT PRIMARY KEY NOT NULL,
+                kind       TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create schema_migrations");
+
+        // 关闭 FK 以便夹具建表 + 插入（001_init 默认开启 foreign_keys）
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .expect("failed to disable foreign_keys");
+
+        // 建旧版事件表（含 CHECK 白名单）+ 父表
+        seed_legacy_pipeline_run_events_with_check(&pool).await;
+
+        // 迁移前：白名单外事件应被 CHECK 拒绝
+        assert!(
+            !try_insert_non_whitelist_event(&pool, "evt-pre-1").await,
+            "迁移前 CHECK 应拒绝 step_blocked 事件"
+        );
+
+        // 直接调用 025 的专用迁移函数（rebuild 分支）
+        let applied = apply_migration_025_pipeline_events_constraint_relax(&pool)
+            .await
+            .expect("failed to apply migration 025");
+        assert!(applied, "025 应实际执行 rebuild 分支");
+
+        // 025 已记录
+        assert!(
+            has_schema_migration(&pool, "025_pipeline_events_constraint_relax")
+                .await
+                .expect("failed to query 025")
+        );
+
+        // CHECK 已移除：能插入白名单外事件
+        assert!(
+            try_insert_non_whitelist_event(&pool, "evt-post-1").await,
+            "迁移后应允许插入 step_blocked 事件"
+        );
+
+        // source CHECK 仍生效：尝试插 source='invalid' 应失败
+        let invalid_source_result = sqlx::query(
+            "INSERT INTO pipeline_run_events (id, run_id, event_type, source, created_at)
+             VALUES ('evt-bad-source','run-1','created','invalid','2026-04-14T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(
+            invalid_source_result.is_err(),
+            "source CHECK 应保留，'invalid' 应被拒绝"
+        );
+
+        // 事件索引存在
+        let indexes = list_table_indexes(&pool, "pipeline_run_events")
+            .await
+            .expect("failed to list indexes");
+        assert!(indexes.contains("idx_pipeline_run_events_run"));
+        assert!(indexes.contains("idx_pipeline_run_events_type"));
+
+        // 跨阶段索引：夹具 pipeline_runs 含三列，应建 idx_pipeline_runs_project_type_status
+        let runs_indexes = list_table_indexes(&pool, "pipeline_runs")
+            .await
+            .expect("failed to list pipeline_runs indexes");
+        assert!(
+            runs_indexes.contains("idx_pipeline_runs_project_type_status"),
+            "rebuild 后应建立 idx_pipeline_runs_project_type_status 索引"
+        );
+
+        cleanup_test_pool(pool, db_path).await;
+    }
+
+    /// 缺表场景：夹具记录 002 已应用但未实际建 pipeline_run_events 表，
+    /// 025 应走 fresh-create 分支以宽松 schema 直接建表，不报 "no such table" 错误。
+    /// 同时验证 026 在 pipeline_prompt_optimizations 缺失时被 guard 跳过。
+    #[tokio::test]
+    async fn migration_025_missing_old_table_fresh_creates_relaxed() {
+        let (pool, db_path) = create_test_pool("woohoo-mig025-missing").await;
+
+        sqlx::query(
+            "CREATE TABLE schema_migrations (
+                version    TEXT PRIMARY KEY NOT NULL,
+                kind       TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create schema_migrations");
+
+        // 记录 001-007 已应用（含 002）但不实际建任何表
+        // 模拟旧库 / 测试夹具中 "002 已记录但表未真正建立" 的破损状态
+        for version in [
+            "001_init",
+            "002_pipeline_runs",
+            "003_pipeline_orchestrator_m1",
+            "004_pipeline_prompt_optimizations",
+            "005_pipeline_schema_backfills",
+            "006_legacy_schema_backfills",
+            "007_runtime_compat_backfills_v2",
+        ] {
+            record_schema_migration(&pool, version, "test")
+                .await
+                .expect("failed to seed schema migration");
+        }
+
+        run_schema_migrations(&pool)
+            .await
+            .expect("missing-table migrations should succeed via fresh-create");
+
+        // 025 已记录
+        assert!(
+            has_schema_migration(&pool, "025_pipeline_events_constraint_relax")
+                .await
+                .expect("failed to query 025")
+        );
+
+        // pipeline_run_events 表存在（fresh-create 分支建立）
+        let tables: HashSet<String> = list_all_tables(&pool)
+            .await
+            .expect("failed to list tables")
+            .into_iter()
+            .collect();
+        assert!(
+            tables.contains("pipeline_run_events"),
+            "fresh-create 分支应建立 pipeline_run_events 表"
+        );
+
+        // 026 应通过缺表恢复逻辑建立 pipeline_prompt_optimizations 并记录为已应用
+        // （修复后：缺表不再永久跳过 026，而是先执行 004 CREATE TABLE IF NOT EXISTS
+        // 再继续 026 的 ALTER / INDEX / CREATE TABLE 流程）
+        assert!(
+            has_schema_migration(&pool, "026_pipeline_prompt_optimization_versions")
+                .await
+                .expect("failed to query 026"),
+            "026 应在 pipeline_prompt_optimizations 缺失时通过缺表恢复逻辑被应用"
+        );
+        assert!(
+            tables.contains("pipeline_prompt_optimizations"),
+            "026 缺表恢复应建立 pipeline_prompt_optimizations 表"
+        );
+        assert!(
+            tables.contains("pipeline_prompt_auto_apply_config"),
+            "026 应建立 pipeline_prompt_auto_apply_config 表"
+        );
+
+        // 关闭 FK 以便手动建父表 + 插入
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .expect("failed to disable foreign_keys");
+
+        // 手动建父表（夹具不依赖 002 实际执行）以验证 025 fresh-create 的 FK 引用
+        sqlx::query(
+            "CREATE TABLE pipeline_runs (
+                id              TEXT PRIMARY KEY NOT NULL,
+                user_id         TEXT NOT NULL,
+                project_id      TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                pipeline_type   TEXT NOT NULL DEFAULT 'one_click',
+                status          TEXT NOT NULL DEFAULT 'queued',
+                created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create pipeline_runs for FK target");
+
+        sqlx::query(
+            "INSERT INTO pipeline_runs (id, user_id, project_id, conversation_id)
+             VALUES ('run-1','user-1','project-1','conv-1')",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to seed pipeline_runs");
+
+        assert!(
+            try_insert_non_whitelist_event(&pool, "evt-missing-1").await,
+            "fresh-create 后应允许插入 step_blocked 事件"
+        );
+
+        cleanup_test_pool(pool, db_path).await;
+    }
+
+    /// 重复执行场景：连续调用 run_schema_migrations 两次，第二次应跳过 025（已记录），
+    /// 不重复执行 rebuild / fresh-create，不产生重复 schema_migrations 记录，已有数据不丢失。
+    #[tokio::test]
+    async fn migration_025_repeated_execution_is_idempotent() {
+        let (pool, db_path) = create_test_pool("woohoo-mig025-idempotent").await;
+
+        run_schema_migrations(&pool)
+            .await
+            .expect("first run should succeed");
+
+        // 关闭 FK 以便插入最小化父表行（001_init 默认开启 foreign_keys）
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .expect("failed to disable foreign_keys");
+
+        // 第一次后插入父表行与一条非白名单事件，作为 "数据已存在" 标记
+        sqlx::query(
+            "INSERT INTO pipeline_runs (id, user_id, project_id, conversation_id)
+             VALUES ('run-1','user-1','project-1','conv-1')",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to seed pipeline_runs");
+        assert!(
+            try_insert_non_whitelist_event(&pool, "evt-idem-1").await,
+            "首次迁移后应允许插入 step_blocked"
+        );
+
+        // 第二次运行：应跳过 025（幂等）
+        run_schema_migrations(&pool)
+            .await
+            .expect("second run should succeed (idempotent)");
+
+        // 025 在 schema_migrations 中仅有一条记录
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = '025_pipeline_events_constraint_relax'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("failed to count 025 records");
+        assert_eq!(count, 1, "025 应仅记录一次");
+
+        // 第二次后仍能插入非白名单事件（schema 未被破坏）
+        assert!(
+            try_insert_non_whitelist_event(&pool, "evt-idem-2").await,
+            "第二次运行后应仍允许插入 step_blocked"
+        );
+
+        // 原有事件保留
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM pipeline_run_events WHERE id LIKE 'evt-idem-%' ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("failed to fetch events");
+        assert_eq!(
+            rows,
+            vec!["evt-idem-1".to_string(), "evt-idem-2".to_string()]
+        );
+
+        cleanup_test_pool(pool, db_path).await;
+    }
+
+    /// 数据保留场景：旧表中已有若干白名单事件，025 rebuild 后应通过 INSERT...SELECT
+    /// 全量复制到新表，行数与全部字段（id/run_id/step_id/event_type/payload_json/source/created_at）保持不变。
+    /// 直接调用 apply_migration_025 而非 run_schema_migrations，避开 027 等其他迁移的副作用。
+    #[tokio::test]
+    async fn migration_025_preserves_existing_event_rows() {
+        let (pool, db_path) = create_test_pool("woohoo-mig025-preserve").await;
+
+        // 创建 schema_migrations 表（apply_migration_025 内部 has_schema_migration 依赖）
+        sqlx::query(
+            "CREATE TABLE schema_migrations (
+                version    TEXT PRIMARY KEY NOT NULL,
+                kind       TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create schema_migrations");
+
+        // 关闭 FK 以便夹具建表 + 插入（001_init 默认开启 foreign_keys）
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .expect("failed to disable foreign_keys");
+
+        // 建旧版事件表 + 父表（含种子 run-1 行）
+        seed_legacy_pipeline_run_events_with_check(&pool).await;
+
+        // 迁移前插入 3 条白名单事件
+        let before_rows: Vec<(&str, &str, &str, &str, &str, &str, &str)> = vec![
+            ("evt-1", "run-1", "step-1", "step_started", r#"{"k":1}"#, "system", "2026-04-14T00:01:00Z"),
+            ("evt-2", "run-1", "step-1", "step_completed", r#"{"k":2}"#, "scheduler", "2026-04-14T00:02:00Z"),
+            ("evt-3", "run-1", "step-2", "step_failed", r#"{"k":3}"#, "api", "2026-04-14T00:03:00Z"),
+        ];
+        for (id, run_id, step_id, event_type, payload, source, created_at) in &before_rows {
+            sqlx::query(
+                "INSERT INTO pipeline_run_events (id, run_id, step_id, event_type, payload_json, source, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(run_id)
+            .bind(step_id)
+            .bind(event_type)
+            .bind(payload)
+            .bind(source)
+            .bind(created_at)
+            .execute(&pool)
+            .await
+            .expect("failed to seed legacy event row");
+        }
+
+        // 直接调用 025 的专用迁移函数（rebuild 分支）
+        let applied = apply_migration_025_pipeline_events_constraint_relax(&pool)
+            .await
+            .expect("failed to apply migration 025");
+        assert!(applied, "025 应实际执行 rebuild 分支");
+
+        // 行数保留
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pipeline_run_events WHERE id IN ('evt-1','evt-2','evt-3')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("failed to count preserved events");
+        assert_eq!(count, 3, "应保留全部 3 条原始事件");
+
+        // 字段值保留
+        let rows = sqlx::query(
+            "SELECT id, run_id, step_id, event_type, payload_json, source, created_at
+             FROM pipeline_run_events WHERE id IN ('evt-1','evt-2','evt-3') ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("failed to fetch preserved events");
+
+        assert_eq!(rows.len(), 3, "应查询到 3 条保留事件");
+        for (i, row) in rows.iter().enumerate() {
+            let expected = &before_rows[i];
+            let id: String = row.try_get("id").expect("id");
+            let run_id: String = row.try_get("run_id").expect("run_id");
+            let step_id: Option<String> = row.try_get("step_id").expect("step_id");
+            let event_type: String = row.try_get("event_type").expect("event_type");
+            let payload_json: Option<String> = row.try_get("payload_json").expect("payload_json");
+            let source: String = row.try_get("source").expect("source");
+            let created_at: String = row.try_get("created_at").expect("created_at");
+            assert_eq!(id, expected.0, "id 不匹配");
+            assert_eq!(run_id, expected.1, "run_id 不匹配");
+            assert_eq!(step_id.as_deref(), Some(expected.2), "step_id 不匹配");
+            assert_eq!(event_type, expected.3, "event_type 不匹配");
+            assert_eq!(payload_json.as_deref(), Some(expected.4), "payload_json 不匹配");
+            assert_eq!(source, expected.5, "source 不匹配");
+            assert_eq!(created_at, expected.6, "created_at 不匹配");
+        }
+
+        // 迁移后能插入非白名单事件（CHECK 移除）
+        assert!(
+            try_insert_non_whitelist_event(&pool, "evt-new-blocked").await,
+            "迁移后应允许插入 step_blocked 事件"
+        );
+
+        cleanup_test_pool(pool, db_path).await;
+    }
+
+    /// 索引补建场景 1：025 执行时 pipeline_runs 不存在，
+    /// idx_pipeline_runs_project_type_status 应被跳过（不报错），025 仍记录为已应用。
+    /// 此场景模拟旧库 / 测试夹具中 pipeline_runs 缺失但 025 已运行的破损状态。
+    #[tokio::test]
+    async fn migration_025_index_skipped_when_pipeline_runs_missing() {
+        let (pool, db_path) = create_test_pool("woohoo-mig025-idx-no-runs").await;
+
+        // 创建 schema_migrations（apply_migration_025 内部依赖）
+        sqlx::query(
+            "CREATE TABLE schema_migrations (
+                version    TEXT PRIMARY KEY NOT NULL,
+                kind       TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create schema_migrations");
+
+        // 关闭 FK 以便 fresh-create 引用尚不存在的 pipeline_runs
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .expect("failed to disable foreign_keys");
+
+        // 直接调用 025（fresh-create 分支建空事件表，pipeline_runs 不存在）
+        let applied = apply_migration_025_pipeline_events_constraint_relax(&pool)
+            .await
+            .expect("025 应在 pipeline_runs 缺失时通过 fresh-create 成功");
+        assert!(applied, "025 应实际执行");
+
+        // 025 已记录
+        assert!(
+            has_schema_migration(&pool, "025_pipeline_events_constraint_relax")
+                .await
+                .expect("failed to query 025"),
+            "025 应被记录为已应用"
+        );
+
+        // pipeline_run_events 表存在
+        let tables: HashSet<String> = list_all_tables(&pool)
+            .await
+            .expect("failed to list tables")
+            .into_iter()
+            .collect();
+        assert!(
+            tables.contains("pipeline_run_events"),
+            "fresh-create 应建立 pipeline_run_events"
+        );
+
+        // pipeline_runs 不存在
+        assert!(
+            !tables.contains("pipeline_runs"),
+            "夹具不应建立 pipeline_runs"
+        );
+
+        // 索引被跳过：pipeline_runs 不存在，无法建索引
+        let indexes = list_table_indexes(&pool, "pipeline_run_events")
+            .await
+            .expect("failed to list event indexes");
+        // 仅应包含事件表自身的索引，跨阶段索引不存在
+        assert!(
+            !indexes.contains("idx_pipeline_runs_project_type_status"),
+            "pipeline_runs 缺失时跨阶段索引应被跳过（不报错）"
+        );
+
+        cleanup_test_pool(pool, db_path).await;
+    }
+
+    /// 索引补建场景 2：pipeline_runs 存在但缺 project_id/pipeline_type/status 之一，
+    /// idx_pipeline_runs_project_type_status 应被跳过（不报错），025 仍记录为已应用。
+    #[tokio::test]
+    async fn migration_025_index_skipped_when_columns_missing() {
+        let (pool, db_path) = create_test_pool("woohoo-mig025-idx-no-cols").await;
+
+        sqlx::query(
+            "CREATE TABLE schema_migrations (
+                version    TEXT PRIMARY KEY NOT NULL,
+                kind       TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create schema_migrations");
+
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .expect("failed to disable foreign_keys");
+
+        // 建 pipeline_runs 但缺 status 列（仅 project_id/pipeline_type，不满足三列齐全）
+        sqlx::query(
+            "CREATE TABLE pipeline_runs (
+                id              TEXT PRIMARY KEY NOT NULL,
+                user_id         TEXT NOT NULL,
+                project_id      TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                pipeline_type   TEXT NOT NULL DEFAULT 'one_click',
+                created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create pipeline_runs without status column");
+
+        let applied = apply_migration_025_pipeline_events_constraint_relax(&pool)
+            .await
+            .expect("025 应在 pipeline_runs 缺列时通过 fresh-create 成功");
+        assert!(applied, "025 应实际执行");
+
+        assert!(
+            has_schema_migration(&pool, "025_pipeline_events_constraint_relax")
+                .await
+                .expect("failed to query 025"),
+            "025 应被记录为已应用"
+        );
+
+        // 跨阶段索引不存在（status 缺失）
+        let indexes = list_table_indexes(&pool, "pipeline_runs")
+            .await
+            .expect("failed to list pipeline_runs indexes");
+        assert!(
+            !indexes.contains("idx_pipeline_runs_project_type_status"),
+            "pipeline_runs 缺 status 列时跨阶段索引应被跳过"
+        );
+
+        cleanup_test_pool(pool, db_path).await;
+    }
+
+    /// 索引补建场景 3：025 首次运行时跳过索引（pipeline_runs 缺失），
+    /// 下次启动（pipeline_runs 由 backfill 建好后）调用 ensure 函数应补建索引。
+    /// 模拟 run_schema_migrations 末尾的跨阶段补建调用。
+    #[tokio::test]
+    async fn migration_025_index_recovered_on_next_startup() {
+        let (pool, db_path) = create_test_pool("woohoo-mig025-idx-recover").await;
+
+        sqlx::query(
+            "CREATE TABLE schema_migrations (
+                version    TEXT PRIMARY KEY NOT NULL,
+                kind       TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create schema_migrations");
+
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .expect("failed to disable foreign_keys");
+
+        // 首次运行 025：pipeline_runs 不存在，索引被跳过
+        let applied = apply_migration_025_pipeline_events_constraint_relax(&pool)
+            .await
+            .expect("first 025 run should succeed");
+        assert!(applied);
+
+        let indexes_before = list_table_indexes(&pool, "pipeline_runs")
+            .await
+            .expect("failed to list indexes before recovery");
+        // pipeline_runs 不存在时返回空集合
+        assert!(
+            !indexes_before.contains("idx_pipeline_runs_project_type_status"),
+            "首次运行后跨阶段索引不应存在"
+        );
+
+        // 模拟 005 backfill 建立 pipeline_runs（三列齐全）
+        sqlx::query(
+            "CREATE TABLE pipeline_runs (
+                id              TEXT PRIMARY KEY NOT NULL,
+                user_id         TEXT NOT NULL,
+                project_id      TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                pipeline_type   TEXT NOT NULL DEFAULT 'one_click',
+                status          TEXT NOT NULL DEFAULT 'queued',
+                created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create pipeline_runs with all required columns");
+
+        // 模拟 run_schema_migrations 末尾的 ensure 调用（跨阶段补建）
+        ensure_idx_pipeline_runs_project_type_status(&pool)
+            .await
+            .expect("ensure function should succeed after pipeline_runs is created");
+
+        // 索引被补建
+        let indexes_after = list_table_indexes(&pool, "pipeline_runs")
+            .await
+            .expect("failed to list indexes after recovery");
+        assert!(
+            indexes_after.contains("idx_pipeline_runs_project_type_status"),
+            "ensure 函数应在 pipeline_runs 三列齐全后补建跨阶段索引"
+        );
+
+        // 再次调用 ensure 应幂等（不报错、不重复创建）
+        ensure_idx_pipeline_runs_project_type_status(&pool)
+            .await
+            .expect("ensure function should be idempotent");
+
+        // 通过 sqlite_master 直接校验索引仅存在一个（CREATE INDEX IF NOT EXISTS 幂等）
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_pipeline_runs_project_type_status'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("failed to count index");
+        assert_eq!(
+            count, 1,
+            "重复调用 ensure 不应产生重复索引（CREATE INDEX IF NOT EXISTS 幂等）"
+        );
+
+        cleanup_test_pool(pool, db_path).await;
+    }
+
+    /// 026 缺表恢复场景：schema_migrations 已记录 004，但 pipeline_prompt_optimizations
+    /// 表实际未建立。026 应通过缺表恢复逻辑（执行 004 SQL 的 CREATE TABLE IF NOT EXISTS）
+    /// 建立基础表，然后继续执行 13 个 ALTER / 索引 / 新表，并记录为已应用。
+    #[tokio::test]
+    async fn migration_026_recovers_missing_base_table() {
+        let (pool, db_path) = create_test_pool("woohoo-mig026-missing-base").await;
+
+        sqlx::query(
+            "CREATE TABLE schema_migrations (
+                version    TEXT PRIMARY KEY NOT NULL,
+                kind       TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create schema_migrations");
+
+        // 记录 004 已应用但实际不建表（模拟破损状态）
+        record_schema_migration(&pool, "004_pipeline_prompt_optimizations", "test")
+            .await
+            .expect("failed to seed 004");
+
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .expect("failed to disable foreign_keys");
+
+        // 调用 026：缺表恢复 + 完整 ALTER / 索引 / 新表
+        let applied = apply_migration_026_pipeline_prompt_optimization_versions(&pool)
+            .await
+            .expect("026 should recover missing base table and continue");
+        assert!(applied, "026 应实际执行（缺表恢复 + ALTER）");
+
+        // 026 已记录
+        assert!(
+            has_schema_migration(&pool, "026_pipeline_prompt_optimization_versions")
+                .await
+                .expect("failed to query 026"),
+            "026 应被记录为已应用"
+        );
+
+        // 基础表已建立
+        let tables: HashSet<String> = list_all_tables(&pool)
+            .await
+            .expect("failed to list tables")
+            .into_iter()
+            .collect();
+        assert!(
+            tables.contains("pipeline_prompt_optimizations"),
+            "缺表恢复应建立 pipeline_prompt_optimizations"
+        );
+        assert!(
+            tables.contains("pipeline_prompt_auto_apply_config"),
+            "026 应建立 pipeline_prompt_auto_apply_config 表"
+        );
+
+        // 13 个新列全部存在
+        let columns = list_table_columns(&pool, "pipeline_prompt_optimizations")
+            .await
+            .expect("failed to list columns");
+        for col in [
+            "step_key",
+            "version",
+            "strategy",
+            "operator_user_id",
+            "applied_at",
+            "applied_request_id",
+            "original_prompt",
+            "optimized_prompt",
+            "previous_version_id",
+            "rolled_back_at",
+            "rolled_back_by",
+            "rolled_back_reason",
+            "rollback_request_id",
+        ] {
+            assert!(
+                columns.contains(col),
+                "缺表恢复后列 {} 应存在（由 026 ALTER 添加）",
+                col
+            );
+        }
+
+        // 索引存在
+        let indexes = list_table_indexes(&pool, "pipeline_prompt_optimizations")
+            .await
+            .expect("failed to list indexes");
+        assert!(
+            indexes.contains("idx_pipeline_prompt_opt_project_step"),
+            "026 应建立 idx_pipeline_prompt_opt_project_step 索引"
+        );
+
+        cleanup_test_pool(pool, db_path).await;
+    }
+
+    /// 026 部分 ALTER 场景：上次启动已部分执行 ALTER（添加了 step_key、version 两列），
+    /// 然后中断未记录 026。本次启动应跳过已存在列，继续添加剩余 11 列，避免
+    /// "duplicate column name" 错误使迁移永久失败。
+    #[tokio::test]
+    async fn migration_026_partial_alter_continues_on_restart() {
+        let (pool, db_path) = create_test_pool("woohoo-mig026-partial-alter").await;
+
+        sqlx::query(
+            "CREATE TABLE schema_migrations (
+                version    TEXT PRIMARY KEY NOT NULL,
+                kind       TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create schema_migrations");
+
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .expect("failed to disable foreign_keys");
+
+        // 手动建立基础表（含 004 列）+ 部分模拟上次 ALTER 已执行（step_key、version）
+        sqlx::query(
+            "CREATE TABLE pipeline_prompt_optimizations (
+                id                   TEXT PRIMARY KEY NOT NULL,
+                run_id               TEXT NOT NULL,
+                step_id              TEXT NOT NULL,
+                project_id           TEXT NOT NULL,
+                conversation_id      TEXT NOT NULL,
+                decision             TEXT NOT NULL DEFAULT 'suggested',
+                design_prompt_patch  TEXT,
+                review_prompt_patch  TEXT,
+                rationale_json       TEXT,
+                source               TEXT NOT NULL DEFAULT 'assistant',
+                created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                step_key             TEXT,
+                version              INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create table with partial 026 columns");
+
+        // 026 未记录（模拟上次中断）
+        assert!(
+            !has_schema_migration(&pool, "026_pipeline_prompt_optimization_versions")
+                .await
+                .unwrap(),
+            "测试前置：026 未记录"
+        );
+
+        // 调用 026：应跳过 step_key、version，添加剩余 11 列，不报 duplicate column
+        let applied = apply_migration_026_pipeline_prompt_optimization_versions(&pool)
+            .await
+            .expect("026 should continue after partial ALTER without duplicate column error");
+        assert!(applied, "026 应实际执行（补齐剩余列）");
+
+        // 13 列全部存在
+        let columns = list_table_columns(&pool, "pipeline_prompt_optimizations")
+            .await
+            .expect("failed to list columns");
+        for col in [
+            "step_key",
+            "version",
+            "strategy",
+            "operator_user_id",
+            "applied_at",
+            "applied_request_id",
+            "original_prompt",
+            "optimized_prompt",
+            "previous_version_id",
+            "rolled_back_at",
+            "rolled_back_by",
+            "rolled_back_reason",
+            "rollback_request_id",
+        ] {
+            assert!(
+                columns.contains(col),
+                "部分 ALTER 后再次启动，列 {} 应存在",
+                col
+            );
+        }
+
+        // 026 已记录
+        assert!(
+            has_schema_migration(&pool, "026_pipeline_prompt_optimization_versions")
+                .await
+                .unwrap(),
+            "026 应被记录为已应用"
+        );
+
+        cleanup_test_pool(pool, db_path).await;
+    }
+
+    /// 026 两次启动幂等场景：第一次完整执行 026，第二次启动应直接返回（不重复执行），
+    /// 不产生重复 schema_migrations 记录，不报 duplicate column 错误。
+    #[tokio::test]
+    async fn migration_026_idempotent_on_second_startup() {
+        let (pool, db_path) = create_test_pool("woohoo-mig026-twice").await;
+
+        sqlx::query(
+            "CREATE TABLE schema_migrations (
+                version    TEXT PRIMARY KEY NOT NULL,
+                kind       TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create schema_migrations");
+
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .expect("failed to disable foreign_keys");
+
+        // 第一次：缺表恢复 + 完整 ALTER
+        let applied1 = apply_migration_026_pipeline_prompt_optimization_versions(&pool)
+            .await
+            .expect("first 026 run should succeed");
+        assert!(applied1, "首次应实际执行");
+
+        // 第二次：应直接返回（幂等）
+        let applied2 = apply_migration_026_pipeline_prompt_optimization_versions(&pool)
+            .await
+            .expect("second 026 run should be idempotent");
+        assert!(
+            !applied2,
+            "第二次启动应返回 false（已应用，不重复执行）"
+        );
+
+        // schema_migrations 中 026 仅一条记录
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = '026_pipeline_prompt_optimization_versions'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("failed to count 026 records");
+        assert_eq!(count, 1, "026 应仅记录一次");
+
+        cleanup_test_pool(pool, db_path).await;
+    }
+
+    /// 026 完整升级场景：旧库已有 pipeline_prompt_optimizations 表（004 建立），
+    /// 且 pipeline_run_steps 表已有 step_key 数据。026 应：
+    /// 1. 跳过 CREATE TABLE（表已存在）
+    /// 2. 添加 13 个新列
+    /// 3. 回填 step_key：从 pipeline_run_steps 反查填充到 step_key IS NULL 的行
+    /// 4. 建立索引与新表
+    /// 5. 记录 026 为已应用
+    #[tokio::test]
+    async fn migration_026_deferred_step_key_backfill_retries_after_steps_restore() {
+        let (pool, db_path) = create_test_pool("woohoo-mig026-deferred-step-key").await;
+
+        sqlx::query(
+            "CREATE TABLE pipeline_prompt_optimizations (
+                id TEXT PRIMARY KEY NOT NULL,
+                step_id TEXT NOT NULL,
+                step_key TEXT,
+                created_at TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create optimization table");
+        sqlx::query(
+            "INSERT INTO pipeline_prompt_optimizations (id, step_id, step_key, created_at)
+             VALUES ('opt-1', 'step-1', NULL, '2026-04-14T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to seed optimization row");
+
+        // 026 may complete before the step table is available.
+        ensure_pipeline_prompt_optimization_step_keys(&pool)
+            .await
+            .expect("missing step table should be safe");
+
+        sqlx::query(
+            "CREATE TABLE pipeline_run_steps (
+                id TEXT PRIMARY KEY NOT NULL,
+                step_key TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create step table");
+        sqlx::query(
+            "INSERT INTO pipeline_run_steps (id, step_key)
+             VALUES ('step-1', 'outline_generate')",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to seed step row");
+
+        ensure_pipeline_prompt_optimization_step_keys(&pool)
+            .await
+            .expect("deferred step_key backfill should succeed");
+
+        let step_key: Option<String> = sqlx::query_scalar(
+            "SELECT step_key FROM pipeline_prompt_optimizations WHERE id = 'opt-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("failed to read backfilled step_key");
+        assert_eq!(step_key.as_deref(), Some("outline_generate"));
+
+        cleanup_test_pool(pool, db_path).await;
+    }
+
+    #[tokio::test]
+    async fn migration_026_complete_upgrade_from_legacy() {
+        let (pool, db_path) = create_test_pool("woohoo-mig026-full-upgrade").await;
+
+        sqlx::query(
+            "CREATE TABLE schema_migrations (
+                version    TEXT PRIMARY KEY NOT NULL,
+                kind       TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create schema_migrations");
+
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .expect("failed to disable foreign_keys");
+
+        // 建 pipeline_run_steps（含 step_key 数据，供回填反查）
+        sqlx::query(
+            "CREATE TABLE pipeline_run_steps (
+                id           TEXT PRIMARY KEY NOT NULL,
+                run_id       TEXT NOT NULL,
+                step_key     TEXT NOT NULL,
+                step_name    TEXT NOT NULL,
+                step_order   INTEGER NOT NULL DEFAULT 0,
+                status       TEXT NOT NULL DEFAULT 'queued',
+                created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create pipeline_run_steps");
+
+        sqlx::query(
+            "INSERT INTO pipeline_run_steps (id, run_id, step_key, step_name)
+             VALUES ('step-1','run-1','outline_generate','大纲生成')",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to seed pipeline_run_steps");
+
+        // 建 004 基础表（旧库已有，缺 026 的 13 列）
+        sqlx::query(
+            "CREATE TABLE pipeline_prompt_optimizations (
+                id                   TEXT PRIMARY KEY NOT NULL,
+                run_id               TEXT NOT NULL,
+                step_id              TEXT NOT NULL,
+                project_id           TEXT NOT NULL,
+                conversation_id      TEXT NOT NULL,
+                decision             TEXT NOT NULL DEFAULT 'suggested',
+                design_prompt_patch  TEXT,
+                review_prompt_patch  TEXT,
+                rationale_json       TEXT,
+                source               TEXT NOT NULL DEFAULT 'assistant',
+                created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create legacy pipeline_prompt_optimizations");
+
+        // 插入 2 行待回填的 prompt 优化记录（step_id 指向 pipeline_run_steps）
+        sqlx::query(
+            "INSERT INTO pipeline_prompt_optimizations (id, run_id, step_id, project_id, conversation_id)
+             VALUES ('opt-1','run-1','step-1','project-1','conv-1')",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to seed opt-1");
+        sqlx::query(
+            "INSERT INTO pipeline_prompt_optimizations (id, run_id, step_id, project_id, conversation_id)
+             VALUES ('opt-2','run-1','step-1','project-1','conv-1')",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to seed opt-2");
+
+        // 调用 026：完整升级
+        let applied = apply_migration_026_pipeline_prompt_optimization_versions(&pool)
+            .await
+            .expect("026 should complete full upgrade from legacy table");
+        assert!(applied, "026 应实际执行完整升级");
+
+        // 验证 step_key 已被回填（从 pipeline_run_steps.step_key='outline_generate' 反查）
+        let backfilled: Vec<String> = sqlx::query_scalar(
+            "SELECT step_key FROM pipeline_prompt_optimizations WHERE id IN ('opt-1','opt-2') ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("failed to fetch backfilled step_key");
+        assert_eq!(
+            backfilled,
+            vec!["outline_generate".to_string(), "outline_generate".to_string()],
+            "step_key 应被回填为 pipeline_run_steps.step_key 的值"
+        );
+
+        // 验证 026 已记录
+        assert!(
+            has_schema_migration(&pool, "026_pipeline_prompt_optimization_versions")
+                .await
+                .unwrap(),
+            "026 应被记录为已应用"
+        );
+
+        // 验证新表已建立
+        let tables: HashSet<String> = list_all_tables(&pool)
+            .await
+            .expect("failed to list tables")
+            .into_iter()
+            .collect();
+        assert!(
+            tables.contains("pipeline_prompt_auto_apply_config"),
+            "026 应建立 pipeline_prompt_auto_apply_config 表"
+        );
 
         cleanup_test_pool(pool, db_path).await;
     }
