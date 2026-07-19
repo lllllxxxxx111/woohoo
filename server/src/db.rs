@@ -182,6 +182,10 @@ async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<String>, sqlx::E
             "027_collaboration_governance",
             include_str!("../migrations/027_collaboration_governance.sql"),
         ),
+        (
+            "028_billing_ref_id_unique",
+            include_str!("../migrations/028_billing_ref_id_unique.sql"),
+        ),
     ] {
         if version == "020_asset_governance" {
             let tables = list_all_tables(pool)
@@ -211,6 +215,15 @@ async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<String>, sqlx::E
             // 否则缺表旧库 / 部分执行后重启会以 "no such table" 或 "duplicate column"
             // 永久失败。
             if apply_migration_026_pipeline_prompt_optimization_versions(pool).await? {
+                applied_versions.push(version.to_string());
+            }
+            continue;
+        }
+        if version == "028_billing_ref_id_unique" {
+            // 028 在 credit_transactions 上建立 (ref_type, ref_id) 唯一索引。
+            // 旧版 update_spent_ref_id 竞态可能产生重复 (ref_type, ref_id) 的 spent 记录，
+            // 导致 CREATE UNIQUE INDEX 失败。需要先清理重复行（保留最新一条）再建索引。
+            if apply_migration_028_billing_ref_id_unique(pool).await? {
                 applied_versions.push(version.to_string());
             }
             continue;
@@ -584,6 +597,136 @@ async fn apply_migration_026_pipeline_prompt_optimization_versions(
     record_schema_migration(pool, VERSION, "rust").await?;
     Ok(true)
 }
+
+/**
+ * 应用 migration 028：credit_transactions (ref_type, ref_id) 唯一索引
+ *
+ * 背景：旧版 update_spent_ref_id 通过 "WHERE ref_id IS NULL ORDER BY
+ *   created_at DESC LIMIT 1" 子查询绑定消费记录到生成任务，并发下可能：
+ *   1. 两个请求选到同一行（互相覆盖，一个生成任务丢失扣费关联）；
+ *   2. 两个请求互相绑到对方的扣费行（账单与任务错配）。
+ *
+ * 修复策略：
+ *   1. 删除旧版 update_spent_ref_id 函数（见 billing/repo.rs）；
+ *   2. 新版扣费在 check_and_deduct_idempotent 中直接带 ref_id 写入，无需后续 UPDATE；
+ *   3. 本 migration 在 credit_transactions 上建立 (ref_type, ref_id) partial unique index，
+ *      从 DB 层面保证同一生成任务不会被重复扣费或重复退款。
+ *
+ * 历史数据清理：
+ *   旧版竞态可能留下重复 (ref_type, ref_id) 的 spent 记录（同一 ref_id 被多次 UPDATE）。
+ *   CREATE UNIQUE INDEX 在存在重复时会失败。本函数先删除重复行（保留最新一条），
+ *   再执行 028 SQL 建索引。refund 记录同理。
+ *
+ * 删除策略说明：
+ *   - 保留最新一条 spent（按 created_at DESC）；
+ *   - 被删除的旧重复 spent 记录不补退款：这些记录是 update_spent_ref_id 竞态产物，
+ *     其对应的生成任务早已成功或失败，退款状态由 refund_outstanding_for_ref 保证。
+ *   - 保留最新一条 refund（按 created_at DESC），删除更早的重复退款。
+ *
+ * 失败传播：任何 SQL 错误直接向上传播，不吞错。
+ *
+ * @param pool 数据库连接池
+ * @returns true 表示本次执行了迁移；false 表示已应用过（幂等跳过）
+ */
+async fn apply_migration_028_billing_ref_id_unique(
+    pool: &SqlitePool,
+) -> Result<bool, sqlx::Error> {
+    const VERSION: &str = "028_billing_ref_id_unique";
+
+    if has_schema_migration(pool, VERSION).await? {
+        return Ok(false);
+    }
+
+    tracing::info!(version = VERSION, "执行 billing ref_id 唯一索引 migration");
+
+    // 兼容性检查：legacy 测试数据库可能跳过 013_image_studio 等基础迁移，
+    // 因而没有 credit_transactions 表。此时跳过清理与索引创建，
+    // 仅记录 migration 已应用（与 028 的语义一致：不存在表即没有竞态）。
+    // 真实生产数据库一定有 credit_transactions（由 013 创建），不会走到此分支。
+    let credit_table_exists: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM sqlite_master
+         WHERE type = 'table' AND name = 'credit_transactions'",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    if !credit_table_exists {
+        tracing::warn!(
+            version = VERSION,
+            "credit_transactions 表不存在，跳过唯一索引创建（legacy/test 数据库路径）"
+        );
+        record_schema_migration(pool, VERSION, "rust").await?;
+        return Ok(true);
+    }
+
+    // 在执行任何 DDL 前，关闭外键约束，避免 SQLite 在 CREATE INDEX / DELETE 时
+    // 对 credit_transactions.user_id 触发 FK 校验（legacy 测试库可能没有 users 表）。
+    // 完成后再恢复。生产库一定有 users 表，此开关无副作用。
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(pool)
+        .await?;
+
+    let result: Result<(), sqlx::Error> = async {
+        // Step 1: 清理重复 spent 记录（保留每组 ref_type+ref_id 最新一条）
+        // SQLite 不支持 CTE DELETE，用 rowid NOT IN 子查询实现
+        sqlx::query(
+            "DELETE FROM credit_transactions
+             WHERE rowid IN (
+                 SELECT ct.rowid
+                 FROM credit_transactions ct
+                 WHERE ct.kind = 'spent' AND ct.ref_id IS NOT NULL
+                 AND ct.rowid NOT IN (
+                     SELECT MIN(inner_ct.rowid)
+                     FROM credit_transactions inner_ct
+                     WHERE inner_ct.kind = 'spent'
+                       AND inner_ct.ref_type = ct.ref_type
+                       AND inner_ct.ref_id = ct.ref_id
+                       AND inner_ct.ref_id IS NOT NULL
+                     GROUP BY inner_ct.ref_type, inner_ct.ref_id
+                 )
+             )",
+        )
+        .execute(pool)
+        .await?;
+
+        // Step 2: 清理重复 refund 记录（保留每组 ref_type+ref_id 最新一条）
+        sqlx::query(
+            "DELETE FROM credit_transactions
+             WHERE rowid IN (
+                 SELECT ct.rowid
+                 FROM credit_transactions ct
+                 WHERE ct.kind = 'refund' AND ct.ref_id IS NOT NULL
+                 AND ct.rowid NOT IN (
+                     SELECT MIN(inner_ct.rowid)
+                     FROM credit_transactions inner_ct
+                     WHERE inner_ct.kind = 'refund'
+                       AND inner_ct.ref_type = ct.ref_type
+                       AND inner_ct.ref_id = ct.ref_id
+                       AND inner_ct.ref_id IS NOT NULL
+                     GROUP BY inner_ct.ref_type, inner_ct.ref_id
+                 )
+             )",
+        )
+        .execute(pool)
+        .await?;
+
+        // Step 3: 执行 028 SQL 创建唯一索引（此时已无重复行）
+        let migration_sql = include_str!("../migrations/028_billing_ref_id_unique.sql");
+        sqlx::raw_sql(migration_sql).execute(pool).await?;
+        Ok(())
+    }
+    .await;
+
+    // 无论成功失败，恢复外键约束（与 sqlx-sqlite 默认 ON 一致）
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(pool)
+        .await?;
+    result?;
+
+    record_schema_migration(pool, VERSION, "rust").await?;
+    Ok(true)
+}
+
 async fn run_legacy_schema_backfill_migration(
     pool: &SqlitePool,
 ) -> Result<Option<String>, sqlx::Error> {
@@ -2387,6 +2530,7 @@ mod tests {
                 "025_pipeline_events_constraint_relax".to_string(),
                 "026_pipeline_prompt_optimization_versions".to_string(),
                 "027_collaboration_governance".to_string(),
+                "028_billing_ref_id_unique".to_string(),
             ]
         );
 

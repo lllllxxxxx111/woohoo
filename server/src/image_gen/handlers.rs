@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, State},
+    http::HeaderMap,
     Json,
 };
 use base64::{engine::general_purpose, Engine as _};
@@ -9,6 +10,7 @@ use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::fs;
+use uuid::Uuid;
 
 use crate::auth::middleware::UserId;
 use crate::error::AppError;
@@ -19,11 +21,24 @@ use super::repo;
 
 const IMAGE_GEN_TIMEOUT_SECS: u64 = 3600;
 
+/// 标识 `X-Idempotency-Key` HTTP 头，用于客户端幂等重试。
+const IDEMPOTENCY_KEY_HEADER: &str = "x-idempotency-key";
+
 /**
  * 图片生成任务入队公共入口
  *
  * 提取自 create_generation handler，供 orchestrator 在 dispatch_image_gen_step 中复用。
- * 完整流程：项目权限校验 → 端点解析 → 扣费 → 建 DB 记录 → set_processing → spawn 后台任务。
+ * 完整流程：项目权限校验 → 端点解析 → 预生成 generation_id → 幂等扣费 →
+ *         建 DB 记录（使用预生成 id） → set_processing → spawn 后台任务。
+ *
+ * Billing 幂等设计：
+ *   1. 在扣费前预生成 generation_id（或使用客户端传入的 idempotency_key 作为 id）；
+ *   2. 调用 `check_and_deduct_idempotent` 时把 generation_id 作为 ref_id 传入，
+ *      在事务内原子完成"扣减余额 + 写入 spent 记录（带 ref_id）"；
+ *   3. 依赖 028 migration 的 (ref_type, ref_id) UNIQUE 索引，同一 id 的重复扣费
+ *      会因 UNIQUE 冲突回滚，返回当前余额（视为已扣费）；
+ *   4. 不再调用 `update_spent_ref_id`，消除旧版"先扣费后关联"的竞态；
+ *   5. 退款统一走 `refund_outstanding_for_ref`，按 ref_id 幂等（最多退一次）。
  *
  * @param state 应用全局状态
  * @param user_id 触发用户 ID
@@ -33,6 +48,8 @@ const IMAGE_GEN_TIMEOUT_SECS: u64 = 3600;
  * @param n 生成数量（1-10）
  * @param endpoint_id 指定端点 ID（可选，None 时自动解析）
  * @param model 指定模型名（可选，None 时使用默认 dall-e-3）
+ * @param idempotency_key 客户端幂等键（可选）；Some 时作为 generation_id 使用，
+ *        重复请求返回已有记录而不重复扣费
  * @returns 创建好的 ImageGeneration 记录（status=processing）
  */
 pub(crate) async fn enqueue_image_generation(
@@ -44,6 +61,7 @@ pub(crate) async fn enqueue_image_generation(
     n: i64,
     endpoint_id: Option<&str>,
     model: Option<&str>,
+    idempotency_key: Option<&str>,
 ) -> Result<ImageGeneration, AppError> {
     if prompt.trim().is_empty() {
         return Err(AppError::BadRequest("prompt cannot be empty".to_string()));
@@ -57,6 +75,26 @@ pub(crate) async fn enqueue_image_generation(
     let normalized_project_id = normalize_project_id(project_id);
     if let Some(pid) = normalized_project_id.as_deref() {
         ensure_project_access(&state.db, user_id, pid).await?;
+    }
+
+    // 预生成 generation_id：若客户端提供 idempotency_key 则用作 id（支持幂等重试），
+    // 否则生成新 UUID。后续扣费 + 建记录均使用此 id 作为 ref_id。
+    let generation_id = match idempotency_key {
+        Some(key) if !key.trim().is_empty() => key.trim().to_string(),
+        _ => Uuid::new_v4().to_string(),
+    };
+
+    // 幂等快速路径：若使用 idempotency_key 且 generation 已存在，直接返回。
+    // 覆盖场景：客户端重试、网络抖动后重复提交。
+    if idempotency_key.is_some() {
+        if let Ok(Some(existing)) = try_get_own_generation(&state.db, &generation_id, user_id).await
+        {
+            tracing::info!(
+                generation_id = %generation_id,
+                "图片生成幂等命中：返回已有记录，不重复扣费"
+            );
+            return Ok(existing);
+        }
     }
 
     let requested_model = model.unwrap_or("dall-e-3").to_string();
@@ -97,19 +135,23 @@ pub(crate) async fn enqueue_image_generation(
     )
     .await?;
 
-    crate::billing::repo::check_and_deduct(
+    // 幂等扣费：ref_id = generation_id，依赖 UNIQUE 索引防止重复扣费。
+    crate::billing::repo::check_and_deduct_idempotent(
         &state.db,
         user_id,
         cost,
         "image_generation",
-        Some("image_generation"),
-        None,
+        "image_generation",
+        &generation_id,
     )
     .await
     .map_err(|error| AppError::PaymentRequired(error.to_string()))?;
 
-    let generation = match repo::create_generation(
+    // 使用预生成 id 创建 generation 记录。
+    // 若并发请求用同一 id 先建了记录（PRIMARY KEY 冲突），退款本次扣费并返回已有记录。
+    let generation = match repo::create_generation_with_id(
         &state.db,
+        &generation_id,
         user_id,
         normalized_project_id.as_deref(),
         prompt,
@@ -122,12 +164,29 @@ pub(crate) async fn enqueue_image_generation(
     {
         Ok(generation) => generation,
         Err(error) => {
-            if let Err(refund_error) = crate::billing::repo::refund(
+            if is_primary_key_violation(&error) {
+                // 并发幂等请求已建记录：退款本次扣费，返回已有记录
+                if let Ok(Some(existing)) =
+                    try_get_own_generation(&state.db, &generation_id, user_id).await
+                {
+                    let _ = crate::billing::repo::refund_outstanding_for_ref(
+                        &state.db,
+                        user_id,
+                        "image_generation",
+                        &generation_id,
+                        "image_generation_idempotent_duplicate",
+                    )
+                    .await;
+                    return Ok(existing);
+                }
+            }
+            // 其他 DB 错误：退款本次扣费并返回错误（扣费可恢复）
+            if let Err(refund_error) = crate::billing::repo::refund_outstanding_for_ref(
                 &state.db,
                 user_id,
-                cost,
+                "image_generation",
+                &generation_id,
                 "image_generation_record_create_failed",
-                None,
             )
             .await
             {
@@ -136,17 +195,6 @@ pub(crate) async fn enqueue_image_generation(
             return Err(AppError::Internal(error.to_string()));
         }
     };
-
-    if let Err(error) = crate::billing::repo::update_spent_ref_id(
-        &state.db,
-        user_id,
-        "image_generation",
-        &generation.id,
-    )
-    .await
-    {
-        tracing::warn!(generation_id = %generation.id, error = %error, "failed to update image generation billing ref_id");
-    }
 
     if let Err(error) = repo::set_processing(&state.db, &generation.id).await {
         refund_and_fail(state, user_id, &generation.id, cost, &error.to_string()).await?;
@@ -192,15 +240,77 @@ pub(crate) async fn enqueue_image_generation(
 }
 
 /**
+ * 尝试获取属于指定用户的 generation 记录。
+ *
+ * 用于幂等检查：仅当记录存在且 user_id 匹配时返回 Some，避免泄露他人记录。
+ *
+ * @param db 数据库连接池
+ * @param generation_id 待查询的 generation ID
+ * @param user_id 当前用户 ID
+ * @returns Ok(Some(generation)) 表示存在且属于该用户；Ok(None) 表示不存在或不属于
+ */
+async fn try_get_own_generation(
+    db: &SqlitePool,
+    generation_id: &str,
+    user_id: &str,
+) -> Result<Option<ImageGeneration>, AppError> {
+    match repo::get_generation(db, generation_id).await {
+        Ok(generation) if generation.user_id == user_id => Ok(Some(generation)),
+        Ok(_) => Ok(None),
+        Err(_) => Ok(None),
+    }
+}
+
+/**
+ * 判断 anyhow 错误链中是否包含 PRIMARY KEY / UNIQUE 约束冲突。
+ *
+ * `repo::create_generation_with_id` 返回 `anyhow::Result`，所以错误会被
+ * 包装为 `anyhow::Error`。需要 downcast 到 `sqlx::Error` 才能拿到数据库
+ * 错误码与消息。
+ *
+ * SQLite PRIMARY KEY 冲突的错误码与 UNIQUE 相同（2067 / 19）。
+ * 为防止 SQLx 未正确填充 code，再额外匹配 message 中的
+ * "UNIQUE constraint failed: image_generations.id"。
+ *
+ * @param error 待判断的 anyhow 错误（来自 create_generation_with_id）
+ * @returns true 表示底层是 PRIMARY KEY 冲突
+ */
+fn is_primary_key_violation(error: &anyhow::Error) -> bool {
+    let Some(sqlx_err) = error.downcast_ref::<sqlx::Error>() else {
+        return false;
+    };
+    match sqlx_err {
+        sqlx::Error::Database(db_err) => {
+            // db_err.code() 返回 Option<Cow<'_, str>>，必须 inline 调用 .as_deref()
+            // 避免临时 Cow 在语句末尾被 drop 后留下悬空引用。
+            matches!(db_err.code().as_deref(), Some("2067") | Some("19"))
+                || db_err
+                    .message()
+                    .contains("UNIQUE constraint failed: image_generations.id")
+        }
+        _ => false,
+    }
+}
+
+/**
  * POST /api/image-gen/generations
  *
- * HTTP handler，薄壳：解析 body → 调用 enqueue_image_generation → 返回响应。
+ * HTTP handler，薄壳：解析 body + X-Idempotency-Key 头 → 调用 enqueue_image_generation → 返回响应。
+ * 客户端可通过 X-Idempotency-Key 头实现幂等重试：重复请求返回同一 generation，不重复扣费。
  */
 pub async fn create_generation(
     State(state): State<AppState>,
     axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
+    headers: HeaderMap,
     Json(req): Json<CreateImageGenerationReq>,
 ) -> Result<Json<ImageGenerationResponse>, AppError> {
+    let idempotency_key = headers
+        .get(IDEMPOTENCY_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+
     let generation = enqueue_image_generation(
         &state,
         &user_id.0,
@@ -210,6 +320,7 @@ pub async fn create_generation(
         req.n,
         req.endpoint_id.as_deref(),
         Some(&req.model),
+        idempotency_key.as_deref(),
     )
     .await?;
 
@@ -559,17 +670,21 @@ async fn refund_and_fail(
     cost: f64,
     error_msg: &str,
 ) -> Result<(), AppError> {
-    if let Err(refund_error) = crate::billing::repo::refund(
+    // 幂等退款：按 (ref_type=image_generation, ref_id=generation_id) 退款，
+    // 重复调用（如重复失败回调）不会重复退款。refund_outstanding_for_ref
+    // 内部检查是否已有 refund 记录 + 028 migration 的 UNIQUE 索引双保险。
+    if let Err(refund_error) = crate::billing::repo::refund_outstanding_for_ref(
         &state.db,
         user_id,
-        cost,
+        "image_generation",
+        generation_id,
         "image_generation_failed",
-        Some(generation_id),
     )
     .await
     {
         tracing::error!(
             generation_id = %generation_id,
+            cost = cost,
             error = %refund_error,
             "failed to refund image generation charge"
         );

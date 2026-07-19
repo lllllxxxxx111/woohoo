@@ -9,6 +9,11 @@ fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+/// 创建图片生成记录（自动生成 UUID 作为 id）。
+///
+/// 保留作为公共 API 入口，供未来需要"非幂等"创建场景使用。
+/// 当前所有 billing 路径都走 `create_generation_with_id` 以支持幂等扣费。
+#[allow(dead_code)]
 pub async fn create_generation(
     pool: &SqlitePool,
     user_id: &str,
@@ -20,13 +25,49 @@ pub async fn create_generation(
     cost_credits: f64,
 ) -> Result<ImageGeneration> {
     let id = Uuid::new_v4().to_string();
+    create_generation_with_id(
+        pool, &id, user_id, project_id, prompt, model, size, n, cost_credits,
+    )
+    .await
+}
+
+/**
+ * 使用预先生成的 ID 创建图片生成记录。
+ *
+ * 用于 billing 幂等扣费场景：调用方在扣费前预生成 generation_id，
+ * 将其作为 ref_id 传给 `check_and_deduct_idempotent`，然后调用本函数
+ * 以同一 ID 写入 generation 记录。若并发请求使用相同 ID（如客户端重试），
+ * 第二次 INSERT 会因 PRIMARY KEY 冲突失败，调用方据此返回已有记录。
+ *
+ * @param pool 数据库连接池
+ * @param id 预先生成的 generation ID
+ * @param user_id 用户 ID
+ * @param project_id 关联项目 ID（可选）
+ * @param prompt 提示词
+ * @param model 模型名
+ * @param size 图片尺寸
+ * @param n 生成数量
+ * @param cost_credits 扣费金额
+ * @returns 创建好的 ImageGeneration 记录
+ */
+pub async fn create_generation_with_id(
+    pool: &SqlitePool,
+    id: &str,
+    user_id: &str,
+    project_id: Option<&str>,
+    prompt: &str,
+    model: &str,
+    size: &str,
+    n: i64,
+    cost_credits: f64,
+) -> Result<ImageGeneration> {
     let now = now_rfc3339();
 
     sqlx::query(
         "INSERT INTO image_generations (id, user_id, project_id, prompt, model, size, n, status, cost_credits, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(&id)
+    .bind(id)
     .bind(user_id)
     .bind(project_id)
     .bind(prompt)
@@ -39,7 +80,7 @@ pub async fn create_generation(
     .execute(pool)
     .await?;
 
-    get_generation(pool, &id).await
+    get_generation(pool, id).await
 }
 
 pub async fn get_generation(pool: &SqlitePool, generation_id: &str) -> Result<ImageGeneration> {

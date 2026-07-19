@@ -1537,6 +1537,9 @@ async fn dispatch_image_gen_step(
 ) -> Result<()> {
     let (prompt, size, n, model, endpoint_id) = helpers::parse_image_gen_params(step);
 
+    // pipeline 自动派发不携带客户端幂等键：每次 step 执行都对应一个新的 generation_id。
+    // 幂等性由 pipeline_run_events + pipeline_step_external_jobs 表的 (run_id, step_id) 约束保证
+    // （同一 step 不会被重复 dispatch），billing 侧则由 (ref_type, ref_id) UNIQUE 索引兜底。
     let generation = crate::image_gen::enqueue_image_generation(
         state,
         &run.user_id,
@@ -1546,6 +1549,7 @@ async fn dispatch_image_gen_step(
         n,
         endpoint_id.as_deref(),
         model.as_deref(),
+        None,
     )
     .await?;
 
@@ -1590,6 +1594,9 @@ async fn dispatch_video_gen_step(
 ) -> Result<()> {
     let (prompt, model, duration_seconds, aspect_ratio) = helpers::parse_video_gen_params(step);
 
+    // pipeline 自动派发不携带客户端幂等键：每次 step 执行都对应一个新的 generation_id。
+    // 幂等性由 pipeline_run_events + pipeline_step_external_jobs 表的 (run_id, step_id) 约束保证
+    // （同一 step 不会被重复 dispatch），billing 侧则由 (ref_type, ref_id) UNIQUE 索引兜底。
     let generation = crate::video_gen::enqueue_video_generation(
         state,
         &run.user_id,
@@ -1598,6 +1605,7 @@ async fn dispatch_video_gen_step(
         &model,
         duration_seconds,
         &aspect_ratio,
+        None,
     )
     .await?;
 
