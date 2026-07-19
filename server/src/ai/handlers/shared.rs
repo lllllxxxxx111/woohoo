@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::ai::api_key_crypto;
 use crate::ai::ssrf_guard;
 
 pub(crate) fn compact_text(value: &str) -> String {
@@ -239,26 +240,29 @@ pub(crate) async fn get_endpoint_for_request(
     agent: Option<&Agent>,
 ) -> AppResult<AiEndpoint> {
     if let Some(endpoint_id) = &req.endpoint_id {
-        return sqlx::query_as::<_, AiEndpoint>(
+        let endpoint = sqlx::query_as::<_, AiEndpoint>(
             "SELECT * FROM ai_endpoints WHERE id = ? AND user_id = ?",
         )
         .bind(endpoint_id)
         .bind(user_id)
         .fetch_optional(&state.db)
         .await?
-        .ok_or_else(|| AppError::NotFound("AI 端点不存在".into()));
+        .ok_or_else(|| AppError::NotFound("AI 端点不存在".into()))?;
+        // 惰性迁移：若数据库中是旧明文 key，加密后写回并重新读取
+        return Ok(refresh_after_migrate(&state.db, endpoint).await?);
     }
 
     if let Some(agent) = agent {
         if let Some(endpoint_id) = &agent.endpoint_id {
-            return sqlx::query_as::<_, AiEndpoint>(
+            let endpoint = sqlx::query_as::<_, AiEndpoint>(
                 "SELECT * FROM ai_endpoints WHERE id = ? AND user_id = ?",
             )
             .bind(endpoint_id)
             .bind(user_id)
             .fetch_optional(&state.db)
             .await?
-            .ok_or_else(|| AppError::NotFound("Agent 绑定的 AI 端点不存在".into()));
+            .ok_or_else(|| AppError::NotFound("Agent 绑定的 AI 端点不存在".into()))?;
+            return Ok(refresh_after_migrate(&state.db, endpoint).await?);
         }
     }
 
@@ -266,7 +270,7 @@ pub(crate) async fn get_endpoint_for_request(
 }
 
 pub(crate) async fn get_default_endpoint(state: &AppState, user_id: &str) -> AppResult<AiEndpoint> {
-    sqlx::query_as::<_, AiEndpoint>(
+    let endpoint = sqlx::query_as::<_, AiEndpoint>(
         "SELECT * FROM ai_endpoints
          WHERE user_id = ? AND is_active = 1
          ORDER BY created_at ASC
@@ -275,7 +279,30 @@ pub(crate) async fn get_default_endpoint(state: &AppState, user_id: &str) -> App
     .bind(user_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::Validation("请先添加 AI 端点配置".into()))
+    .ok_or_else(|| AppError::Validation("请先添加 AI 端点配置".into()))?;
+    Ok(refresh_after_migrate(&state.db, endpoint).await?)
+}
+
+/// 惰性迁移辅助：若 endpoint 的 api_key 是旧明文，加密写回后重新读取
+///
+/// - 已是密文或空：原样返回
+/// - 旧明文：调用 migrate_endpoint_if_needed 加密后重新读取
+async fn refresh_after_migrate(
+    pool: &SqlitePool,
+    endpoint: AiEndpoint,
+) -> AppResult<AiEndpoint> {
+    if endpoint.api_key.trim().is_empty() || api_key_crypto::is_encrypted(&endpoint.api_key) {
+        return Ok(endpoint);
+    }
+
+    api_key_crypto::migrate_endpoint_if_needed(pool, &endpoint).await?;
+
+    // 重新读取以获取加密后的值
+    sqlx::query_as::<_, AiEndpoint>("SELECT * FROM ai_endpoints WHERE id = ?")
+        .bind(&endpoint.id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::Internal("API Key 迁移后端点消失".into()))
 }
 
 pub(crate) fn task_matches_filter(task: &AiTask, filter: &AiTaskFilter) -> bool {
@@ -595,7 +622,8 @@ pub(crate) fn build_usage_record(
         context.agent.as_ref().map(|item| item.id.clone()),
         Some(context.endpoint.id.clone()),
         &context.endpoint.provider,
-        &context.endpoint.api_key,
+        // 使用已解密的明文 API Key 计算 fingerprint，确保新旧密钥产生一致的指纹
+        &context.decrypted_api_key,
         Some(context.model.clone()),
         operation,
         status,

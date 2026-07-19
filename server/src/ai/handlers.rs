@@ -65,6 +65,10 @@ struct ResolvedChatContext {
     conversation: Conversation,
     agent: Option<Agent>,
     endpoint: AiEndpoint,
+    /// 解密后的明文 API Key，仅在内存中存在，绝不序列化或写入日志。
+    /// 由 `resolve_chat_context` 在加载 endpoint 后立即解密填充，
+    /// 所有 AI 调用和 usage 记录都应使用此字段而非 `endpoint.api_key`。
+    decrypted_api_key: String,
     content: String,
     resource_refs: Vec<ResourceRef>,
     model: String,
@@ -360,7 +364,7 @@ pub async fn ai_chat(
         .ai_client
         .chat(
             &context.endpoint.base_url,
-            &context.endpoint.api_key,
+            &context.decrypted_api_key,
             &context.model,
             prepared.messages.clone(),
             context.temperature,
@@ -562,7 +566,7 @@ pub async fn ai_chat_stream(
         .ai_client
         .chat_stream(
             &context.endpoint.base_url,
-            &context.endpoint.api_key,
+            &context.decrypted_api_key,
             &context.model,
             prepared.messages,
             context.temperature,
@@ -606,7 +610,8 @@ pub async fn ai_chat_stream(
     let agent_id = context.agent.as_ref().map(|item| item.id.clone());
     let endpoint_id = context.endpoint.id.clone();
     let provider = context.endpoint.provider.clone();
-    let api_key = context.endpoint.api_key.clone();
+    // 使用已解密的明文 API Key 用于 usage 记录的 fingerprint 计算
+    let api_key = context.decrypted_api_key.clone();
     let model_for_save = context.model.clone();
     let output_kind = context.output_kind;
     let output_items = context.output_items;
@@ -1034,6 +1039,10 @@ pub async fn test_endpoint_with_saved_key(
             .fetch_optional(&state.db)
             .await?
             .ok_or_else(|| AppError::NotFound("AI 端点不存在".into()))?;
+    // 惰性迁移：若数据库中是旧明文 key，加密后写回
+    super::api_key_crypto::migrate_endpoint_if_needed(&state.db, &endpoint).await?;
+    // 解密数据库中的密文 API Key 用于本次测试调用
+    let decrypted_api_key = super::api_key_crypto::decrypt_endpoint_api_key(&endpoint)?;
 
     let provider = req
         .provider
@@ -1061,7 +1070,8 @@ pub async fn test_endpoint_with_saved_key(
     let test_req = AiTestReq {
         provider,
         base_url,
-        api_key: endpoint.api_key,
+        // 使用已解密的明文 API Key 传递给 test_endpoint（仅内存中传递，不落盘）
+        api_key: decrypted_api_key,
         model,
         force_stream_fallback: req.force_stream_fallback,
         system_prompt: req.system_prompt,
@@ -1345,7 +1355,7 @@ async fn run_ai_task(
         .ai_client
         .chat_stream(
             &context.endpoint.base_url,
-            &context.endpoint.api_key,
+            &context.decrypted_api_key,
             &context.model,
             prepared.messages.clone(),
             context.temperature,
@@ -1516,7 +1526,7 @@ async fn run_ai_task_non_stream(
         .ai_client
         .chat(
             &context.endpoint.base_url,
-            &context.endpoint.api_key,
+            &context.decrypted_api_key,
             &context.model,
             prepared.messages.clone(),
             context.temperature,

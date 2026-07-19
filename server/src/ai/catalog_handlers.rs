@@ -15,6 +15,7 @@ use crate::{
 };
 
 use super::{
+    api_key_crypto,
     config::{
         Agent, AgentContact, AiEndpoint, AiEndpointCapability, AiEndpointCapabilityView,
         AiEndpointModelsReq, AiEndpointModelsResp, AiEndpointView, AssignProjectAgentReq,
@@ -90,6 +91,9 @@ pub async fn create_endpoint(
     }
     validate_connection_fields(&req.provider, &req.base_url, &req.api_key).await?;
 
+    // 加密 API Key 后再写入数据库，避免明文落盘
+    let encrypted_api_key = api_key_crypto::encrypt(req.api_key.trim())?;
+
     let id = Uuid::new_v4().to_string();
     let endpoint = sqlx::query_as::<_, AiEndpoint>(
         "INSERT INTO ai_endpoints (id, user_id, name, provider, base_url, api_key, default_model)
@@ -101,7 +105,7 @@ pub async fn create_endpoint(
     .bind(req.name.trim())
     .bind(req.provider.trim())
     .bind(req.base_url.trim())
-    .bind(req.api_key.trim())
+    .bind(&encrypted_api_key)
     .bind(req.default_model.as_deref().map(str::trim))
     .fetch_one(&state.db)
     .await?;
@@ -130,15 +134,29 @@ pub async fn update_endpoint(
             .await?
             .ok_or_else(|| AppError::NotFound("AI 端点不存在".into()))?;
 
-    let next_api_key = req
+    // 计算下一个 api_key 值：
+    // - 用户未提供新 key（None 或空字符串）→ 保留原值（可能是密文或旧明文）
+    // - 用户提供新 key → 加密后写入
+    //
+    // 注意：保留原值时直接使用 existing.api_key（已是密文或明文），
+    // 不做解密+重新加密，避免无谓的解密失败或密钥轮换。
+    let next_api_key_stored: String = match req
         .api_key
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| existing.api_key.clone());
+    {
+        Some(new_plain_key) => {
+            // 用户提交新明文 key：加密后写入
+            api_key_crypto::encrypt(new_plain_key)?
+        }
+        None => existing.api_key.clone(),
+    };
 
-    validate_connection_fields(&req.provider, &req.base_url, &next_api_key).await?;
+    // 校验连接字段：validate_connection_fields 接受明文，需要解密（若已是密文）
+    let next_api_key_for_validation =
+        api_key_crypto::maybe_decrypt(&next_api_key_stored)?;
+    validate_connection_fields(&req.provider, &req.base_url, &next_api_key_for_validation).await?;
 
     let endpoint = sqlx::query_as::<_, AiEndpoint>(
         "UPDATE ai_endpoints
@@ -150,7 +168,7 @@ pub async fn update_endpoint(
     .bind(req.name.trim())
     .bind(req.provider.trim())
     .bind(req.base_url.trim())
-    .bind(next_api_key)
+    .bind(&next_api_key_stored)
     .bind(req.default_model.as_deref().map(str::trim))
     .bind(&id)
     .bind(&user_id.0)
@@ -315,12 +333,28 @@ pub async fn list_endpoint_models(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        sqlx::query_as::<_, AiEndpoint>("SELECT * FROM ai_endpoints WHERE id = ? AND user_id = ?")
+        let endpoint =
+            sqlx::query_as::<_, AiEndpoint>("SELECT * FROM ai_endpoints WHERE id = ? AND user_id = ?")
+                .bind(endpoint_id)
+                .bind(&user_id.0)
+                .fetch_optional(&state.db)
+                .await?
+                .ok_or_else(|| AppError::NotFound("AI 通道不存在".into()))?;
+        // 惰性迁移：若数据库中是旧明文 key，加密后写回
+        api_key_crypto::migrate_endpoint_if_needed(&state.db, &endpoint).await?;
+        // 重新读取（迁移后值已变化）
+        if api_key_crypto::is_encrypted(&endpoint.api_key) || endpoint.api_key.trim().is_empty() {
+            endpoint
+        } else {
+            sqlx::query_as::<_, AiEndpoint>(
+                "SELECT * FROM ai_endpoints WHERE id = ? AND user_id = ?",
+            )
             .bind(endpoint_id)
             .bind(&user_id.0)
             .fetch_optional(&state.db)
             .await?
             .ok_or_else(|| AppError::NotFound("AI 通道不存在".into()))?
+        }
     } else {
         AiEndpoint {
             id: String::new(),
@@ -338,7 +372,9 @@ pub async fn list_endpoint_models(
 
     let provider = normalize_optional(req.provider).unwrap_or(endpoint.provider);
     let base_url = normalize_optional(req.base_url).unwrap_or(endpoint.base_url);
-    let api_key = normalize_optional(req.api_key).unwrap_or(endpoint.api_key);
+    // 数据库中可能是密文，需要在调用前解密
+    let stored_api_key = normalize_optional(req.api_key).unwrap_or(endpoint.api_key);
+    let api_key = api_key_crypto::maybe_decrypt(&stored_api_key)?;
 
     validate_connection_fields(&provider, &base_url, &api_key).await?;
 

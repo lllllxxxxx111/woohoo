@@ -554,6 +554,10 @@ pub(super) async fn resolve_chat_context(
     )
     .await?;
     let endpoint = get_endpoint_for_request(state, user_id, &req, agent.as_ref()).await?;
+    // 立即解密 API Key 到内存中（仅本次请求生命周期），
+    // 后续所有 AI 调用和 usage 记录使用 `decrypted_api_key` 而非 `endpoint.api_key`。
+    // 解密失败（密钥错误/未配置）会直接返回明确错误，避免误用密文。
+    let decrypted_api_key = crate::ai::api_key_crypto::decrypt_endpoint_api_key(&endpoint)?;
     let model = req
         .model
         .as_deref()
@@ -600,6 +604,7 @@ pub(super) async fn resolve_chat_context(
         conversation,
         agent,
         endpoint,
+        decrypted_api_key,
         content,
         resource_refs,
         model,

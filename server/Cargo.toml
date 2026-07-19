@@ -32,6 +32,10 @@ base64 = "0.22"
 jsonwebtoken = "9"
 bcrypt = "0.17"
 
+# API Key 加密：AES-256-GCM AEAD + 随机 nonce 生成
+aes-gcm = "0.10"
+rand = "0.8"
+
 # 工具
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

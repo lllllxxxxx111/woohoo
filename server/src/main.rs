@@ -80,6 +80,16 @@ async fn main() {
         panic!("{}", error);
     }
 
+    // ─── API Key 加密：加载主密钥 ──────────────
+    //
+    // 从 `WOOHOO_API_KEY_ENCRYPTION_KEY` 环境变量加载 32 字节 AES-256 主密钥。
+    // 未设置时全局密钥为 None（生产环境后续会检查是否已有 endpoint）。
+    // 设置但格式非法（非 64 字符 hex）时直接 panic 拒绝启动。
+    if let Err(error) = ai::api_key_crypto::init_from_env() {
+        tracing::error!("{}", error);
+        panic!("{}", error);
+    }
+
     // 加载配置
     let mut config = AppConfig::from_env();
     tracing::info!("Starting Woohoo Server on {}:{}", config.host, config.port);
@@ -101,6 +111,20 @@ async fn main() {
 
     // 初始化数据库
     let pool = db::init_db(&config.database_url, config.ai_max_concurrent_tasks).await;
+
+    // ─── API Key 加密：启动时安全检查 + 批量迁移 ──────────────
+    //
+    // 1. 生产环境若已有 AI endpoint 但未配置主密钥，拒绝启动（最严重配置）
+    // 2. 已配置主密钥时，批量将数据库中的旧明文 API Key 迁移为密文
+    //
+    // 必须在数据库初始化后、AI 客户端创建前执行。
+    if let Err(error) = ai::api_key_crypto::assert_production_safe_with_db(&pool).await {
+        tracing::error!("{}", error);
+        panic!("{}", error);
+    }
+    if let Err(error) = ai::api_key_crypto::migrate_all_endpoints(&pool).await {
+        tracing::warn!("API Key 批量迁移失败（将继续启动）: {}", error);
+    }
 
     // 创建 AI 客户端
     let ai_client = AiClient::new();
