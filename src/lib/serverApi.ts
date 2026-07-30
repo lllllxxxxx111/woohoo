@@ -326,9 +326,11 @@ export type AiTask = {
 
 const STORAGE_KEY = 'woohoo-server-session-v1';
 const SERVER_BASE_URL_STORAGE_KEY = 'woohoo-server-base-url-v2';
-const DEFAULT_SERVER_BASE_URL = (import.meta.env.VITE_SERVER_BASE_URL || 'http://127.0.0.1:8080')
-  .trim()
-  .replace(/\/+$/, '');
+const RAW_SERVER_BASE_URL = import.meta.env.VITE_SERVER_BASE_URL?.trim();
+const DEFAULT_SERVER_BASE_URL =
+  RAW_SERVER_BASE_URL === '/'
+    ? ''
+    : (RAW_SERVER_BASE_URL || 'http://127.0.0.1:8080').replace(/\/+$/, '');
 const DEFAULT_SERVER_PORT = Number.parseInt(import.meta.env.VITE_SERVER_PORT || '8080', 10) || 8080;
 const COMMON_SERVER_PORTS = [3001];
 const SERVER_PORT_SEARCH_LIMIT =

@@ -131,11 +131,10 @@ async fn main() {
     /*
      * 安全的CORS配置策略：
      * - 生产环境：严格限制为配置的前端域名
-     * - 开发环境：默认允许localhost和127.0.0.1
-     * - 如果没有配置任何来源，将返回空列表导致所有请求被拒绝
+     * - 开发环境：始终允许所有来源，确保本地开发和沙箱环境都能正常工作
      */
-    let cors = if allowed_origins.is_empty() {
-        if is_production {
+    let cors = if is_production {
+        if allowed_origins.is_empty() {
             tracing::warn!(
                 mode = "production",
                 origins = 0,
@@ -161,11 +160,12 @@ async fn main() {
                 .expose_headers([header::HeaderName::from_static("x-request-id")])
         } else {
             tracing::info!(
-                mode = "development",
-                "CORS 策略：开发模式，允许所有来源（AllowOrigin::Any）"
+                mode = "production",
+                origins = allowed_origins.len(),
+                "CORS 策略：生产模式，严格限制允许来源"
             );
             CorsLayer::new()
-                .allow_origin(Any)
+                .allow_origin(allowed_origins.into_iter().collect::<Vec<_>>())
                 .allow_methods([
                     Method::GET,
                     Method::POST,
@@ -173,21 +173,25 @@ async fn main() {
                     Method::DELETE,
                     Method::OPTIONS,
                 ])
-                .allow_headers(Any)
+                .allow_headers([
+                    header::CONTENT_TYPE,
+                    header::AUTHORIZATION,
+                    header::ACCEPT,
+                    header::ORIGIN,
+                    header::HeaderName::from_static("x-request-id"),
+                    header::HeaderName::from_static("x-force-stream-fallback"),
+                    header::HeaderName::from_static("forcestreamfallback"),
+                ])
                 .expose_headers([header::HeaderName::from_static("x-request-id")])
+                .allow_credentials(true)
         }
     } else {
         tracing::info!(
-            mode = if is_production {
-                "production"
-            } else {
-                "development"
-            },
-            origins = allowed_origins.len(),
-            "CORS 策略：已配置允许来源列表"
+            mode = "development",
+            "CORS 策略：开发模式，允许所有来源（AllowOrigin::Any）"
         );
         CorsLayer::new()
-            .allow_origin(allowed_origins.into_iter().collect::<Vec<_>>())
+            .allow_origin(Any)
             .allow_methods([
                 Method::GET,
                 Method::POST,
@@ -195,17 +199,8 @@ async fn main() {
                 Method::DELETE,
                 Method::OPTIONS,
             ])
-            .allow_headers([
-                header::CONTENT_TYPE,
-                header::AUTHORIZATION,
-                header::ACCEPT,
-                header::ORIGIN,
-                header::HeaderName::from_static("x-request-id"),
-                header::HeaderName::from_static("x-force-stream-fallback"),
-                header::HeaderName::from_static("forcestreamfallback"),
-            ])
+            .allow_headers(Any)
             .expose_headers([header::HeaderName::from_static("x-request-id")])
-            .allow_credentials(true)
     };
 
     // ─── 安全性验证 ──────────────────────────────

@@ -52,6 +52,9 @@ export default defineConfig({
     port: 5173,
     strictPort: false,
     host: host || '127.0.0.1',
+    cors: {
+      origin: '*',
+    },
     hmr: host
       ? {
           protocol: 'ws',
@@ -59,6 +62,16 @@ export default defineConfig({
           port: 5174,
         }
       : undefined,
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:8080',
+        changeOrigin: true,
+      },
+      '/health': {
+        target: 'http://127.0.0.1:8080',
+        changeOrigin: true,
+      },
+    },
     watch: {
       ignored: ['**/src-tauri/**'],
     },
