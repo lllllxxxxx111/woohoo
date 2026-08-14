@@ -54,7 +54,9 @@ pub async fn check_and_deduct(
 
     ensure_user_credits_row(pool, user_id).await?;
 
-    let mut tx = pool.begin().await?;
+    // 使用 BEGIN IMMEDIATE：额度操作均为“先读后写”，WAL 模式下延迟事务在并发时
+    // 可能因读快照过期而抛不可重试的 SQLITE_BUSY；立即事务在开始即串行化写入。
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let now = now_rfc3339();
 
     let result = sqlx::query(
@@ -154,7 +156,9 @@ pub async fn refund_with_ref_type(
 
     ensure_user_credits_row(pool, user_id).await?;
 
-    let mut tx = pool.begin().await?;
+    // 使用 BEGIN IMMEDIATE：额度操作均为“先读后写”，WAL 模式下延迟事务在并发时
+    // 可能因读快照过期而抛不可重试的 SQLITE_BUSY；立即事务在开始即串行化写入。
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let now = now_rfc3339();
 
     sqlx::query(
@@ -266,7 +270,9 @@ pub async fn check_and_deduct_idempotent(
 
     ensure_user_credits_row(pool, user_id).await?;
 
-    let mut tx = pool.begin().await?;
+    // 使用 BEGIN IMMEDIATE：额度操作均为“先读后写”，WAL 模式下延迟事务在并发时
+    // 可能因读快照过期而抛不可重试的 SQLITE_BUSY；立即事务在开始即串行化写入。
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let now = now_rfc3339();
 
     // 扣减余额（原子条件更新：余额不足时不影响任何行）
@@ -385,7 +391,9 @@ pub async fn top_up(
 
     ensure_user_credits_row(pool, user_id).await?;
 
-    let mut tx = pool.begin().await?;
+    // 使用 BEGIN IMMEDIATE：额度操作均为“先读后写”，WAL 模式下延迟事务在并发时
+    // 可能因读快照过期而抛不可重试的 SQLITE_BUSY；立即事务在开始即串行化写入。
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let now = now_rfc3339();
 
     sqlx::query(
@@ -437,7 +445,9 @@ pub async fn refund_outstanding_for_ref(
 ) -> Result<f64> {
     ensure_user_credits_row(pool, user_id).await?;
 
-    let mut tx = pool.begin().await?;
+    // 使用 BEGIN IMMEDIATE：额度操作均为“先读后写”，WAL 模式下延迟事务在并发时
+    // 可能因读快照过期而抛不可重试的 SQLITE_BUSY；立即事务在开始即串行化写入。
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
 
     let already_refunded = sqlx::query_scalar::<_, String>(
         "SELECT id

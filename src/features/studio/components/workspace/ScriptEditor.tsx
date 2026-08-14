@@ -1,26 +1,70 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { LoaderCircle, PlayCircle, Save, Sparkles } from 'lucide-react';
+import { AlertTriangle, Copy, LoaderCircle, PlayCircle, RefreshCw, Save, Sparkles } from 'lucide-react';
 import { useAppStore } from '../../../../store';
 import { useShallow } from 'zustand/react/shallow';
 
 import { useAppActions } from '../../../../context/useAppActions';
 import { useToast } from '../../../../context/useToast';
-import { createAiTask, createPipelineRun } from '../../../../lib/serverApi';
+import {
+  createAiTask,
+  createPipelineRun,
+  getServerScript,
+  isVersionConflictError,
+} from '../../../../lib/serverApi';
+import {
+  applyConflictResolution,
+  toConflictState,
+  type SaveConflictState,
+} from '../../../../lib/versionConflict';
+import { ContentVersionHistory } from './ContentVersionHistory';
 import styles from './ScriptEditor.module.css';
+
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // 忽略并回退到 execCommand
+  }
+
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const succeeded = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    return succeeded;
+  } catch {
+    return false;
+  }
+}
 
 export const ScriptEditor: React.FC = () => {
   const { activeScript, activeState } = useAppStore(
     useShallow((state) => ({ activeScript: state.activeScript, activeState: state.activeState })),
   );
-  const { saveScript } = useAppActions();
+  const { saveScript, refreshWorkspace } = useAppActions();
   const { showToast } = useToast();
   const [content, setContent] = useState(activeScript?.content || '');
+  const [baseVersion, setBaseVersion] = useState<number>(activeScript?.version ?? 0);
+  const [conflict, setConflict] = useState<SaveConflictState | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isAiWorking, setIsAiWorking] = useState(false);
 
+  const activeScriptId = activeScript?.id;
+
+  // 切换到另一个项目的剧本时重置本地状态（冲突期间不自动覆盖草稿）
   useEffect(() => {
     setContent(activeScript?.content || '');
-  }, [activeScript?.content, activeScript?.id, activeScript?.updatedAt]);
+    setBaseVersion(activeScript?.version ?? 0);
+    setConflict(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeScriptId]);
 
   const handleSave = async () => {
     if (!activeState.projectId) {
@@ -34,22 +78,91 @@ export const ScriptEditor: React.FC = () => {
 
     setIsSaving(true);
     try {
-      const savedScript = await saveScript(activeState.projectId, content, activeScript?.title);
+      const savedScript = await saveScript(activeState.projectId, content, activeScript?.title, {
+        baseVersion,
+        source: 'manual',
+      });
+      setBaseVersion(savedScript.version ?? baseVersion);
+      setConflict(null);
       showToast({
         type: 'success',
         title: '剧本已保存',
-        message: `已同步到后端：${savedScript.title}`,
+        message: `已同步到后端：${savedScript.title}（v${savedScript.version ?? '?'}）`,
       });
     } catch (error) {
-      showToast({
-        type: 'error',
-        title: '保存失败',
-        message: error instanceof Error ? error.message : '剧本保存失败',
-      });
+      if (isVersionConflictError(error)) {
+        // 保留本地草稿，仅提示冲突并给出安全选项
+        setConflict(toConflictState(error));
+        showToast({
+          type: 'warning',
+          title: '保存冲突',
+          message: `服务器内容已更新到 v${error.currentVersion}，你的草稿已保留，请选择处理方式。`,
+        });
+      } else {
+        showToast({
+          type: 'error',
+          title: '保存失败',
+          message: error instanceof Error ? error.message : '剧本保存失败',
+        });
+      }
     } finally {
       setIsSaving(false);
     }
   };
+
+  /** 冲突时：加载服务器最新版（会替换当前草稿，请先复制草稿） */
+  const handleLoadServerLatest = useCallback(async () => {
+    if (!activeState.projectId) {
+      return;
+    }
+    try {
+      const latest = await getServerScript(activeState.projectId);
+      // 草稿保护：仅当成功拿到服务器内容才替换草稿，失败时绝不丢弃草稿
+      const next = applyConflictResolution({ draft: content, conflict }, 'load_server_latest', latest ? latest.content : null);
+      setContent(next.draft);
+      setConflict(next.conflict);
+      if (latest && next.conflict === null) {
+        setBaseVersion(latest.version ?? 0);
+      }
+      void refreshWorkspace('script conflict resolution');
+    } catch (error) {
+      showToast({
+        type: 'error',
+        title: '加载失败',
+        message: error instanceof Error ? error.message : '无法加载服务器最新版本',
+      });
+    }
+  }, [activeState.projectId, content, conflict, refreshWorkspace, showToast]);
+
+  /** 冲突时：复制当前草稿到剪贴板 */
+  const handleCopyDraft = useCallback(async () => {
+    const succeeded = await copyTextToClipboard(content);
+    showToast({
+      type: succeeded ? 'success' : 'error',
+      title: succeeded ? '草稿已复制' : '复制失败',
+      message: succeeded
+        ? '当前草稿已复制到剪贴板，可加载最新版后再粘贴合并。'
+        : '当前环境不支持自动复制，请手动选择文本复制。',
+    });
+  }, [content, showToast]);
+
+  /** 版本恢复成功后重新拉取当前内容 */
+  const handleVersionRestored = useCallback(async () => {
+    if (!activeState.projectId) {
+      return;
+    }
+    try {
+      const latest = await getServerScript(activeState.projectId);
+      if (latest) {
+        setContent(latest.content);
+        setBaseVersion(latest.version ?? 0);
+      }
+      setConflict(null);
+      void refreshWorkspace('script version restored');
+    } catch {
+      // 忽略，版本面板已自行刷新
+    }
+  }, [activeState.projectId, refreshWorkspace]);
 
   /** 智能续写：调用 AI 任务为当前剧本生成续写内容 */
   const handleSmartContinue = useCallback(async () => {
@@ -130,11 +243,44 @@ export const ScriptEditor: React.FC = () => {
           >
             {isAiWorking ? <LoaderCircle size={16} className={styles.iconSpin} /> : <PlayCircle size={16} />} 生成分镜
           </button>
+          {activeState.projectId && (
+            <ContentVersionHistory
+              projectId={activeState.projectId}
+              contentType="script"
+              currentVersion={activeScript?.version}
+              onRestored={() => void handleVersionRestored()}
+            />
+          )}
         </div>
         <button className={styles.saveBtn} onClick={() => void handleSave()} disabled={isSaving}>
           <Save size={16} /> {isSaving ? '保存中...' : '保存'}
         </button>
       </header>
+
+      {conflict && (
+        <div className={styles.conflictBanner}>
+          <AlertTriangle size={16} />
+          <span>
+            保存冲突：服务器剧本已更新到 v{conflict.currentVersion}，你的本地草稿尚未保存，已为你保留。
+          </span>
+          <div className={styles.conflictActions}>
+            <button
+              className={styles.conflictBtn}
+              onClick={() => void handleCopyDraft()}
+              title="将当前草稿复制到剪贴板"
+            >
+              <Copy size={14} /> 复制当前草稿
+            </button>
+            <button
+              className={styles.conflictBtn}
+              onClick={() => void handleLoadServerLatest()}
+              title="丢弃草稿并使用服务器最新内容"
+            >
+              <RefreshCw size={14} /> 加载服务器最新版
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className={styles.editorWrapper}>
         <textarea
@@ -155,8 +301,8 @@ export const ScriptEditor: React.FC = () => {
               <h4>保存状态</h4>
               <p className={styles.successText}>
                 {activeScript
-                  ? '当前项目已存在主剧本，可继续编辑并覆盖保存。'
-                  : '当前项目还没有主剧本，首次保存会自动创建。'}
+                  ? `当前项目已存在主剧本（v${activeScript.version ?? '?'}），编辑后可保存为新版本。`
+                  : '当前项目还没有主剧本，首次保存会自动创建版本 v1。'}
               </p>
             </div>
             <div className={styles.reviewItem}>
@@ -164,8 +310,10 @@ export const ScriptEditor: React.FC = () => {
               <p className={styles.warningText}>建议用标题行或场景标记拆段，便于后续一键转分镜。</p>
             </div>
             <div className={styles.reviewItem}>
-              <h4>同步目标</h4>
-              <p className={styles.successText}>保存后会直接写入后端数据库，并在刷新后保留。</p>
+              <h4>版本与并发</h4>
+              <p className={styles.successText}>
+                每次保存生成不可变版本；若他人先行保存，系统会提示冲突并保留你的草稿。
+              </p>
             </div>
           </div>
         </aside>

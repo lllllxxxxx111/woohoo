@@ -186,6 +186,10 @@ async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<String>, sqlx::E
             "028_billing_ref_id_unique",
             include_str!("../migrations/028_billing_ref_id_unique.sql"),
         ),
+        (
+            "029_content_versions",
+            include_str!("../migrations/029_content_versions.sql"),
+        ),
     ] {
         if version == "020_asset_governance" {
             let tables = list_all_tables(pool)
@@ -258,6 +262,9 @@ async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<String>, sqlx::E
         applied_versions.push(version);
     }
     if let Some(version) = run_image_generation_asset_ids_backfill_migration(pool).await? {
+        applied_versions.push(version);
+    }
+    if let Some(version) = run_content_version_baseline_backfill_migration(pool).await? {
         applied_versions.push(version);
     }
 
@@ -923,6 +930,243 @@ async fn ensure_image_generation_asset_ids_schema(pool: &SqlitePool) -> Result<(
         .await?;
 
     Ok(())
+}
+
+/**
+ * 内容版本基线回填（migration 030）
+ *
+ * 旧库在引入 content_versions 之前，剧本/分镜只保存在 scripts/storyboards 表。
+ * 升级后需要把既有内容作为“基线版本”（version=1, source='baseline'）写入版本历史，
+ * 保证：
+ *   1. 旧内容可作为只读基线被版本列表/差异/恢复接口读取；
+ *   2. 后续保存拥有正确的 baseVersion（从 1 开始递增）。
+ *
+ * 幂等：仅对尚无任何版本的 (project_id, content_type) 生成基线。
+ */
+async fn run_content_version_baseline_backfill_migration(
+    pool: &SqlitePool,
+) -> Result<Option<String>, sqlx::Error> {
+    const VERSION: &str = "030_content_version_baseline";
+
+    if has_schema_migration(pool, VERSION).await? {
+        return Ok(None);
+    }
+
+    // 029 尚未创建 content_versions 时跳过，等待下次启动重试
+    let tables: HashSet<String> = list_all_tables(pool).await?.into_iter().collect();
+    if !tables.contains("content_versions") {
+        tracing::info!(
+            version = VERSION,
+            "跳过内容版本基线回填：content_versions 表尚不存在"
+        );
+        return Ok(None);
+    }
+
+    // content_versions.project_id 外键指向 projects；若 projects 尚不存在（缺表旧库 /
+    // 测试夹具），此时回填会触发外键错误，跳过并等待下次启动重试。
+    if !tables.contains("projects") {
+        tracing::info!(
+            version = VERSION,
+            "跳过内容版本基线回填：projects 表尚不存在"
+        );
+        return Ok(None);
+    }
+
+    let mut tx = pool.begin().await?;
+
+    backfill_script_baselines(&mut tx).await?;
+    backfill_storyboard_baselines(&mut tx).await?;
+
+    tx.commit().await?;
+
+    record_schema_migration(pool, VERSION, "rust").await?;
+    Ok(Some(VERSION.to_string()))
+}
+
+async fn backfill_script_baselines(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<(), sqlx::Error> {
+    if !list_all_tables_in_tx(tx).await?.contains("scripts") {
+        return Ok(());
+    }
+
+    #[derive(Debug, sqlx::FromRow)]
+    struct ScriptRow {
+        project_id: String,
+        title: String,
+        content: String,
+        created_at: String,
+    }
+
+    let scripts = sqlx::query_as::<_, ScriptRow>(
+        "SELECT s.project_id, s.title, s.content, s.created_at
+         FROM scripts s
+         INNER JOIN projects p ON p.id = s.project_id
+         ORDER BY s.created_at ASC",
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+
+    for script in scripts {
+        let existing = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM content_versions
+             WHERE project_id = ? AND content_type = 'script'",
+        )
+        .bind(&script.project_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        if existing > 0 {
+            continue;
+        }
+
+        let content_hash = crate::content_version::repo::sha256_hex(&script.content);
+        let id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO content_versions
+                 (id, project_id, content_type, version, content, content_hash, source, created_by, note, title, created_at)
+             VALUES (?, ?, 'script', 1, ?, ?, 'baseline', NULL, '旧库历史基线', ?, ?)",
+        )
+        .bind(&id)
+        .bind(&script.project_id)
+        .bind(&script.content)
+        .bind(&content_hash)
+        .bind(&script.title)
+        .bind(&script.created_at)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn backfill_storyboard_baselines(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<(), sqlx::Error> {
+    if !list_all_tables_in_tx(tx).await?.contains("storyboards") {
+        return Ok(());
+    }
+
+    #[derive(Debug, sqlx::FromRow)]
+    struct StoryboardRow {
+        id: String,
+        project_id: String,
+        created_at: String,
+    }
+
+    #[derive(Debug, sqlx::FromRow)]
+    struct LineRow {
+        id: String,
+        storyboard_id: String,
+        scene_number: i64,
+        description: String,
+        duration: i64,
+        sort_order: i64,
+    }
+
+    #[derive(Debug, sqlx::FromRow)]
+    struct LineAssetRow {
+        storyboard_line_id: String,
+        asset_id: String,
+    }
+
+    let storyboards = sqlx::query_as::<_, StoryboardRow>(
+        "SELECT s.id, s.project_id, s.created_at
+         FROM storyboards s
+         INNER JOIN projects p ON p.id = s.project_id
+         ORDER BY s.created_at ASC",
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+
+    if storyboards.is_empty() {
+        return Ok(());
+    }
+
+    for storyboard in storyboards {
+        let existing = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM content_versions
+             WHERE project_id = ? AND content_type = 'storyboard'",
+        )
+        .bind(&storyboard.project_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        if existing > 0 {
+            continue;
+        }
+
+        let lines = sqlx::query_as::<_, LineRow>(
+            "SELECT id, storyboard_id, scene_number, description, duration, sort_order
+             FROM storyboard_lines WHERE storyboard_id = ?
+             ORDER BY sort_order ASC, scene_number ASC, id ASC",
+        )
+        .bind(&storyboard.id)
+        .fetch_all(&mut **tx)
+        .await?;
+
+        let line_assets = sqlx::query_as::<_, LineAssetRow>(
+            "SELECT storyboard_line_id, asset_id FROM storyboard_line_assets
+             WHERE storyboard_line_id IN (SELECT id FROM storyboard_lines WHERE storyboard_id = ?)",
+        )
+        .bind(&storyboard.id)
+        .fetch_all(&mut **tx)
+        .await?;
+
+        let mut assets_by_line: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for la in line_assets {
+            assets_by_line
+                .entry(la.storyboard_line_id)
+                .or_default()
+                .push(la.asset_id);
+        }
+
+        let snapshot_lines: Vec<crate::content_version::model::StoryboardSnapshotLine> = lines
+            .into_iter()
+            .map(|line| {
+                let asset_ids = assets_by_line.remove(&line.id).unwrap_or_default();
+                crate::content_version::model::StoryboardSnapshotLine {
+                    id: line.id,
+                    scene_number: line.scene_number,
+                    description: line.description,
+                    duration: line.duration,
+                    asset_ids,
+                }
+            })
+            .collect();
+
+        let snapshot = crate::content_version::model::StoryboardSnapshot {
+            lines: snapshot_lines,
+        };
+        let content = serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".to_string());
+        let content_hash = crate::content_version::repo::sha256_hex(&content);
+        let id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO content_versions
+                 (id, project_id, content_type, version, content, content_hash, source, created_by, note, title, created_at)
+             VALUES (?, ?, 'storyboard', 1, ?, ?, 'baseline', NULL, '旧库历史基线', NULL, ?)",
+        )
+        .bind(&id)
+        .bind(&storyboard.project_id)
+        .bind(&content)
+        .bind(&content_hash)
+        .bind(&storyboard.created_at)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// 事务内列出所有表名（用于基线回填的前置检查）
+async fn list_all_tables_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<HashSet<String>, sqlx::Error> {
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows.into_iter().collect())
 }
 
 async fn has_schema_migration(pool: &SqlitePool, version: &str) -> Result<bool, sqlx::Error> {
@@ -2531,8 +2775,165 @@ mod tests {
                 "026_pipeline_prompt_optimization_versions".to_string(),
                 "027_collaboration_governance".to_string(),
                 "028_billing_ref_id_unique".to_string(),
+                "029_content_versions".to_string(),
+                "030_content_version_baseline".to_string(),
             ]
         );
+
+        cleanup_test_pool(pool, db_path).await;
+    }
+
+    #[tokio::test]
+    async fn content_version_baseline_backfill_upgrades_legacy_script_and_storyboard() {
+        let (pool, db_path) = create_test_pool("woohoo-content-version-baseline").await;
+
+        // 构造旧库：schema_migrations + 最小项目/剧本/分镜表（无 content_versions）
+        sqlx::query(
+            "CREATE TABLE schema_migrations (
+                version    TEXT PRIMARY KEY NOT NULL,
+                kind       TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create schema_migrations");
+
+        sqlx::query(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                user_id TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT ''
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create projects");
+
+        sqlx::query(
+            "CREATE TABLE scripts (
+                id TEXT PRIMARY KEY NOT NULL,
+                project_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create scripts");
+
+        sqlx::query(
+            "CREATE TABLE storyboards (
+                id TEXT PRIMARY KEY NOT NULL,
+                project_id TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create storyboards");
+
+        sqlx::query(
+            "CREATE TABLE storyboard_lines (
+                id TEXT PRIMARY KEY NOT NULL,
+                storyboard_id TEXT NOT NULL,
+                scene_number INTEGER NOT NULL,
+                description TEXT NOT NULL,
+                duration INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create storyboard_lines");
+
+        sqlx::query(
+            "CREATE TABLE storyboard_line_assets (
+                storyboard_line_id TEXT NOT NULL,
+                asset_id TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create storyboard_line_assets");
+
+        // 应用 029，建立 content_versions 表
+        sqlx::raw_sql(include_str!("../migrations/029_content_versions.sql"))
+            .execute(&pool)
+            .await
+            .expect("apply content_versions migration");
+
+        // 灌入旧数据
+        sqlx::query("INSERT INTO projects (id, user_id, name) VALUES ('p1', 'u1', '旧项目')")
+            .execute(&pool)
+            .await
+            .expect("seed project");
+        sqlx::query(
+            "INSERT INTO scripts (id, project_id, title, content) VALUES ('s1', 'p1', '旧剧本', '旧剧本内容')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed script");
+        sqlx::query("INSERT INTO storyboards (id, project_id) VALUES ('sb1', 'p1')")
+            .execute(&pool)
+            .await
+            .expect("seed storyboard");
+        sqlx::query(
+            "INSERT INTO storyboard_lines (id, storyboard_id, scene_number, description, duration, sort_order)
+             VALUES ('l1', 'sb1', 1, '旧镜头', 3, 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed storyboard line");
+
+        // 运行基线回填
+        let applied = run_content_version_baseline_backfill_migration(&pool)
+            .await
+            .expect("run baseline backfill");
+        assert_eq!(applied, Some("030_content_version_baseline".to_string()));
+
+        // 剧本基线版本
+        let script_baseline = sqlx::query_as::<_, (i64, String, String)>(
+            "SELECT version, source, content FROM content_versions
+             WHERE project_id = 'p1' AND content_type = 'script' ORDER BY version DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("script baseline exists");
+        let (script_version, script_source, script_content) = script_baseline;
+        assert_eq!(script_version, 1);
+        assert_eq!(script_source, "baseline");
+        assert_eq!(script_content, "旧剧本内容");
+
+        // 分镜基线版本（内容为结构化 JSON）
+        let storyboard_baseline = sqlx::query_as::<_, (i64, String, String)>(
+            "SELECT version, source, content FROM content_versions
+             WHERE project_id = 'p1' AND content_type = 'storyboard' ORDER BY version DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("storyboard baseline exists");
+        let (storyboard_version, storyboard_source, storyboard_content) = storyboard_baseline;
+        assert_eq!(storyboard_version, 1);
+        assert_eq!(storyboard_source, "baseline");
+        assert!(storyboard_content.contains("旧镜头"));
+
+        // 幂等：再次运行不再产生新版本
+        let rerun = run_content_version_baseline_backfill_migration(&pool)
+            .await
+            .expect("rerun baseline backfill");
+        assert_eq!(rerun, None);
+
+        let script_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM content_versions WHERE project_id = 'p1' AND content_type = 'script'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count script versions");
+        assert_eq!(script_count, 1);
 
         cleanup_test_pool(pool, db_path).await;
     }

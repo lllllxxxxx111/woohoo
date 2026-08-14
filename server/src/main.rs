@@ -4,6 +4,7 @@ mod auth;
 mod billing;
 mod collaboration;
 mod config;
+mod content_version;
 mod conversation;
 mod db;
 mod error;
@@ -427,6 +428,40 @@ async fn main() {
             get(storyboard::handlers::get_storyboard)
                 .put(storyboard::handlers::upsert_storyboard)
                 .delete(storyboard::handlers::delete_storyboard),
+        )
+        // 剧本版本历史 / 差异 / 恢复
+        .route(
+            "/api/projects/{project_id}/script/versions",
+            get(content_version::handlers::list_script_versions),
+        )
+        .route(
+            "/api/projects/{project_id}/script/versions/{version}",
+            get(content_version::handlers::get_script_version_detail),
+        )
+        .route(
+            "/api/projects/{project_id}/script/versions/{version}/diff",
+            get(content_version::handlers::get_script_version_diff),
+        )
+        .route(
+            "/api/projects/{project_id}/script/versions/{version}/restore",
+            axum::routing::post(content_version::handlers::restore_script_version),
+        )
+        // 分镜版本历史 / 差异 / 恢复
+        .route(
+            "/api/projects/{project_id}/storyboard/versions",
+            get(content_version::handlers::list_storyboard_versions),
+        )
+        .route(
+            "/api/projects/{project_id}/storyboard/versions/{version}",
+            get(content_version::handlers::get_storyboard_version_detail),
+        )
+        .route(
+            "/api/projects/{project_id}/storyboard/versions/{version}/diff",
+            get(content_version::handlers::get_storyboard_version_diff),
+        )
+        .route(
+            "/api/projects/{project_id}/storyboard/versions/{version}/restore",
+            axum::routing::post(content_version::handlers::restore_storyboard_version),
         )
         // AI
         .route(

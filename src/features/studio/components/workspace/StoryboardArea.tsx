@@ -1,12 +1,36 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Camera, Clock, Image as ImageIcon, LoaderCircle, Music, Plus, Save, Trash2, Video } from 'lucide-react';
+import {
+  AlertTriangle,
+  Camera,
+  Clock,
+  Copy,
+  Image as ImageIcon,
+  LoaderCircle,
+  Music,
+  Plus,
+  RefreshCw,
+  Save,
+  Trash2,
+  Video,
+} from 'lucide-react';
 import { useAppStore } from '../../../../store';
 import { useShallow } from 'zustand/react/shallow';
 
 import { useAppActions } from '../../../../context/useAppActions';
 import { useToast } from '../../../../context/useToast';
-import { createImageGeneration, createVideoGeneration } from '../../../../lib/serverApi';
+import {
+  createImageGeneration,
+  createVideoGeneration,
+  getServerStoryboard,
+  isVersionConflictError,
+} from '../../../../lib/serverApi';
+import {
+  applyConflictResolution,
+  toConflictState,
+  type SaveConflictState,
+} from '../../../../lib/versionConflict';
 import type { StoryboardLine } from '../../../../types';
+import { ContentVersionHistory } from './ContentVersionHistory';
 import styles from './StoryboardArea.module.css';
 
 function createLineId() {
@@ -27,6 +51,31 @@ function createDraftLine(sceneNumber: number): StoryboardLine {
   };
 }
 
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // 忽略并回退
+  }
+
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const succeeded = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    return succeeded;
+  } catch {
+    return false;
+  }
+}
+
 export const StoryboardArea: React.FC = () => {
   const { activeStoryboard, activeState } = useAppStore(
     useShallow((state) => ({
@@ -34,15 +83,23 @@ export const StoryboardArea: React.FC = () => {
       activeState: state.activeState,
     })),
   );
-  const { saveStoryboard } = useAppActions();
+  const { saveStoryboard, refreshWorkspace } = useAppActions();
   const { showToast } = useToast();
   const [lines, setLines] = useState<StoryboardLine[]>(activeStoryboard?.lines || []);
+  const [baseVersion, setBaseVersion] = useState<number>(activeStoryboard?.version ?? 0);
+  const [conflict, setConflict] = useState<SaveConflictState | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [generatingLineId, setGeneratingLineId] = useState<string | null>(null);
 
+  const activeStoryboardId = activeStoryboard?.id;
+
+  // 切换到另一个项目的分镜时重置本地状态（冲突期间不自动覆盖草稿）
   useEffect(() => {
     setLines(activeStoryboard?.lines || []);
-  }, [activeStoryboard?.id, activeStoryboard?.lines, activeStoryboard?.updatedAt]);
+    setBaseVersion(activeStoryboard?.version ?? 0);
+    setConflict(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeStoryboardId]);
 
   const handleCreateStoryboard = async () => {
     if (!activeState.projectId) {
@@ -59,18 +116,32 @@ export const StoryboardArea: React.FC = () => {
 
     setIsSaving(true);
     try {
-      await saveStoryboard(activeState.projectId, initialLines);
+      const saved = await saveStoryboard(activeState.projectId, initialLines, {
+        baseVersion,
+        source: 'manual',
+      });
+      setBaseVersion(saved.version ?? baseVersion);
+      setConflict(null);
       showToast({
         type: 'success',
         title: '分镜已创建',
         message: '已为当前项目创建首个分镜镜头。',
       });
     } catch (error) {
-      showToast({
-        type: 'error',
-        title: '创建失败',
-        message: error instanceof Error ? error.message : '创建分镜失败',
-      });
+      if (isVersionConflictError(error)) {
+        setConflict(toConflictState(error));
+        showToast({
+          type: 'warning',
+          title: '保存冲突',
+          message: `服务器分镜已更新到 v${error.currentVersion}，你的草稿已保留。`,
+        });
+      } else {
+        showToast({
+          type: 'error',
+          title: '创建失败',
+          message: error instanceof Error ? error.message : '创建分镜失败',
+        });
+      }
     } finally {
       setIsSaving(false);
     }
@@ -126,22 +197,91 @@ export const StoryboardArea: React.FC = () => {
 
     setIsSaving(true);
     try {
-      await saveStoryboard(activeState.projectId, lines);
+      const saved = await saveStoryboard(activeState.projectId, lines, {
+        baseVersion,
+        source: 'manual',
+      });
+      setBaseVersion(saved.version ?? baseVersion);
+      setConflict(null);
       showToast({
         type: 'success',
         title: '分镜已保存',
-        message: `已同步 ${lines.length} 个镜头到后端。`,
+        message: `已同步 ${lines.length} 个镜头到后端（v${saved.version ?? '?'}）。`,
       });
     } catch (error) {
-      showToast({
-        type: 'error',
-        title: '保存失败',
-        message: error instanceof Error ? error.message : '分镜保存失败',
-      });
+      if (isVersionConflictError(error)) {
+        setConflict(toConflictState(error));
+        showToast({
+          type: 'warning',
+          title: '保存冲突',
+          message: `服务器分镜已更新到 v${error.currentVersion}，你的草稿已保留，请选择处理方式。`,
+        });
+      } else {
+        showToast({
+          type: 'error',
+          title: '保存失败',
+          message: error instanceof Error ? error.message : '分镜保存失败',
+        });
+      }
     } finally {
       setIsSaving(false);
     }
   };
+
+  /** 冲突时：加载服务器最新版（替换当前草稿，请先复制草稿） */
+  const handleLoadServerLatest = useCallback(async () => {
+    if (!activeState.projectId) {
+      return;
+    }
+    try {
+      const latest = await getServerStoryboard(activeState.projectId);
+      // 草稿保护：仅当成功拿到服务器内容才替换草稿，失败时绝不丢弃草稿
+      const next = applyConflictResolution({ draft: lines, conflict }, 'load_server_latest', latest ? latest.lines : null);
+      setLines(next.draft);
+      setConflict(next.conflict);
+      if (latest && next.conflict === null) {
+        setBaseVersion(latest.version ?? 0);
+      }
+      void refreshWorkspace('storyboard conflict resolution');
+    } catch (error) {
+      showToast({
+        type: 'error',
+        title: '加载失败',
+        message: error instanceof Error ? error.message : '无法加载服务器最新版本',
+      });
+    }
+  }, [activeState.projectId, lines, conflict, refreshWorkspace, showToast]);
+
+  /** 冲突时：复制当前草稿（JSON）到剪贴板 */
+  const handleCopyDraft = useCallback(async () => {
+    const draft = JSON.stringify(lines, null, 2);
+    const succeeded = await copyTextToClipboard(draft);
+    showToast({
+      type: succeeded ? 'success' : 'error',
+      title: succeeded ? '草稿已复制' : '复制失败',
+      message: succeeded
+        ? '当前分镜草稿已复制为 JSON，可加载最新版后再合并。'
+        : '当前环境不支持自动复制，请手动复制。',
+    });
+  }, [lines, showToast]);
+
+  /** 版本恢复成功后重新拉取当前内容 */
+  const handleVersionRestored = useCallback(async () => {
+    if (!activeState.projectId) {
+      return;
+    }
+    try {
+      const latest = await getServerStoryboard(activeState.projectId);
+      if (latest) {
+        setLines(latest.lines);
+        setBaseVersion(latest.version ?? 0);
+      }
+      setConflict(null);
+      void refreshWorkspace('storyboard version restored');
+    } catch {
+      // 忽略，版本面板已自行刷新
+    }
+  }, [activeState.projectId, refreshWorkspace]);
 
   /** 图生图：基于当前镜头描述生成画面 */
   const handleImageToImage = useCallback(async (line: StoryboardLine) => {
@@ -237,6 +377,14 @@ export const StoryboardArea: React.FC = () => {
         <div className={styles.toolbarInfo}>
           <h3>项目主分镜</h3>
           <span>{lines.length} 个镜头</span>
+          {activeState.projectId && (
+            <ContentVersionHistory
+              projectId={activeState.projectId}
+              contentType="storyboard"
+              currentVersion={activeStoryboard?.version}
+              onRestored={() => void handleVersionRestored()}
+            />
+          )}
         </div>
         <div className={styles.toolbarActions}>
           <button className={styles.secondaryBtn} onClick={handleAddScene}>
@@ -251,6 +399,31 @@ export const StoryboardArea: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {conflict && (
+        <div className={styles.conflictBanner}>
+          <AlertTriangle size={16} />
+          <span>
+            保存冲突：服务器分镜已更新到 v{conflict.currentVersion}，你的本地草稿尚未保存，已为你保留。
+          </span>
+          <div className={styles.conflictActions}>
+            <button
+              className={styles.conflictBtn}
+              onClick={() => void handleCopyDraft()}
+              title="将当前草稿复制为 JSON"
+            >
+              <Copy size={14} /> 复制当前草稿
+            </button>
+            <button
+              className={styles.conflictBtn}
+              onClick={() => void handleLoadServerLatest()}
+              title="丢弃草稿并使用服务器最新内容"
+            >
+              <RefreshCw size={14} /> 加载服务器最新版
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className={styles.timeline}>
         {lines.map((line) => (

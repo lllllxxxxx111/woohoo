@@ -189,6 +189,10 @@ type ServerScript = {
   title: string;
   content: string;
   updatedAt: string;
+  version?: number;
+  versionId?: string;
+  contentHash?: string;
+  deduplicated?: boolean;
 };
 
 type ServerStoryboard = {
@@ -202,6 +206,38 @@ type ServerStoryboard = {
     assets: ServerAsset[];
   }>;
   updatedAt: string;
+  version?: number;
+  versionId?: string;
+  contentHash?: string;
+  deduplicated?: boolean;
+};
+
+/** 内容版本（服务端 content_versions 的映射） */
+export type ServerContentVersion = {
+  id: string;
+  projectId: string;
+  contentType: 'script' | 'storyboard';
+  version: number;
+  source: string;
+  createdBy?: string | null;
+  note?: string | null;
+  title?: string | null;
+  createdAt: string;
+  contentHash: string;
+  content?: string;
+};
+
+export type ContentVersionListResponse = {
+  projectId: string;
+  contentType: string;
+  currentVersion: number;
+  total: number;
+  versions: ServerContentVersion[];
+};
+
+export type ContentVersionRestoreResponse = {
+  restoredFromVersion: number;
+  newVersion: ServerContentVersion;
 };
 
 type ServerAiChatResult = {
@@ -1138,6 +1174,9 @@ function mapScript(script: ServerScript): Script {
     title: script.title,
     content: script.content,
     updatedAt: parseTimestamp(script.updatedAt),
+    version: typeof script.version === 'number' ? script.version : undefined,
+    versionId: script.versionId,
+    contentHash: script.contentHash,
   };
 }
 
@@ -1146,6 +1185,9 @@ function mapStoryboard(storyboard: ServerStoryboard): Storyboard {
     id: storyboard.id,
     projectId: storyboard.projectId,
     updatedAt: parseTimestamp(storyboard.updatedAt),
+    version: typeof storyboard.version === 'number' ? storyboard.version : undefined,
+    versionId: storyboard.versionId,
+    contentHash: storyboard.contentHash,
     lines: storyboard.lines.map((line) => ({
       id: line.id,
       sceneNumber: line.sceneNumber,
@@ -1323,6 +1365,19 @@ export async function fetchServer(
   }
 }
 
+/**
+ * 版本并发冲突错误（HTTP 409 + errorCode=VERSION_CONFLICT）。
+ * 前端据此保留本地草稿，并提供“加载服务器最新版 / 复制草稿”等安全选项。
+ * 具体实现见 ./versionConflict（纯逻辑，便于测试）。
+ */
+export {
+  VersionConflictError,
+  isVersionConflictError,
+  extractVersionConflict,
+  VERSION_CONFLICT_CODE,
+} from './versionConflict';
+import { VersionConflictError } from './versionConflict';
+
 async function parseResponse<T>(response: Response): Promise<T> {
   const rawText = await response.text();
   const parsed = rawText ? tryParseJson(rawText) : null;
@@ -1333,6 +1388,9 @@ async function parseResponse<T>(response: Response): Promise<T> {
       parsed && typeof parsed === 'object' && 'errorCode' in parsed ? String(parsed.errorCode) : '';
     if (errorCode === 'BUDGET_EXCEEDED' && typeof window !== 'undefined') {
       window.dispatchEvent(new Event(BUDGET_REFRESH_EVENT));
+    }
+    if (errorCode === 'VERSION_CONFLICT' && parsed && typeof parsed === 'object') {
+      throw new VersionConflictError(parsed as Record<string, unknown>);
     }
     const errorMessage =
       (parsed && typeof parsed === 'object' && 'error' in parsed && typeof parsed.error === 'string'
@@ -1666,12 +1724,42 @@ export async function updateAssetTags(assetId: string, tags: string[]) {
   return mapAsset(asset);
 }
 
-export async function upsertServerScript(projectId: string, title: string, content: string) {
+export async function getServerScript(projectId: string) {
+  const script = await requestApi<ServerScript | null>(`/api/projects/${projectId}/script`);
+  return script ? mapScript(script) : null;
+}
+
+export async function getServerStoryboard(projectId: string) {
+  const storyboard = await requestApi<ServerStoryboard | null>(
+    `/api/projects/${projectId}/storyboard`,
+  );
+  return storyboard ? mapStoryboard(storyboard) : null;
+}
+
+export type SaveScriptOptions = {
+  /** 乐观锁基线版本号（读取时的当前版本）。强烈建议提供。 */
+  baseVersion?: number;
+  /** 写入来源，缺省 manual */
+  source?: string;
+  note?: string;
+};
+
+export type SaveStoryboardOptions = SaveScriptOptions;
+
+export async function upsertServerScript(
+  projectId: string,
+  title: string,
+  content: string,
+  options: SaveScriptOptions = {},
+) {
   const script = await requestApi<ServerScript>(`/api/projects/${projectId}/script`, {
     method: 'PUT',
     body: JSON.stringify({
       title,
       content,
+      baseVersion: options.baseVersion,
+      source: options.source,
+      note: options.note,
     }),
   });
 
@@ -1679,7 +1767,11 @@ export async function upsertServerScript(projectId: string, title: string, conte
   return mapScript(script);
 }
 
-export async function upsertServerStoryboard(projectId: string, lines: StoryboardLine[]) {
+export async function upsertServerStoryboard(
+  projectId: string,
+  lines: StoryboardLine[],
+  options: SaveStoryboardOptions = {},
+) {
   const storyboard = await requestApi<ServerStoryboard>(`/api/projects/${projectId}/storyboard`, {
     method: 'PUT',
     body: JSON.stringify({
@@ -1690,12 +1782,60 @@ export async function upsertServerStoryboard(projectId: string, lines: Storyboar
         duration: line.duration,
         assetIds: line.assets.map((asset) => asset.id),
       })),
+      baseVersion: options.baseVersion,
+      source: options.source,
+      note: options.note,
     }),
   });
 
   invalidateApiCache(CACHE_KEYS.workspaceBootstrap);
   return mapStoryboard(storyboard);
 }
+
+/** 列出剧本/分镜版本历史（倒序，最新在前） */
+export async function listContentVersions(
+  projectId: string,
+  contentType: 'script' | 'storyboard',
+  limit = 50,
+  offset = 0,
+) {
+  const query = new URLSearchParams();
+  query.set('limit', String(limit));
+  query.set('offset', String(offset));
+  return requestApi<ContentVersionListResponse>(
+    `/api/projects/${projectId}/${contentType}/versions?${query.toString()}`,
+  );
+}
+
+/** 读取指定版本详情（含完整内容） */
+export async function getContentVersion(
+  projectId: string,
+  contentType: 'script' | 'storyboard',
+  version: number,
+) {
+  return requestApi<ServerContentVersion>(
+    `/api/projects/${projectId}/${contentType}/versions/${version}`,
+  );
+}
+
+/** 恢复指定版本（追加一个新的当前版本，不删改历史） */
+export async function restoreContentVersion(
+  projectId: string,
+  contentType: 'script' | 'storyboard',
+  version: number,
+  options: { note?: string; baseVersion?: number } = {},
+) {
+  const result = await requestApi<ContentVersionRestoreResponse>(
+    `/api/projects/${projectId}/${contentType}/versions/${version}/restore`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ note: options.note, baseVersion: options.baseVersion }),
+    },
+  );
+  invalidateApiCache(CACHE_KEYS.workspaceBootstrap);
+  return result;
+}
+
 
 export async function requestServerAiCompletion(input: RequestServerAiCompletionInput) {
   const result = await requestApi<ServerAiChatResult>('/api/ai/chat', {

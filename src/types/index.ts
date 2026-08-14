@@ -255,6 +255,10 @@ export interface Script {
   title: string;
   content: string;
   updatedAt: number;
+  /** 当前版本号（乐观锁基线），旧数据可能缺失 */
+  version?: number;
+  versionId?: string;
+  contentHash?: string;
 }
 
 export interface StoryboardLine {
@@ -270,6 +274,10 @@ export interface Storyboard {
   projectId: string;
   lines: StoryboardLine[];
   updatedAt: number;
+  /** 当前版本号（乐观锁基线），旧数据可能缺失 */
+  version?: number;
+  versionId?: string;
+  contentHash?: string;
 }
 
 export type ActiveState = {

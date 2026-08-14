@@ -3,6 +3,7 @@ import {
   createServerMessage,
   deleteServerAsset,
   deleteServerMessage,
+  isVersionConflictError,
   rewindServerConversation,
   updateServerConversation,
   updateServerAsset,
@@ -10,6 +11,8 @@ import {
   uploadServerAsset,
   upsertServerScript,
   upsertServerStoryboard,
+  type SaveScriptOptions,
+  type SaveStoryboardOptions,
 } from '../../lib/serverApi';
 import { logger } from '../../lib/logger';
 import type {
@@ -720,16 +723,26 @@ export function useChatWorkspaceActions({
   );
 
   const saveScript = useCallback(
-    async (projectId: string, content: string, title?: string) => {
+    async (projectId: string, content: string, title?: string, options?: SaveScriptOptions) => {
       const existingScript = scripts.find((script) => script.projectId === projectId);
       const nextTitle = deriveScriptTitle(content, title || existingScript?.title);
+
+      // 优先使用调用方显式传入的 baseVersion；否则回退到当前已知版本
+      const baseVersion = options?.baseVersion ?? existingScript?.version;
 
       let nextScript: Script;
       let savedOnServer = false;
       try {
-        nextScript = await upsertServerScript(projectId, nextTitle, content);
+        nextScript = await upsertServerScript(projectId, nextTitle, content, {
+          ...options,
+          baseVersion,
+        });
         savedOnServer = true;
       } catch (error) {
+        // 版本冲突需要由 UI 决定如何保留草稿，不能在此静默吞掉
+        if (isVersionConflictError(error)) {
+          throw error;
+        }
         logger.error('Failed to save script on server', error);
         nextScript = existingScript
           ? { ...existingScript, title: nextTitle, content, updatedAt: Date.now() }
@@ -755,7 +768,11 @@ export function useChatWorkspaceActions({
   );
 
   const saveStoryboard = useCallback(
-    async (projectId: string, lines: Storyboard['lines']) => {
+    async (
+      projectId: string,
+      lines: Storyboard['lines'],
+      options?: SaveStoryboardOptions,
+    ) => {
       const normalizedLines = lines.map((line, index) => ({
         ...line,
         sceneNumber: line.sceneNumber > 0 ? line.sceneNumber : index + 1,
@@ -763,16 +780,24 @@ export function useChatWorkspaceActions({
         duration: line.duration > 0 ? line.duration : 3,
       }));
 
+      const currentStoryboard = storyboards.find(
+        (storyboard) => storyboard.projectId === projectId,
+      );
+      const baseVersion = options?.baseVersion ?? currentStoryboard?.version;
+
       let nextStoryboard: Storyboard;
       let savedOnServer = false;
       try {
-        nextStoryboard = await upsertServerStoryboard(projectId, normalizedLines);
+        nextStoryboard = await upsertServerStoryboard(projectId, normalizedLines, {
+          ...options,
+          baseVersion,
+        });
         savedOnServer = true;
       } catch (error) {
+        if (isVersionConflictError(error)) {
+          throw error;
+        }
         logger.error('Failed to save storyboard on server', error);
-        const currentStoryboard = storyboards.find(
-          (storyboard) => storyboard.projectId === projectId,
-        );
         nextStoryboard = currentStoryboard
           ? { ...currentStoryboard, lines: normalizedLines, updatedAt: Date.now() }
           : createLocalStoryboard(projectId, normalizedLines);

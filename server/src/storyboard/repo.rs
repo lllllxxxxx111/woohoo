@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
 
 use crate::{
@@ -130,12 +130,21 @@ pub async fn list_by_user(pool: &SqlitePool, user_id: &str) -> AppResult<Vec<Sto
         .collect())
 }
 
-pub async fn upsert_storyboard(
-    pool: &SqlitePool,
+/**
+ * 在给定事务内写入“当前分镜”（storyboards + storyboard_lines + storyboard_line_assets）。
+ *
+ * `strict_assets`：
+ *   - true（常规保存）：引用不存在的项目资产时返回校验错误。
+ *   - false（历史恢复）：跳过已不存在的资产，避免旧版本引用失效资产导致整体恢复失败。
+ *
+ * 抽离为事务版本，便于与版本历史写入（content_versions）合并到同一事务。
+ */
+pub async fn upsert_storyboard_tx(
+    tx: &mut Transaction<'_, Sqlite>,
     project_id: &str,
     lines: &[StoryboardLineInput],
-) -> AppResult<Storyboard> {
-    let mut tx = pool.begin().await?;
+    strict_assets: bool,
+) -> AppResult<StoryboardRecord> {
     let storyboard_id = Uuid::new_v4().to_string();
 
     let record = sqlx::query_as::<_, StoryboardRecord>(
@@ -147,25 +156,25 @@ pub async fn upsert_storyboard(
     )
     .bind(&storyboard_id)
     .bind(project_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
 
     let existing_line_ids: Vec<(String,)> =
         sqlx::query_as("SELECT id FROM storyboard_lines WHERE storyboard_id = ?")
             .bind(&record.id)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut **tx)
             .await?;
 
     for (line_id,) in &existing_line_ids {
         sqlx::query("DELETE FROM storyboard_line_assets WHERE storyboard_line_id = ?")
             .bind(line_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
 
     sqlx::query("DELETE FROM storyboard_lines WHERE storyboard_id = ?")
         .bind(&record.id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     for (index, line) in lines.iter().enumerate() {
@@ -184,7 +193,7 @@ pub async fn upsert_storyboard(
         .bind(line.description.trim())
         .bind(line.duration)
         .bind(index as i64)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
         for asset_id in &line.asset_ids {
@@ -192,11 +201,15 @@ pub async fn upsert_storyboard(
                 sqlx::query_as("SELECT id FROM assets WHERE id = ? AND project_id = ?")
                     .bind(asset_id)
                     .bind(project_id)
-                    .fetch_optional(&mut *tx)
+                    .fetch_optional(&mut **tx)
                     .await?;
 
             if owned_asset.is_none() {
-                return Err(AppError::Validation("分镜引用了不存在的项目资产".into()));
+                if strict_assets {
+                    return Err(AppError::Validation("分镜引用了不存在的项目资产".into()));
+                }
+                // 恢复场景：资产可能已被删除，跳过该引用而不是整体失败
+                continue;
             }
 
             sqlx::query(
@@ -205,16 +218,12 @@ pub async fn upsert_storyboard(
             )
             .bind(&line_id)
             .bind(asset_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         }
     }
 
-    tx.commit().await?;
-
-    find_by_project(pool, project_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("分镜不存在".into()))
+    Ok(record)
 }
 
 pub async fn delete_by_project(pool: &SqlitePool, project_id: &str) -> AppResult<()> {

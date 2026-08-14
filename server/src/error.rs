@@ -35,6 +35,18 @@ pub enum AppError {
     #[error("冲突: {0}")]
     Conflict(String),
 
+    /**
+     * 版本并发冲突（乐观锁失败）
+     *
+     * 与通用 Conflict 不同，它携带结构化的 detail（当前版本号、版本 ID、内容哈希等），
+     * 供前端在 409 时做“加载服务器最新版 / 保留草稿”等安全处理。
+     */
+    #[error("版本冲突: {message}")]
+    VersionConflict {
+        message: String,
+        detail: serde_json::Value,
+    },
+
     #[error("权限不足: {0}")]
     Forbidden(String),
 
@@ -121,6 +133,30 @@ impl IntoResponse for AppError {
             // 冲突错误 - 返回冲突原因
             AppError::Conflict(msg) => {
                 (StatusCode::CONFLICT, msg.clone(), "warn", "CONFLICT", false)
+            }
+
+            // 版本并发冲突 - 返回结构化冲突信息（当前版本号等），供前端安全恢复
+            AppError::VersionConflict { message, detail } => {
+                tracing::warn!(
+                    detail = %detail,
+                    status = 409u16,
+                    "Version conflict detected"
+                );
+
+                let mut body = json!({
+                    "success": false,
+                    "error": message,
+                    "statusCode": StatusCode::CONFLICT.as_u16(),
+                    "errorCode": "VERSION_CONFLICT",
+                    "retryable": false
+                });
+                if let (Some(body_obj), Some(detail_obj)) = (body.as_object_mut(), detail.as_object())
+                {
+                    for (key, value) in detail_obj {
+                        body_obj.insert(key.clone(), value.clone());
+                    }
+                }
+                return (StatusCode::CONFLICT, Json(body)).into_response();
             }
 
             // 权限不足 - 返回通用权限提示

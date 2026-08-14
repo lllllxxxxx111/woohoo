@@ -6,8 +6,9 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 use crate::{
-    ai, asset, auth::middleware::UserId, conversation, error::AppResult, project, script,
-    storyboard, AppState,
+    ai, asset, auth::middleware::UserId, content_version, conversation,
+    error::{AppError, AppResult},
+    project, script, storyboard, AppState,
 };
 
 use super::model::{
@@ -19,13 +20,18 @@ pub async fn bootstrap(
     State(state): State<AppState>,
     Extension(user_id): Extension<UserId>,
 ) -> AppResult<Json<WorkspaceBootstrap>> {
-    let (projects, assets, scripts, storyboards, conversations, messages) = tokio::try_join!(
+    let (projects, assets, scripts, storyboards, conversations, messages, latest_versions) = tokio::try_join!(
         project::repo::list_by_user(&state.db, &user_id.0),
         asset::repo::list_by_user(&state.db, &user_id.0),
         script::repo::list_by_user(&state.db, &user_id.0),
         storyboard::repo::list_by_user(&state.db, &user_id.0),
         conversation::repo::list_by_user(&state.db, &user_id.0),
         conversation::repo::list_messages_by_user(&state.db, &user_id.0),
+        async {
+            content_version::repo::latest_versions_by_user(&state.db, &user_id.0)
+                .await
+                .map_err(AppError::Sqlx)
+        },
     )?;
 
     let agents =
@@ -78,6 +84,25 @@ pub async fn bootstrap(
             storyboard.project_id.as_str(),
             storyboard.lines.len() as i64,
         );
+    }
+
+    // 剧本 / 分镜的最新版本（baseVersion），供前端做乐观锁
+    let mut script_version_by_project: HashMap<&str, &content_version::repo::LatestVersionSummary> =
+        HashMap::new();
+    let mut storyboard_version_by_project: HashMap<
+        &str,
+        &content_version::repo::LatestVersionSummary,
+    > = HashMap::new();
+    for version_summary in &latest_versions {
+        match version_summary.content_type.as_str() {
+            "script" => {
+                script_version_by_project.insert(&version_summary.project_id, version_summary);
+            }
+            "storyboard" => {
+                storyboard_version_by_project.insert(&version_summary.project_id, version_summary);
+            }
+            _ => {}
+        }
     }
 
     let conversation_project_map = conversations
@@ -183,35 +208,50 @@ pub async fn bootstrap(
             .collect(),
         scripts: scripts
             .into_iter()
-            .map(|script| WorkspaceScript {
-                id: script.id,
-                project_id: script.project_id,
-                title: script.title,
-                content: script.content,
-                updated_at: to_epoch_millis(&script.updated_at),
+            .map(|script| {
+                let version_summary =
+                    script_version_by_project.get(script.project_id.as_str()).copied();
+                WorkspaceScript {
+                    version: version_summary.map(|summary| summary.version),
+                    version_id: version_summary.map(|summary| summary.id.clone()),
+                    content_hash: version_summary.map(|summary| summary.content_hash.clone()),
+                    id: script.id,
+                    project_id: script.project_id,
+                    title: script.title,
+                    content: script.content,
+                    updated_at: to_epoch_millis(&script.updated_at),
+                }
             })
             .collect(),
         storyboards: storyboards
             .into_iter()
-            .map(|storyboard| WorkspaceStoryboard {
-                id: storyboard.id,
-                project_id: storyboard.project_id,
-                lines: storyboard
-                    .lines
-                    .into_iter()
-                    .map(|line| WorkspaceStoryboardLine {
-                        id: line.id,
-                        scene_number: line.scene_number,
-                        description: line.description,
-                        duration: line.duration,
-                        assets: line
-                            .assets
-                            .into_iter()
-                            .map(|asset| map_asset(asset, &user_id.0))
-                            .collect(),
-                    })
-                    .collect(),
-                updated_at: to_epoch_millis(&storyboard.updated_at),
+            .map(|storyboard| {
+                let version_summary = storyboard_version_by_project
+                    .get(storyboard.project_id.as_str())
+                    .copied();
+                WorkspaceStoryboard {
+                    version: version_summary.map(|summary| summary.version),
+                    version_id: version_summary.map(|summary| summary.id.clone()),
+                    content_hash: version_summary.map(|summary| summary.content_hash.clone()),
+                    id: storyboard.id,
+                    project_id: storyboard.project_id,
+                    lines: storyboard
+                        .lines
+                        .into_iter()
+                        .map(|line| WorkspaceStoryboardLine {
+                            id: line.id,
+                            scene_number: line.scene_number,
+                            description: line.description,
+                            duration: line.duration,
+                            assets: line
+                                .assets
+                                .into_iter()
+                                .map(|asset| map_asset(asset, &user_id.0))
+                                .collect(),
+                        })
+                        .collect(),
+                    updated_at: to_epoch_millis(&storyboard.updated_at),
+                }
             })
             .collect(),
         agents,

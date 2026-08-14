@@ -151,3 +151,39 @@
 .errorText {
   color: #ef4444;
 }
+
+.conflictBanner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background-color: rgba(251, 191, 36, 0.12);
+  border-bottom: 1px solid rgba(251, 191, 36, 0.4);
+  color: #fbbf24;
+  font-size: 0.85rem;
+}
+
+.conflictActions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.conflictBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 0.8rem;
+  transition: all var(--transition-fast);
+}
+
+.conflictBtn:hover {
+  background-color: var(--bg-tertiary);
+  border-color: var(--text-muted);
+}

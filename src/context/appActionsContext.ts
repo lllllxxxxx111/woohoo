@@ -1,5 +1,6 @@
 import { createContext } from 'react';
 import type { SendAiMessageOptions, SendMessageResult } from '../store';
+import type { SaveScriptOptions, SaveStoryboardOptions } from '../lib/serverApi';
 import type { Asset, ChatSession, Message, Project, Script, Storyboard } from '../types';
 
 export type AppActions = {
@@ -29,8 +30,17 @@ export type AppActions = {
   uploadAssets: (projectId: string, files: File[]) => Promise<Asset[]>;
   updateAsset: (assetId: string, input: Partial<Pick<Asset, 'name' | 'type' | 'url' | 'metadata'>>) => Promise<Asset>;
   deleteAsset: (assetId: string) => Promise<void>;
-  saveScript: (projectId: string, content: string, title?: string) => Promise<Script>;
-  saveStoryboard: (projectId: string, lines: Storyboard['lines']) => Promise<Storyboard>;
+  saveScript: (
+    projectId: string,
+    content: string,
+    title?: string,
+    options?: SaveScriptOptions,
+  ) => Promise<Script>;
+  saveStoryboard: (
+    projectId: string,
+    lines: Storyboard['lines'],
+    options?: SaveStoryboardOptions,
+  ) => Promise<Storyboard>;
   refreshWorkspace: (reason?: string, maxAttempts?: number) => Promise<unknown>;
   suggestProjectName: (seedContent?: string) => string;
   sendAiMessage: (content: string, options?: SendAiMessageOptions) => Promise<SendMessageResult>;

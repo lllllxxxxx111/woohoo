@@ -3,6 +3,10 @@ use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
 
 use super::model::{Conversation, Message, MessageHistoryEntry};
+use crate::content_version::model::{
+    CommitInput, ConcurrencyToken, ContentType, StoryboardSnapshot, StoryboardSnapshotLine,
+};
+use crate::content_version::repo as version_repo;
 use crate::error::{AppError, AppResult};
 
 #[derive(Debug, Clone)]
@@ -896,6 +900,9 @@ async fn restore_project_resource_checkpoint_tx(
     }
 
     if let Some(script) = checkpoint.script {
+        let version_content = script.content.clone();
+        let version_title = script.title.clone();
+
         sqlx::query(
             "INSERT INTO scripts (id, project_id, title, content, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?)",
@@ -908,9 +915,40 @@ async fn restore_project_resource_checkpoint_tx(
         .bind(script.updated_at)
         .execute(&mut **tx)
         .await?;
+
+        // 记录撤回恢复到版本历史（source=rewind），避免静默覆盖
+        let input = CommitInput {
+            project_id: project_id.to_string(),
+            content_type: ContentType::Script,
+            content: version_content,
+            title: Some(version_title),
+            source: "rewind".to_string(),
+            created_by: None,
+            note: Some("会话撤回恢复".to_string()),
+            expected_base: ConcurrencyToken::None,
+        };
+        version_repo::commit_version_tx(tx, &input)
+            .await
+            .map_err(|err| err.into_app_error())?;
     }
 
     if let Some(storyboard) = checkpoint.storyboard {
+        // 先行构建版本快照（borrow），避免随后循环移动 lines
+        let snapshot = StoryboardSnapshot {
+            lines: storyboard
+                .lines
+                .iter()
+                .map(|line| StoryboardSnapshotLine {
+                    id: line.id.clone(),
+                    scene_number: line.scene_number,
+                    description: line.description.clone(),
+                    duration: line.duration,
+                    asset_ids: line.asset_ids.clone(),
+                })
+                .collect(),
+        };
+        let snapshot_content = serde_json::to_string(&snapshot).unwrap_or_default();
+
         sqlx::query(
             "INSERT INTO storyboards (id, project_id, created_at, updated_at)
              VALUES (?, ?, ?, ?)",
@@ -950,6 +988,21 @@ async fn restore_project_resource_checkpoint_tx(
                 .await?;
             }
         }
+
+        // 记录撤回恢复到版本历史（source=rewind），避免静默覆盖
+        let input = CommitInput {
+            project_id: project_id.to_string(),
+            content_type: ContentType::Storyboard,
+            content: snapshot_content,
+            title: None,
+            source: "rewind".to_string(),
+            created_by: None,
+            note: Some("会话撤回恢复".to_string()),
+            expected_base: ConcurrencyToken::None,
+        };
+        version_repo::commit_version_tx(tx, &input)
+            .await
+            .map_err(|err| err.into_app_error())?;
     }
 
     Ok(())
