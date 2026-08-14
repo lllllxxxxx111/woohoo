@@ -3,17 +3,24 @@ import {
   createServerMessage,
   deleteServerAsset,
   deleteServerMessage,
+  invalidateWorkspaceBootstrapCache,
   isVersionConflictError,
+  mapServerAsset,
   rewindServerConversation,
   updateServerConversation,
   updateServerAsset,
   updateServerMessage,
-  uploadServerAsset,
   upsertServerScript,
   upsertServerStoryboard,
   type SaveScriptOptions,
   type SaveStoryboardOptions,
 } from '../../lib/serverApi';
+import {
+  findResumableUpload,
+  startResumableUpload,
+  type UploadHandle,
+} from '../../lib/chunkedUpload';
+import type { UploadProgressCallback } from '../appActionsContext';
 import { logger } from '../../lib/logger';
 import type {
   ActiveState,
@@ -625,18 +632,61 @@ export function useChatWorkspaceActions({
   );
 
   const uploadAssets = useCallback(
-    async (projectId: string, files: File[]) => {
-      const nextAssets = await Promise.all(
-        files.map(async (file) => {
-          try {
-            return await uploadServerAsset(projectId, file);
-          } catch (error) {
-            logger.error('Failed to upload asset to server', error);
-            throw error;
-          }
-        }),
-      );
+    async (
+      projectId: string,
+      files: File[],
+      onProgress?: UploadProgressCallback,
+      batchKey = 'upload',
+    ) => {
+      // 文件级受控并发：避免一次选中大量文件时打满连接；
+      // 单文件内部仍有分片级并发（见 chunkedUpload）。
+      const FILE_CONCURRENCY = 2;
+      let cursor = 0;
+      const uploaded: Asset[] = new Array(files.length);
+      const claimedResumeSessions = new Set<string>();
 
+      const runOne = async (): Promise<void> => {
+        while (true) {
+          const index = cursor;
+          cursor += 1;
+          if (index >= files.length) return;
+          const file = files[index];
+          const fileKey = `${batchKey}-${index}-${file.name}-${file.size}`;
+          const resumeRecord = findResumableUpload(
+            projectId,
+            file,
+            claimedResumeSessions,
+          );
+          if (resumeRecord) claimedResumeSessions.add(resumeRecord.sessionId);
+          try {
+            let handle: UploadHandle | undefined;
+            handle = startResumableUpload(file, projectId, {
+              resumeSessionId: resumeRecord?.sessionId,
+              resumeFallbackToNewOnMismatch: true,
+              onProgress: (progress) => {
+                if (handle) onProgress?.(fileKey, progress, handle);
+              },
+            });
+            const serverAsset = await handle.promise;
+            uploaded[index] = mapServerAsset(serverAsset);
+          } catch (error) {
+            // 单个文件失败或取消不应阻断队列中其他文件；失败状态已由
+            // progress 回调写入对应 UI 行，批次最终仍返回成功的资产。
+            if (error instanceof Error && error.name === 'UploadAbortedError') {
+              continue;
+            }
+            logger.error('Failed to upload asset to server', error);
+            continue;
+          }
+        }
+      };
+
+      await Promise.all(
+        Array.from({ length: Math.min(FILE_CONCURRENCY, files.length) }, () => runOne()),
+      );
+      const nextAssets = uploaded.filter(Boolean);
+
+      invalidateWorkspaceBootstrapCache();
       setAssets((prev) => [...nextAssets, ...prev]);
       setProjects((prev) =>
         prev.map((project) =>

@@ -10,6 +10,10 @@ pub struct AppConfig {
     pub jwt_secret: String,
     pub jwt_expire_hours: i64,
     pub assets_dir: String,
+    /// 分片上传临时目录（未完成分片与会话合并中间态）
+    pub upload_tmp_dir: String,
+    /// 分片上传会话有效期（秒）
+    pub upload_session_ttl_secs: i64,
     pub project_files_dir: String,
     pub ai_max_concurrent_tasks: usize,
     pub runtime_manifest_path: String,
@@ -73,6 +77,12 @@ impl AppConfig {
                 .parse()
                 .unwrap_or(72),
             assets_dir: env::var("ASSETS_DIR").unwrap_or_else(|_| "./data/assets".into()),
+            upload_tmp_dir: env::var("UPLOAD_TMP_DIR")
+                .unwrap_or_else(|_| "./data/uploads-tmp".into()),
+            upload_session_ttl_secs: env::var("UPLOAD_SESSION_TTL_SECS")
+                .unwrap_or_else(|_| "86400".into())
+                .parse()
+                .unwrap_or(86_400),
             project_files_dir: env::var("PROJECT_FILES_DIR")
                 .unwrap_or_else(|_| "./data/project-files".into()),
             ai_max_concurrent_tasks: env::var("AI_MAX_CONCURRENT_TASKS")

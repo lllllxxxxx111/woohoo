@@ -1142,6 +1142,10 @@ function deriveAssetVersionLabel(metadata?: Record<string, unknown> | null) {
   return '当前版';
 }
 
+export function mapServerAsset(asset: ServerAsset): Asset {
+  return mapAsset(asset);
+}
+
 function mapAsset(asset: ServerAsset): Asset {
   let url = asset.url;
   if (url.startsWith('/uploads/')) {
@@ -1642,6 +1646,10 @@ export async function createServerAsset(projectId: string, input: CreateAssetInp
   return mapAsset(asset);
 }
 
+/**
+ * 旧单次 multipart 上传（后端继续保留兼容）。
+ * 新代码请使用 chunkedUpload 的 startResumableUpload。
+ */
 export async function uploadServerAsset(projectId: string, file: File) {
   const formData = new FormData();
   formData.append('file', file);
@@ -1651,8 +1659,12 @@ export async function uploadServerAsset(projectId: string, file: File) {
     body: formData,
   });
 
-  invalidateApiCache(CACHE_KEYS.workspaceBootstrap);
+  invalidateWorkspaceBootstrapCache();
   return mapAsset(asset);
+}
+
+export function invalidateWorkspaceBootstrapCache() {
+  invalidateApiCache(CACHE_KEYS.workspaceBootstrap);
 }
 
 export async function updateServerAsset(

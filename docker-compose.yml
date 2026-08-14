@@ -9,6 +9,8 @@ services:
       PORT_SEARCH_LIMIT: 0
       DATABASE_URL: sqlite:///data/woohoo.db?mode=rwc
       ASSETS_DIR: /data/assets
+      UPLOAD_TMP_DIR: /data/uploads-tmp
+      UPLOAD_SESSION_TTL_SECS: ${UPLOAD_SESSION_TTL_SECS:-86400}
       PROJECT_FILES_DIR: /data/project-files
       RUNTIME_MANIFEST_PATH: /data/runtime/server-info.json
       JWT_SECRET: ${JWT_SECRET:-woohoo-demo-jwt-secret-change-before-production-2026}

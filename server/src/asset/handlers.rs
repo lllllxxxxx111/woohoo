@@ -1,9 +1,13 @@
 use axum::{
-    extract::{Extension, Multipart, Path, Query, State},
-    http::{header, StatusCode},
+    body::Bytes,
+    extract::{DefaultBodyLimit, Extension, Multipart, Path, Query, State},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    Json,
+    routing::put,
+    Json, Router,
 };
+use chrono::Utc;
+use sha2::{Digest, Sha256};
 use std::path::{Path as StdPath, PathBuf};
 use tokio::{fs, io::AsyncWriteExt};
 use uuid::Uuid;
@@ -21,86 +25,45 @@ use super::{
         AssetSearchQuery, AssetWithProject, CreateAssetReq, UpdateAssetReq, UpdateAssetTagsReq,
     },
     repo,
+    upload_session::{
+        self, CompleteResp, InitSessionReq, PartAck, SessionView, UploadPaths, UploadPolicy,
+        DEFAULT_MAX_FILE_SIZE, MAX_CHUNK_SIZE,
+    },
 };
 
-/**
- * 允许上传的文件扩展名白名单
- * 限制可上传的文件类型，防止恶意文件上传
- */
-const ALLOWED_EXTENSIONS: &[&str] = &[
-    // 图片
-    "jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico", // 视频
-    "mp4", "webm", "mov", "avi", "mkv", // 音频
-    "mp3", "wav", "ogg", "flac", "aac", // 文档
-    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md", "csv",
-];
-
-/**
- * 最大允许的文件名长度
- */
-const MAX_FILENAME_LENGTH: usize = 100;
-
-/**
- * 安全的最大文件大小 (50MB)
- */
-const MAX_FILE_SIZE_BYTES: usize = 50 * 1024 * 1024;
-
-/**
- * 每用户每项目最大上传配额（文件数量）
- */
-const MAX_ASSETS_PER_PROJECT: u64 = 500;
-
-/**
- * 每用户全局最大上传配额（总文件大小，单位：字节，5GB）
- */
-const MAX_TOTAL_UPLOAD_SIZE_PER_USER: u64 = 5 * 1024 * 1024 * 1024;
+/// 分片上传 HTTP body 上限：单片最大 8MiB，留 1MiB 头部余量；
+/// 超出由 `expected_part_size` 精确校验拒绝。
+pub fn chunk_upload_routes() -> Router<AppState> {
+    Router::new().route(
+        "/api/projects/{project_id}/uploads/{session_id}/parts/{part_number}",
+        put(upload_part_bytes).layer(DefaultBodyLimit::max(MAX_CHUNK_SIZE as usize + 1024 * 1024)),
+    )
+}
 
 const LOCAL_UPLOAD_URL_PREFIX: &str = "/uploads/";
 
-/**
- * 清理用户提供的文件名，移除危险字符和路径遍历尝试
- *
- * @param raw_name 原始文件名（可能包含恶意字符）
- * @return 清理后的安全文件名
- *
- * 安全措施：
- * - 移除所有非字母数字、连字符、下划线、点的字符
- * - 移除路径分隔符（/ \）
- * - 移除隐藏文件前导点（..）
- * - 限制最大长度防止缓冲区溢出
- */
-fn sanitize_filename(raw_name: &str) -> String {
-    let sanitized: String = raw_name
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '.' || *c == '-' || *c == '_' || *c == ' ')
-        .take(MAX_FILENAME_LENGTH)
-        .collect();
-
-    if sanitized.trim().is_empty() {
-        "unnamed".to_string()
-    } else {
-        sanitized.trim().to_string()
+pub async fn upload_paths(state: &AppState) -> AppResult<UploadPaths> {
+    fs::create_dir_all(&state.config.assets_dir)
+        .await
+        .map_err(|e| AppError::Internal(format!("create assets dir failed: {e}")))?;
+    let assets_dir = fs::canonicalize(&state.config.assets_dir)
+        .await
+        .map_err(|e| AppError::Internal(format!("resolve assets dir failed: {e}")))?;
+    fs::create_dir_all(&state.config.upload_tmp_dir)
+        .await
+        .map_err(|e| AppError::Internal(format!("create upload tmp dir failed: {e}")))?;
+    let tmp_dir = fs::canonicalize(&state.config.upload_tmp_dir)
+        .await
+        .map_err(|e| AppError::Internal(format!("resolve upload tmp dir failed: {e}")))?;
+    let mut paths = UploadPaths::new(assets_dir, tmp_dir);
+    if let Some(legacy_root) = resolve_legacy_upload_root().await {
+        paths = paths.with_fallback_asset_dir(legacy_root);
     }
+    Ok(paths)
 }
 
-/**
- * 验证文件扩展名是否在允许的白名单中
- *
- * @param extension 文件扩展名（不含点）
- * @return true表示允许，false表示拒绝
- */
-fn is_allowed_extension(extension: &str) -> bool {
-    ALLOWED_EXTENSIONS.contains(&extension.to_lowercase().as_str())
-}
-
-/**
- * 验证文件大小是否在允许范围内
- *
- * @param size 文件大小（字节）
- * @return true表示允许，false表示超出限制
- */
-fn is_valid_file_size(size: usize) -> bool {
-    size > 0 && size <= MAX_FILE_SIZE_BYTES
+fn upload_policy(state: &AppState) -> UploadPolicy {
+    UploadPolicy::production(state.config.upload_session_ttl_secs)
 }
 
 pub async fn list_assets(
@@ -156,6 +119,101 @@ pub async fn create_asset(
     Ok((StatusCode::CREATED, Json(asset)))
 }
 
+/* ───────────────────── 分片上传协议 ───────────────────── */
+
+/// 初始化分片上传会话（幂等）。
+pub async fn init_upload_session(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Path(project_id): Path<String>,
+    Json(req): Json<InitSessionReq>,
+) -> AppResult<(StatusCode, Json<SessionView>)> {
+    ensure_project_access(&state, &user_id.0, &project_id).await?;
+    let view = upload_session::init_session(
+        &state.db,
+        &upload_policy(&state),
+        &user_id.0,
+        &project_id,
+        &req,
+        Utc::now(),
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(view)))
+}
+
+/// 查询会话状态与已上传分片（用于刷新后续传）。
+pub async fn get_upload_session(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Path((project_id, session_id)): Path<(String, String)>,
+) -> AppResult<Json<SessionView>> {
+    let view =
+        upload_session::get_session(&state.db, &user_id.0, &project_id, &session_id, Utc::now())
+            .await?;
+    Ok(Json(view))
+}
+
+/// 上传单个分片（原始字节流，幂等重传）。
+pub async fn upload_part_bytes(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Path((project_id, session_id, part_number)): Path<(String, String, u32)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> AppResult<Json<PartAck>> {
+    let paths = upload_paths(&state).await?;
+    let part_sha256 = headers
+        .get("x-part-sha256")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let ack = upload_session::upload_part(
+        &state.db,
+        &paths,
+        &user_id.0,
+        &project_id,
+        &session_id,
+        part_number,
+        &body,
+        part_sha256.as_deref(),
+        Utc::now(),
+    )
+    .await?;
+    Ok(Json(ack))
+}
+
+/// 完成上传：合并、校验、原子入库。
+pub async fn complete_upload_session(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Path((project_id, session_id)): Path<(String, String)>,
+) -> AppResult<(StatusCode, Json<CompleteResp>)> {
+    let paths = upload_paths(&state).await?;
+    let outcome = upload_session::complete_session(
+        &state.db,
+        &paths,
+        &upload_policy(&state),
+        &user_id.0,
+        &project_id,
+        &session_id,
+        Utc::now(),
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(outcome)))
+}
+
+/// 取消上传会话并释放配额预留。
+pub async fn abort_upload_session(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Path((project_id, session_id)): Path<(String, String)>,
+) -> AppResult<StatusCode> {
+    let paths = upload_paths(&state).await?;
+    upload_session::abort_session(&state.db, &paths, &user_id.0, &project_id, &session_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/* ───────────────── 旧 multipart 上传（保持兼容） ───────────────── */
+
 pub async fn upload_asset(
     State(state): State<AppState>,
     Extension(user_id): Extension<UserId>,
@@ -164,42 +222,8 @@ pub async fn upload_asset(
 ) -> AppResult<(StatusCode, Json<Asset>)> {
     ensure_project_access(&state, &user_id.0, &project_id).await?;
 
-    /*
-     * 检查项目级上传配额（文件数量）
-     */
-    let project_asset_count =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM assets WHERE project_id = ?")
-            .bind(&project_id)
-            .fetch_one(&state.db)
-            .await
-            .unwrap_or(0) as u64;
-
-    if project_asset_count >= MAX_ASSETS_PER_PROJECT {
-        return Err(AppError::Validation(
-            format!(
-                "项目资产数量已达上限 ({})，请清理后重试",
-                MAX_ASSETS_PER_PROJECT
-            )
-            .into(),
-        ));
-    }
-
-    /*
-     * 检查用户全局上传配额（总大小）
-     */
-    let user_total_size: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(CAST(json_extract(metadata, '$.sizeBytes') AS INTEGER)), 0)
-         FROM assets a
-         JOIN projects p ON a.project_id = p.id
-         WHERE p.user_id = ?",
-    )
-    .bind(&user_id.0)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(0);
-
     let upload_root = resolve_upload_root(&state).await?;
-    let mut upload_result: Option<(String, String, String, usize)> = None;
+    let mut upload_result: Option<(String, String, String, usize, String)> = None;
 
     while let Some(field) = multipart
         .next_field()
@@ -211,15 +235,14 @@ pub async fn upload_asset(
         }
 
         let original_name = field.file_name().unwrap_or("unnamed").to_string();
-        let safe_name = sanitize_filename(&original_name);
+        let safe_name = upload_session::sanitize_filename(&original_name);
         let file_ext = StdPath::new(&safe_name)
             .extension()
             .and_then(|value| value.to_str())
             .unwrap_or("")
             .to_lowercase();
-        if !is_allowed_extension(&file_ext) {
+        if !upload_session::is_allowed_extension(&file_ext) {
             tracing::warn!(
-                original_name = %original_name,
                 extension = %file_ext,
                 user_id = %user_id.0,
                 "上传被阻止：不允许的文件类型"
@@ -228,7 +251,7 @@ pub async fn upload_asset(
                 format!(
                     "不支持的文件类型: .{}，允许的类型: {}",
                     file_ext,
-                    ALLOWED_EXTENSIONS.join(", ")
+                    upload_session::ALLOWED_EXTENSIONS.join(", ")
                 )
                 .into(),
             ));
@@ -243,9 +266,8 @@ pub async fn upload_asset(
         let saved_path = upload_root.join(&saved_filename);
         if !saved_path.starts_with(&upload_root) {
             tracing::error!(
-                attempted_path = %saved_path.display(),
                 user_id = %user_id.0,
-                "安全警告：检测到路径遍历尝试！"
+                "安全警告：检测到路径遍历尝试"
             );
             return Err(AppError::Validation("非法的文件路径".into()));
         }
@@ -255,92 +277,102 @@ pub async fn upload_asset(
         })?;
 
         let mut file_size = 0usize;
+        let mut hasher = Sha256::new();
         let mut file_field = field;
-        while let Some(chunk) = file_field.chunk().await.map_err(|error| {
-            AppError::Internal(format!("Failed to read upload stream: {}", error))
-        })? {
+        loop {
+            let chunk = match file_field.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(error) => {
+                    drop(output);
+                    let _ = fs::remove_file(&saved_path).await;
+                    return Err(AppError::Internal(format!(
+                        "Failed to read upload stream: {}",
+                        error
+                    )));
+                }
+            };
+            hasher.update(&chunk);
             file_size = file_size.saturating_add(chunk.len());
-            let total_after_upload = user_total_size.saturating_add(file_size as i64);
-            if total_after_upload > MAX_TOTAL_UPLOAD_SIZE_PER_USER as i64 {
-                let _ = fs::remove_file(&saved_path).await;
-                return Err(AppError::Validation(
-                    format!(
-                        "存储空间不足（当前已用 {}MB，本次文件累计 {}MB，上限 {}MB），请清理后重试",
-                        user_total_size / (1024 * 1024),
-                        file_size / (1024 * 1024),
-                        MAX_TOTAL_UPLOAD_SIZE_PER_USER / (1024 * 1024)
-                    )
-                    .into(),
-                ));
-            }
-            if file_size > MAX_FILE_SIZE_BYTES {
+            if file_size > DEFAULT_MAX_FILE_SIZE as usize {
+                drop(output);
                 let _ = fs::remove_file(&saved_path).await;
                 return Err(AppError::Validation(
                     format!(
                         "文件大小无效或超过限制 (当前: {}字节, 最大: {}字节)",
-                        file_size, MAX_FILE_SIZE_BYTES
+                        file_size, DEFAULT_MAX_FILE_SIZE
                     )
                     .into(),
                 ));
             }
-            output
-                .write_all(&chunk)
-                .await
-                .map_err(|error| AppError::Internal(format!("Failed to write file: {}", error)))?;
+            if let Err(error) = output.write_all(&chunk).await {
+                drop(output);
+                let _ = fs::remove_file(&saved_path).await;
+                return Err(AppError::Internal(format!(
+                    "Failed to write file: {}",
+                    error
+                )));
+            }
         }
-        output
-            .flush()
-            .await
-            .map_err(|error| AppError::Internal(format!("Failed to flush file: {}", error)))?;
+        if let Err(error) = output.flush().await {
+            drop(output);
+            let _ = fs::remove_file(&saved_path).await;
+            return Err(AppError::Internal(format!(
+                "Failed to flush file: {}",
+                error
+            )));
+        }
+        drop(output);
 
-        if !is_valid_file_size(file_size) {
+        if file_size == 0 || file_size > DEFAULT_MAX_FILE_SIZE as usize {
             let _ = fs::remove_file(&saved_path).await;
             return Err(AppError::Validation(
                 format!(
                     "文件大小无效或超过限制 (当前: {}字节, 最大: {}字节)",
-                    file_size, MAX_FILE_SIZE_BYTES
+                    file_size, DEFAULT_MAX_FILE_SIZE
                 )
                 .into(),
             ));
         }
 
-        upload_result = Some((
-            safe_name,
-            asset_type,
-            format!("{}{}", LOCAL_UPLOAD_URL_PREFIX, saved_filename),
-            file_size,
-        ));
+        let sha256 = format!("{:x}", hasher.finalize());
+        upload_result = Some((safe_name, asset_type, saved_filename, file_size, sha256));
         break;
     }
 
-    let (safe_name, asset_type, url, file_size) =
+    let (safe_name, asset_type, saved_filename, file_size, sha256) =
         upload_result.ok_or_else(|| AppError::Validation("No file provided".into()))?;
 
-    /*
-     * 构建包含 sizeBytes 的 metadata，确保配额统计准确
-     */
-    let metadata_json = serde_json::json!({
-        "sizeBytes": file_size,
-        "uploadedAt": chrono::Utc::now().to_rfc3339(),
-    })
-    .to_string();
-
-    let asset = repo::create_asset(
+    // 配额事务 + 同用户内容去重 + 资产创建统一收口。
+    let finalize = upload_session::finalize_legacy_upload(
         &state.db,
+        &upload_paths(&state).await?,
+        &upload_policy(&state),
+        &user_id.0,
         &project_id,
         &safe_name,
         &asset_type,
-        &url,
-        Some(&metadata_json),
+        &saved_filename,
+        file_size as u64,
+        &sha256,
+        Utc::now(),
     )
-    .await?;
+    .await;
+
+    let (asset, deduplicated) = match finalize {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let _ = fs::remove_file(upload_root.join(&saved_filename)).await;
+            return Err(error);
+        }
+    };
 
     tracing::info!(
         asset_id = %asset.id,
-        filename = %safe_name,
         size_bytes = file_size,
+        deduplicated,
         user_id = %user_id.0,
-        "资产上传成功"
+        "资产上传成功（multipart 兼容路径）"
     );
 
     Ok((StatusCode::CREATED, Json(asset)))
@@ -490,11 +522,10 @@ pub async fn delete_asset(
             .await?;
     }
 
-    repo::delete_asset(&state.db, &id).await?;
+    // 引用计数式删除：共享物理文件只在最后一个资产删除时落盘清理。
+    let paths = upload_paths(&state).await?;
+    upload_session::release_asset_with_blob_refcount(&state.db, &paths, &asset).await?;
 
-    if let Err(error) = cleanup_local_asset_file(&state, &asset).await {
-        tracing::warn!(asset_id = %asset.id, error = %error, "删除资产记录后清理本地文件失败");
-    }
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -630,41 +661,6 @@ async fn resolve_local_asset_path(state: &AppState, asset: &Asset) -> AppResult<
     }
 
     Err(AppError::NotFound("资产文件不存在".into()))
-}
-
-async fn cleanup_local_asset_file(state: &AppState, asset: &Asset) -> AppResult<()> {
-    let Some(filename) = extract_local_upload_filename(&asset.url) else {
-        return Ok(());
-    };
-    let mut roots = vec![resolve_upload_root(state).await?];
-    if let Some(legacy_root) = resolve_legacy_upload_root().await {
-        if legacy_root != roots[0] {
-            roots.push(legacy_root);
-        }
-    }
-
-    for root in roots {
-        let candidate = root.join(filename);
-        let canonical_path = match fs::canonicalize(&candidate).await {
-            Ok(path) => path,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(AppError::Internal(format!(
-                    "Failed to resolve asset cleanup path: {}",
-                    error
-                )))
-            }
-        };
-        if !canonical_path.starts_with(&root) {
-            return Err(AppError::Forbidden("非法的资产文件路径".into()));
-        }
-        fs::remove_file(canonical_path).await.map_err(|error| {
-            AppError::Internal(format!("Failed to remove asset file: {}", error))
-        })?;
-        return Ok(());
-    }
-
-    Ok(())
 }
 
 async fn resolve_legacy_upload_root() -> Option<PathBuf> {

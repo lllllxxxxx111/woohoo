@@ -158,6 +158,9 @@ async fn main() {
         started_at,
     };
     pipeline::orchestrator::reconcile_pipeline_document_assets(&state).await;
+    if let Ok(paths) = asset::handlers::upload_paths(&state).await {
+        asset::upload_session::start_cleanup_worker(state.db.clone(), paths);
+    }
     ops::monitor::start_background_workers(state.clone());
     ops::dispatcher::start_dispatcher_worker(state.clone());
     pipeline::orchestrator::start_orchestrator_worker(state.clone());
@@ -396,6 +399,21 @@ async fn main() {
             "/api/projects/{project_id}/assets/upload",
             post(asset::handlers::upload_asset),
         )
+        // 大文件分片上传协议（旧的 multipart 上传继续保留）
+        .route(
+            "/api/projects/{project_id}/uploads",
+            post(asset::handlers::init_upload_session),
+        )
+        .route(
+            "/api/projects/{project_id}/uploads/{session_id}",
+            get(asset::handlers::get_upload_session)
+                .delete(asset::handlers::abort_upload_session),
+        )
+        .route(
+            "/api/projects/{project_id}/uploads/{session_id}/complete",
+            post(asset::handlers::complete_upload_session),
+        )
+        .merge(asset::handlers::chunk_upload_routes())
         .route("/api/assets/search", get(asset::handlers::search_assets))
         .route(
             "/api/assets/{id}",

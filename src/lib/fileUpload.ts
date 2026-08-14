@@ -1,78 +1,50 @@
 import type { MessageAttachment } from '../types';
 import { logger } from './logger';
-import { ensureServerSession, fetchServer } from './serverApi';
+import { findResumableUpload, startResumableUpload, type UploadedAsset } from './chunkedUpload';
 
 /**
- * 上传文件到服务器（使用统一API客户端，带鉴权和端口自动切换）
+ * 上传文件到服务器。
+ *
+ * 统一走分片上传客户端：真实字节进度、断点续传、失败重试。
+ * 旧的单次 multipart 接口仍由后端保留兼容，但前端不再使用。
  */
 export async function uploadFile(
   file: File,
   projectId: string,
-  _options?: { onProgress?: (percent: number) => void },
+  options?: { onProgress?: (percent: number) => void },
 ): Promise<MessageAttachment> {
   try {
-    const session = await ensureServerSession(false);
-
-    const formData = new FormData();
-    formData.append('file', file);
-
-    const doUpload = async (token: string) => {
-      return fetchServer(`/api/projects/${projectId}/assets/upload`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-        body: formData,
-      });
-    };
-
-    let response = await doUpload(session.token);
-
-    /**
-     * 401 时自动刷新 token 并重试一次（与 requestApi 行为一致）
-     */
-    if (response.status === 401) {
-      const refreshed = await ensureServerSession(true);
-      response = await doUpload(refreshed.token);
-    }
-
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => '');
-      let errorMessage = `上传失败 (${response.status})`;
-      try {
-        const errorJson = JSON.parse(errorText);
-        if (errorJson.error) {
-          errorMessage = errorJson.error;
-        }
-      } catch {}
-      throw new Error(errorMessage);
-    }
-
-    /**
-     * 后端返回格式：(StatusCode::CREATED, Json(asset))
-     * 直接是 Asset 对象，无 success/data 包装
-     */
-    const asset = await response.json();
-
-    return {
-      url: asset.url || asset.path || '',
-      name: asset.name || file.name,
-      mimeType: asset.mimeType || file.type,
-      sizeBytes: asset.sizeBytes || file.size,
-      thumbnailUrl: asset.thumbnailUrl,
-      source: 'user_upload' as const,
-      sourceMeta: {
-        uploadTime: new Date().toISOString(),
-      },
-    };
+    const resumeRecord = findResumableUpload(projectId, file);
+    const handle = startResumableUpload(file, projectId, {
+      resumeSessionId: resumeRecord?.sessionId,
+      resumeFallbackToNewOnMismatch: true,
+      onProgress: (progress) => options?.onProgress?.(progress.percent),
+    });
+    const asset = await handle.promise;
+    return toAttachment(asset, file);
   } catch (error) {
     logger.error('文件上传错误:', error);
     throw error;
   }
 }
 
+function toAttachment(asset: UploadedAsset, file: File): MessageAttachment {
+  const metadata = (asset.metadata ?? {}) as Record<string, unknown>;
+  const sizeBytes = typeof metadata.sizeBytes === 'number' ? metadata.sizeBytes : file.size;
+  return {
+    url: asset.url || '',
+    name: asset.name || file.name,
+    mimeType: file.type || 'application/octet-stream',
+    sizeBytes,
+    source: 'user_upload' as const,
+    sourceMeta: {
+      uploadTime: new Date().toISOString(),
+    },
+  };
+}
+
 /**
- * 批量上传多个文件
+ * 批量上传多个文件（顺序执行，单文件内部已做分片并发）
  */
 export async function uploadFiles(
   files: File[],
@@ -82,14 +54,10 @@ export async function uploadFiles(
   const results: MessageAttachment[] = [];
 
   for (let i = 0; i < files.length; i++) {
-    options?.onProgress?.(i + 1, files.length);
-    const attachment = await uploadFile(files[i], projectId, {
-      onProgress: options?.onProgress
-        ? (percent) =>
-            options.onProgress!(Math.round(percent * files.length) / 100 + i, files.length)
-        : undefined,
-    });
+    options?.onProgress?.(i, files.length);
+    const attachment = await uploadFile(files[i], projectId);
     results.push(attachment);
+    options?.onProgress?.(i + 1, files.length);
   }
 
   return results;

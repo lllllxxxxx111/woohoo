@@ -188,6 +188,8 @@ woohoo/
 | `JWT_SECRET`              | (必填)                             | JWT 签名密钥 (≥32字符) |
 | `JWT_EXPIRE_HOURS`        | `72`                             | Token 过期时间       |
 | `ASSETS_DIR`              | `./data/assets`                  | 资产存储目录           |
+| `UPLOAD_TMP_DIR`          | `./data/uploads-tmp`             | 未完成分片与合并临时目录     |
+| `UPLOAD_SESSION_TTL_SECS` | `86400`                          | 分片上传会话有效期（秒）     |
 | `AI_BASE_URL`             | `https://api.openai.com`         | AI API 基础 URL    |
 | `AI_API_KEY`              | (可选)                             | AI API 密钥        |
 | `AI_MAX_CONCURRENT_TASKS` | `10`                             | AI 最大并发任务数       |

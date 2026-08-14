@@ -89,14 +89,6 @@ pub async fn update_asset(
         .ok_or_else(|| AppError::NotFound("资产不存在".into()))
 }
 
-pub async fn delete_asset(pool: &SqlitePool, id: &str) -> AppResult<()> {
-    sqlx::query("DELETE FROM assets WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
 pub fn merge_metadata(existing: Option<&str>, patch: &serde_json::Value) -> String {
     let mut merged: serde_json::Map<String, serde_json::Value> = existing
         .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())

@@ -99,7 +99,9 @@ pub async fn init_db(database_url: &str, ai_max_concurrent_tasks: usize) -> Sqli
     pool
 }
 
-async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<String>, sqlx::Error> {
+pub(crate) async fn run_schema_migrations(
+    pool: &SqlitePool,
+) -> Result<Vec<String>, sqlx::Error> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
             version    TEXT PRIMARY KEY NOT NULL,
@@ -189,6 +191,10 @@ async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<String>, sqlx::E
         (
             "029_content_versions",
             include_str!("../migrations/029_content_versions.sql"),
+        ),
+        (
+            "031_chunked_uploads",
+            include_str!("../migrations/031_chunked_uploads.sql"),
         ),
     ] {
         if version == "020_asset_governance" {
@@ -2777,6 +2783,7 @@ mod tests {
                 "028_billing_ref_id_unique".to_string(),
                 "029_content_versions".to_string(),
                 "030_content_version_baseline".to_string(),
+                "031_chunked_uploads".to_string(),
             ]
         );
 

@@ -43,13 +43,41 @@ import {
   type AssetLibraryGroupMode,
   type AssetLibraryScope,
 } from '../../../../lib/assetLibraryView';
+import type { UploadHandle, UploadProgress } from '../../../../lib/chunkedUpload';
 import styles from './AssetLibrary.module.css';
+
+function describeUploadPhase(progress: UploadProgress, paused?: boolean): string {
+  if (paused) return '已暂停';
+  switch (progress.phase) {
+    case 'hashing':
+      return `校验文件指纹 ${progress.hashingPercent}%`;
+    case 'finalizing':
+      return '服务端合并校验中';
+    case 'completed':
+      return '完成';
+    case 'aborted':
+      return '已取消';
+    case 'error':
+      return progress.message ?? '上传失败';
+    default:
+      return progress.failedAttempts > 0 ? `重试中（第 ${progress.failedAttempts} 次）` : '上传中';
+  }
+}
 
 interface UploadingFile {
   id: string;
   name: string;
-  progress: number;
   size: number;
+  /** 真实字节进度（0-100），来自服务端确认 + XHR 在途字节 */
+  percent: number;
+  phase: 'hashing' | 'uploading' | 'finalizing' | 'completed' | 'aborted' | 'error';
+  message?: string;
+  paused?: boolean;
+  handle?: {
+    pause: () => void;
+    resume: () => void;
+    abort: () => Promise<void>;
+  };
 }
 
 type FilterType = AssetLibraryFilterType;
@@ -998,12 +1026,6 @@ export const AssetLibrary: React.FC = () => {
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
   };
 
-  const removeUploadingFiles = (ids: string[]) => {
-    setTimeout(() => {
-      setUploadingFiles((prev) => prev.filter((file) => !ids.includes(file.id)));
-    }, 800);
-  };
-
   const uploadSelectedFiles = useCallback(
     async (files: File[]) => {
       if (!files.length) {
@@ -1019,44 +1041,77 @@ export const AssetLibrary: React.FC = () => {
         return;
       }
 
-      const queue = files.map((file) => ({
-        id: `upload-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      const batchKey =
+        typeof crypto !== 'undefined' && 'randomUUID' in crypto
+          ? crypto.randomUUID()
+          : `upload-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      // id 与 uploadAssets action 的 fileKey 规则保持一致；批次键防止失败行保留后
+      // 再次选择同名同大小文件时出现重复 React key 或串行更新。
+      const queue = files.map((file, index) => ({
+        id: `${batchKey}-${index}-${file.name}-${file.size}`,
         name: file.name,
-        progress: 12,
         size: file.size,
+        percent: 0,
+        phase: 'hashing' as const,
       }));
 
       setUploadingFiles((prev) => [...prev, ...queue]);
       setIsUploading(true);
 
-      const intervals = queue.map((item) =>
-        window.setInterval(() => {
-          setUploadingFiles((prev) =>
-            prev.map((file) =>
-              file.id === item.id
-                ? { ...file, progress: Math.min(file.progress + Math.random() * 16, 92) }
-                : file,
-            ),
-          );
-        }, 180),
-      );
+      const attachHandle = (id: string, handle: UploadHandle) => {
+        setUploadingFiles((prev) =>
+          prev.map((file) => (file.id === id ? { ...file, handle } : file)),
+        );
+      };
 
       try {
-        await uploadAssets(activeState.projectId, files);
-        intervals.forEach((timer) => window.clearInterval(timer));
-        setUploadingFiles((prev) =>
-          prev.map((file) =>
-            queue.some((item) => item.id === file.id) ? { ...file, progress: 100 } : file,
-          ),
+        await uploadAssets(
+          activeState.projectId,
+          files,
+          (fileKey, progress, handle) => {
+            attachHandle(fileKey, handle);
+            setUploadingFiles((prev) =>
+              prev.map((file) =>
+                file.id === fileKey
+                  ? {
+                      ...file,
+                      percent: progress.phase === 'hashing' ? 0 : progress.percent,
+                      phase: progress.phase,
+                      message: describeUploadPhase(progress, false),
+                      paused: false,
+                    }
+                  : file,
+              ),
+            );
+          },
+          batchKey,
         );
-        showToast({
-          type: 'success',
-          title: '上传完成',
-          message: `已保存 ${files.length} 个资产到当前项目。`,
+
+        setUploadingFiles((prev) => {
+          const done = new Set(queue.map((item) => item.id));
+          const failedOrCancelled = prev.filter(
+            (file) => done.has(file.id) && (file.phase === 'error' || file.phase === 'aborted'),
+          );
+          const succeeded = done.size - failedOrCancelled.length;
+          if (succeeded > 0 && failedOrCancelled.length === 0) {
+            showToast({
+              type: 'success',
+              title: '上传完成',
+              message: `已保存 ${succeeded} 个资产到当前项目。`,
+            });
+          } else if (failedOrCancelled.length > 0) {
+            showToast({
+              type: succeeded > 0 ? 'warning' : 'error',
+              title: succeeded > 0 ? '部分文件未上传' : '上传未完成',
+              message: failedOrCancelled.map((file) => file.name).join('、'),
+            });
+          }
+          // 成功的行稍后移除，失败/取消行保留供用户处理。
+          return prev.filter(
+            (file) => !(done.has(file.id) && file.phase !== 'error' && file.phase !== 'aborted'),
+          );
         });
-        removeUploadingFiles(queue.map((item) => item.id));
       } catch (error) {
-        intervals.forEach((timer) => window.clearInterval(timer));
         showToast({
           type: 'error',
           title: '上传失败',
@@ -1068,6 +1123,36 @@ export const AssetLibrary: React.FC = () => {
     },
     [activeState.projectId, showToast, uploadAssets],
   );
+
+  const togglePauseUpload = useCallback((file: UploadingFile) => {
+    if (!file.handle) return;
+    if (file.paused) {
+      file.handle.resume();
+      setUploadingFiles((prev) =>
+        prev.map((item) =>
+          item.id === file.id ? { ...item, paused: false, message: undefined } : item,
+        ),
+      );
+    } else {
+      file.handle.pause();
+      setUploadingFiles((prev) =>
+        prev.map((item) => (item.id === file.id ? { ...item, paused: true } : item)),
+      );
+    }
+  }, []);
+
+  const cancelUpload = useCallback(async (file: UploadingFile) => {
+    await file.handle?.abort();
+    setUploadingFiles((prev) =>
+      prev.map((item) =>
+        item.id === file.id ? { ...item, phase: 'aborted', paused: false } : item,
+      ),
+    );
+  }, []);
+
+  const dismissUploadRow = useCallback((id: string) => {
+    setUploadingFiles((prev) => prev.filter((file) => file.id !== id));
+  }, []);
 
   const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files || []);
@@ -1709,7 +1794,7 @@ export const AssetLibrary: React.FC = () => {
               <UploadCloud size={48} className={styles.dropZoneIcon} />
               <p className={styles.dropZoneText}>拖拽文件到这里上传</p>
               <p className={styles.dropZoneSubtext}>
-                当前实现会把文件内容直接写入项目资产库，刷新后仍能保留。</p>
+                大文件分片上传，支持暂停续传与失败重试；刷新后可重新选择同一文件续传。</p>
               <input
                 type="file"
                 ref={fileInputRef}
@@ -1727,19 +1812,70 @@ export const AssetLibrary: React.FC = () => {
             </div>
             {uploadingFiles.length > 0 && (
               <div className={styles.uploadProgressContainer}>
-                <h3>{isUploading ? '上传中' : '上传完成'}</h3>
-                {uploadingFiles.map((file) => (
-                  <div key={file.id} className={styles.uploadProgressItem}>
-                    <div className={styles.uploadProgressInfo}>
-                      <span className={styles.uploadFileName}>{file.name}</span>
-                      <span className={styles.uploadFileSize}>{formatFileSize(file.size)}</span>
+                <h3>
+                  {uploadingFiles.some(
+                    (file) => file.phase === 'error' || file.phase === 'aborted',
+                  )
+                    ? '上传状态'
+                    : isUploading
+                      ? '上传中（真实字节进度）'
+                      : '上传完成'}
+                </h3>
+                {uploadingFiles.map((file) => {
+                  const isTerminal =
+                    file.phase === 'completed' ||
+                    file.phase === 'error' ||
+                    file.phase === 'aborted';
+                  const canControl =
+                    file.handle && !isTerminal && file.phase !== 'finalizing';
+                  return (
+                    <div key={file.id} className={styles.uploadProgressItem}>
+                      <div className={styles.uploadProgressInfo}>
+                        <span className={styles.uploadFileName}>{file.name}</span>
+                        <span className={styles.uploadFileSize}>
+                          {formatFileSize(file.size)}
+                        </span>
+                      </div>
+                      <div className={styles.progressBar}>
+                        <div
+                          className={styles.progressFill}
+                          style={{ width: `${file.percent}%` }}
+                        />
+                      </div>
+                      <span className={styles.progressText}>{Math.round(file.percent)}%</span>
+                      <span className={styles.progressText}>
+                        {file.paused ? '已暂停' : (file.message ?? '')}
+                      </span>
+                      {canControl && (
+                        <>
+                          <button
+                            type="button"
+                            className={styles.uploadSelectButton}
+                            onClick={() => togglePauseUpload(file)}
+                          >
+                            {file.paused ? '继续' : '暂停'}
+                          </button>
+                          <button
+                            type="button"
+                            className={styles.uploadSelectButton}
+                            onClick={() => void cancelUpload(file)}
+                          >
+                            取消
+                          </button>
+                        </>
+                      )}
+                      {isTerminal && file.phase !== 'completed' && (
+                        <button
+                          type="button"
+                          className={styles.uploadSelectButton}
+                          onClick={() => dismissUploadRow(file.id)}
+                        >
+                          关闭
+                        </button>
+                      )}
                     </div>
-                    <div className={styles.progressBar}>
-                      <div className={styles.progressFill} style={{ width: `${file.progress}%` }} />
-                    </div>
-                    <span className={styles.progressText}>{Math.round(file.progress)}%</span>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

@@ -1,7 +1,18 @@
 import { createContext } from 'react';
 import type { SendAiMessageOptions, SendMessageResult } from '../store';
 import type { SaveScriptOptions, SaveStoryboardOptions } from '../lib/serverApi';
+import type { UploadHandle, UploadProgress } from '../lib/chunkedUpload';
 import type { Asset, ChatSession, Message, Project, Script, Storyboard } from '../types';
+
+/**
+ * 单个文件上传进度回调：fileKey 由调用方生成，用于定位 UI 行；
+ * handle 可用于暂停 / 继续 / 取消。
+ */
+export type UploadProgressCallback = (
+  fileKey: string,
+  progress: UploadProgress,
+  handle: UploadHandle,
+) => void;
 
 export type AppActions = {
   createProject: (name: string) => Promise<Project>;
@@ -27,8 +38,16 @@ export type AppActions = {
     newContent: string,
   ) => Promise<void>;
   addMessage: (projectId: string | null, chatId: string | null, message: Message) => void;
-  uploadAssets: (projectId: string, files: File[]) => Promise<Asset[]>;
-  updateAsset: (assetId: string, input: Partial<Pick<Asset, 'name' | 'type' | 'url' | 'metadata'>>) => Promise<Asset>;
+  uploadAssets: (
+    projectId: string,
+    files: File[],
+    onProgress?: UploadProgressCallback,
+    batchKey?: string,
+  ) => Promise<Asset[]>;
+  updateAsset: (
+    assetId: string,
+    input: Partial<Pick<Asset, 'name' | 'type' | 'url' | 'metadata'>>,
+  ) => Promise<Asset>;
   deleteAsset: (assetId: string) => Promise<void>;
   saveScript: (
     projectId: string,
