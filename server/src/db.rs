@@ -196,6 +196,10 @@ pub(crate) async fn run_schema_migrations(
             "031_chunked_uploads",
             include_str!("../migrations/031_chunked_uploads.sql"),
         ),
+        (
+            "032_upload_parts_cleanup",
+            include_str!("../migrations/032_upload_parts_cleanup.sql"),
+        ),
     ] {
         if version == "020_asset_governance" {
             let tables = list_all_tables(pool)
@@ -2784,6 +2788,7 @@ mod tests {
                 "029_content_versions".to_string(),
                 "030_content_version_baseline".to_string(),
                 "031_chunked_uploads".to_string(),
+                "032_upload_parts_cleanup".to_string(),
             ]
         );
 

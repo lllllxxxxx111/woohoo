@@ -397,7 +397,12 @@ async fn main() {
         )
         .route(
             "/api/projects/{project_id}/assets/upload",
-            post(asset::handlers::upload_asset),
+            // 旧 multipart 路径：axum 默认 body 上限只有 2MB，会在流式读取
+            // 50MB 文件之前就拒绝；显式放宽到处理器自身的上限（外加表单字段
+            // 与 multipart 边界的余量）。
+            post(asset::handlers::upload_asset).layer(axum::extract::DefaultBodyLimit::max(
+                asset::upload_session::DEFAULT_MAX_FILE_SIZE as usize + 8 * 1024 * 1024,
+            )),
         )
         // 大文件分片上传协议（旧的 multipart 上传继续保留）
         .route(

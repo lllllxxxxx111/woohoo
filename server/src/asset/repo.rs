@@ -89,6 +89,18 @@ pub async fn update_asset(
         .ok_or_else(|| AppError::NotFound("资产不存在".into()))
 }
 
+/// metadata 中由服务端维护的专有键：用户提供的创建/更新负载不允许写入，
+/// 否则配额统计（SUM($.sizeBytes)）可被伪造绕过或恶意锁死。
+pub const SERVER_OWNED_METADATA_KEYS: &[&str] = &["sizeBytes", "sha256"];
+
+pub fn strip_server_owned_metadata_keys(value: &mut serde_json::Value) {
+    if let Some(object) = value.as_object_mut() {
+        for key in SERVER_OWNED_METADATA_KEYS {
+            object.remove(*key);
+        }
+    }
+}
+
 pub fn merge_metadata(existing: Option<&str>, patch: &serde_json::Value) -> String {
     let mut merged: serde_json::Map<String, serde_json::Value> = existing
         .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
@@ -97,6 +109,10 @@ pub fn merge_metadata(existing: Option<&str>, patch: &serde_json::Value) -> Stri
 
     if let Some(patch_object) = patch.as_object() {
         for (key, value) in patch_object {
+            if SERVER_OWNED_METADATA_KEYS.contains(&key.as_str()) {
+                // 服务端专有键只能由服务端代码（上传完成、生成产物落库等）改写。
+                continue;
+            }
             merged.insert(key.clone(), value.clone());
         }
     }
@@ -453,5 +469,28 @@ mod tests {
 
         assert_eq!(empty["tags"], serde_json::json!(["x"]));
         assert_eq!(invalid["tags"], serde_json::json!(["x"]));
+    }
+
+    #[test]
+    fn merge_metadata_ignores_server_owned_keys_in_patch() {
+        let existing = r#"{"sizeBytes":1024,"sha256":"abc","favorite":true}"#;
+        let patch = serde_json::json!({
+            "sizeBytes": 0,
+            "sha256": "forged",
+            "favorite": false
+        });
+        let merged: serde_json::Value =
+            serde_json::from_str(&merge_metadata(Some(existing), &patch)).unwrap();
+
+        assert_eq!(merged["sizeBytes"], serde_json::json!(1024));
+        assert_eq!(merged["sha256"], serde_json::json!("abc"));
+        assert_eq!(merged["favorite"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn strip_server_owned_metadata_keys_removes_quota_fields() {
+        let mut value = serde_json::json!({"sizeBytes": 0, "sha256": "x", "prompt": "p"});
+        strip_server_owned_metadata_keys(&mut value);
+        assert_eq!(value, serde_json::json!({"prompt": "p"}));
     }
 }

@@ -33,10 +33,20 @@ use super::{
 
 /// 分片上传 HTTP body 上限：单片最大 8MiB，留 1MiB 头部余量；
 /// 超出由 `expected_part_size` 精确校验拒绝。
+///
+/// 分片 PUT 挂专用限流（1200 次/分钟）：大文件合规上传本身就需要成百上千个
+/// 分片请求，走通用 100 次/分钟额度必然被 429 打断（全局限流已在中间件里
+/// 豁免本路径，见 `middleware::should_skip_rate_limit`）。
 pub fn chunk_upload_routes() -> Router<AppState> {
+    let upload_rate_limiter = crate::middleware::create_upload_rate_limiter();
     Router::new().route(
         "/api/projects/{project_id}/uploads/{session_id}/parts/{part_number}",
-        put(upload_part_bytes).layer(DefaultBodyLimit::max(MAX_CHUNK_SIZE as usize + 1024 * 1024)),
+        put(upload_part_bytes)
+            .layer(DefaultBodyLimit::max(MAX_CHUNK_SIZE as usize + 1024 * 1024))
+            .layer(axum::middleware::from_fn_with_state(
+                upload_rate_limiter,
+                crate::middleware::rate_limit_middleware,
+            )),
     )
 }
 
@@ -105,7 +115,13 @@ pub async fn create_asset(
     ensure_project_access(&state, &user_id.0, &project_id).await?;
     validate_asset_fields(&req.name, &req.asset_type, &req.url)?;
 
-    let metadata = req.metadata.as_ref().map(|value| value.to_string());
+    let metadata = req
+        .metadata
+        .map(|mut value| {
+            // sizeBytes/sha256 等服务端专有键不接受客户端初始值（配额统计依赖它们）。
+            repo::strip_server_owned_metadata_keys(&mut value);
+            value.to_string()
+        });
     let asset = repo::create_asset(
         &state.db,
         &project_id,

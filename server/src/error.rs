@@ -1,4 +1,4 @@
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
@@ -280,7 +280,15 @@ impl IntoResponse for AppError {
             "retryable": retryable
         });
 
-        (status, Json(body)).into_response()
+        let mut response = (status, Json(body)).into_response();
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            // 滑动窗口以分钟计；提示客户端至少等一个窗口再重试，
+            // 分片上传客户端会读取该头决定退避时长。
+            if let Ok(value) = HeaderValue::from_str("60") {
+                response.headers_mut().insert("retry-after", value);
+            }
+        }
+        response
     }
 }
 

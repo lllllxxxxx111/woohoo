@@ -126,6 +126,17 @@ pub fn create_auth_rate_limiter() -> Arc<RateLimiter> {
 }
 
 /**
+ * 大文件分片上传的专用限流器
+ *
+ * 一个合规的大文件上传本身就需要几百上千个分片 PUT（例如 400MB / 4MB 分片
+ * = 100 个请求），若计入通用 100 次/分钟额度，合规上传必然被 429 打断。
+ * 分片路由要求登录且校验会话归属，滥用面小，单独放宽到 1200 次/分钟。
+ */
+pub fn create_upload_rate_limiter() -> Arc<RateLimiter> {
+    Arc::new(RateLimiter::new(60, 1200))
+}
+
+/**
  * 为每个请求注入 request_id，并回写到响应头
  */
 pub async fn request_id_middleware(mut request: Request, next: Next) -> Response {
@@ -208,6 +219,9 @@ fn should_skip_rate_limit(request: &Request) -> bool {
     request.method() == Method::OPTIONS
         || path == "/health"
         || is_generation_rate_limit_exempt(request.method(), path)
+        // 分片 PUT 走 upload_rate_limit_middleware 的专用额度，
+        // 不再计入通用 100 次/分钟（否则大文件合规上传也会被拦）。
+        || is_chunk_part_upload(request.method(), path)
         // SSE 长连接流端点不受限流
         || path.starts_with("/api/ai/tasks/stream")
         || path.starts_with("/api/collaboration/events/stream")
@@ -240,6 +254,23 @@ fn is_generation_rate_limit_exempt(method: &Method, path: &str) -> bool {
             "/api/image-gen/generations" | "/api/video-gen/generations"
         ) || path.starts_with("/api/image-gen/generations/")
             || path.starts_with("/api/video-gen/generations/"))
+}
+
+/// 分片 PUT 端点：/api/projects/{project_id}/uploads/{session_id}/parts/{part_number}
+fn is_chunk_part_upload(method: &Method, path: &str) -> bool {
+    if method != Method::PUT {
+        return false;
+    }
+    let segments: Vec<&str> = path.split('/').collect();
+    // ["", "api", "projects", p, "uploads", s, "parts", n]
+    segments.len() == 8
+        && segments[1] == "api"
+        && segments[2] == "projects"
+        && segments[4] == "uploads"
+        && segments[6] == "parts"
+        && !segments[3].is_empty()
+        && !segments[5].is_empty()
+        && !segments[7].is_empty()
 }
 
 /**
@@ -307,6 +338,40 @@ mod tests {
         assert!(should_skip_rate_limit(&request(
             Method::GET,
             "/api/video-gen/generations/video-123"
+        )));
+    }
+
+    #[test]
+    fn skips_global_rate_limit_for_chunk_part_uploads() {
+        assert!(should_skip_rate_limit(&request(
+            Method::PUT,
+            "/api/projects/p-1/uploads/s-1/parts/42"
+        )));
+    }
+
+    #[test]
+    fn does_not_skip_rate_limit_for_upload_control_endpoints() {
+        // init / status / complete / abort 仍走通用额度
+        assert!(!should_skip_rate_limit(&request(
+            Method::POST,
+            "/api/projects/p-1/uploads"
+        )));
+        assert!(!should_skip_rate_limit(&request(
+            Method::GET,
+            "/api/projects/p-1/uploads/s-1"
+        )));
+        assert!(!should_skip_rate_limit(&request(
+            Method::POST,
+            "/api/projects/p-1/uploads/s-1/complete"
+        )));
+        assert!(!should_skip_rate_limit(&request(
+            Method::DELETE,
+            "/api/projects/p-1/uploads/s-1"
+        )));
+        // 非分片路径不受分片豁免影响
+        assert!(!should_skip_rate_limit(&request(
+            Method::PUT,
+            "/api/projects/p-1/uploads/s-1/parts"
         )));
     }
 }

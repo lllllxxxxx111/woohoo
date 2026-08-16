@@ -142,6 +142,10 @@ async fn acquire_completion_lock(
     session_id: &str,
 ) -> AppResult<CompletionLock> {
     let path = paths.session_dir(session_id).join("__complete_lock__");
+    // 锁文件写入持有者令牌并回读校验：stale 清理者可能在我们 create_new 成功
+    // 之后删除的是“别人刚重建的新锁”，令牌不一致即说明锁已易主，必须让位。
+    // 最终的并发安全由 finalize 事务内的状态复查兜底。
+    let token = Uuid::new_v4().to_string();
     for attempt in 0..2 {
         match fs::OpenOptions::new()
             .write(true)
@@ -149,7 +153,31 @@ async fn acquire_completion_lock(
             .open(&path)
             .await
         {
-            Ok(_) => return Ok(CompletionLock { path }),
+            Ok(mut file) => {
+                use tokio::io::AsyncWriteExt;
+                if let Err(error) = file.write_all(token.as_bytes()).await {
+                    let _ = fs::remove_file(&path).await;
+                    return Err(AppError::Internal(format!(
+                        "write upload completion lock failed: {error}"
+                    )));
+                }
+                drop(file);
+                match fs::read_to_string(&path).await {
+                    Ok(content) if content == token => return Ok(CompletionLock { path }),
+                    Ok(_) => {
+                        // 文件已被他人重建，当前持有者不是我们；不能删除它。
+                        return Err(AppError::Conflict(
+                            "上传会话正在完成，请稍后重试".into(),
+                        ));
+                    }
+                    Err(_) => {
+                        // 锁文件已消失（被 stale 清理者移除），视为竞争失败。
+                        return Err(AppError::Conflict(
+                            "上传会话正在完成，请稍后重试".into(),
+                        ));
+                    }
+                }
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
                 let stale = fs::metadata(&path)
                     .await
@@ -238,6 +266,7 @@ pub struct CleanupReport {
     pub removed_session_dirs: usize,
     pub removed_orphan_dirs: usize,
     pub pruned_terminal_sessions: usize,
+    pub pruned_part_rows: usize,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -435,8 +464,9 @@ pub async fn init_session(
             return Ok(existing.id);
         }
 
+        // 与 verify_quota_with_conn 相同：MAX(...) 钳制负的 sizeBytes 脏数据。
         let used_bytes: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(CAST(json_extract(a.metadata, '$.sizeBytes') AS INTEGER)), 0)
+            "SELECT COALESCE(SUM(MAX(CAST(json_extract(a.metadata, '$.sizeBytes') AS INTEGER), 0)), 0)
              FROM assets a
              JOIN projects p ON a.project_id = p.id
              WHERE p.user_id = ?",
@@ -625,6 +655,19 @@ pub async fn upload_part(
     sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
 
     let result: AppResult<()> = async {
+        // 上面的状态校验与这里之间存在多个 await（哈希、落盘）；迟到/重复的
+        // 分片请求必须在写事务内复查状态，否则会把 completed/aborted 会话
+        // 复活成 uploading，导致配额被双倍占用、幂等 complete 失效。
+        let current_status: String = sqlx::query_scalar("SELECT status FROM upload_sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_one(&mut *conn)
+            .await?;
+        if !is_active(&current_status) {
+            return Err(AppError::Conflict(format!(
+                "上传会话状态为 {current_status}，无法继续上传分片"
+            )));
+        }
+
         sqlx::query(
             "INSERT INTO upload_session_parts (session_id, part_number, size_bytes, sha256)
              VALUES (?, ?, ?, ?)
@@ -649,7 +692,7 @@ pub async fn upload_part(
         sqlx::query(
             "UPDATE upload_sessions
              SET bytes_received = ?, status = 'uploading', updated_at = ?
-             WHERE id = ?",
+             WHERE id = ? AND status IN ('initiated', 'uploading')",
         )
         .bind(received)
         .bind(now.to_rfc3339())
@@ -754,6 +797,30 @@ pub async fn complete_session(
     // 对同机多进程同样有效；调用结束或异常展开时由 Drop 自动释放。
     let _completion_lock = acquire_completion_lock(paths, session_id).await?;
 
+    // 拿到锁后重读会话：上面的状态/完整性校验发生在锁之前，期间可能已有
+    // 并发请求完成了同一会话（其收尾会删除分片文件）。不重读会导致本请求
+    // 对已删除的分片做合并，最后还把 completed 覆写成 failed。
+    let row = load_owned_session(pool, user_id, project_id, session_id).await?;
+    if row.status == "completed" {
+        let asset = load_completed_asset(pool, &row).await?;
+        let view = session_view(pool, &row).await?;
+        return Ok(CompleteResp {
+            session: view,
+            asset,
+            deduplicated: false,
+        });
+    }
+    if !is_active(&row.status) {
+        return Err(AppError::Conflict(format!(
+            "上传会话状态为 {}，无法完成",
+            row.status
+        )));
+    }
+    if row.expires_at <= now.to_rfc3339() {
+        mark_expired(pool, session_id).await?;
+        return Err(AppError::NotFound("上传会话已过期".into()));
+    }
+
     // 顺序合并并计算最终哈希（合并中间态仍在临时目录）。
     paths.ensure().await?;
     let merged_path = paths.merged_path(session_id);
@@ -789,8 +856,11 @@ pub async fn complete_session(
 
     match &outcome {
         Ok(_) => {
-            // 成功后清理会话临时目录。
+            // 成功后清理会话临时目录与分片行（行保留短期幂等用途）。
             remove_session_dir(paths, session_id).await;
+            if let Err(error) = delete_session_parts(pool, session_id).await {
+                tracing::warn!(error = %error, "清理已完成会话的分片行失败");
+            }
         }
         Err(error) => {
             // 最终落盘或数据库收口失败通常是可恢复的瞬时错误。保留分片与
@@ -819,12 +889,35 @@ pub async fn abort_session(
         return Err(AppError::Conflict("已完成的上传会话不能取消".into()));
     }
     if row.status != "aborted" {
-        sqlx::query("UPDATE upload_sessions SET status = 'aborted', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?")
-            .bind(session_id)
-            .execute(pool)
-            .await?;
+        // 仅允许从活跃态迁移到 aborted；rows_affected == 0 说明读取之后有并发
+        // 请求把会话推入了终态（典型：complete 刚提交）。
+        let updated = sqlx::query(
+            "UPDATE upload_sessions SET status = 'aborted', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+             WHERE id = ? AND status IN ('initiated', 'uploading')",
+        )
+        .bind(session_id)
+        .execute(pool)
+        .await?;
+        if updated.rows_affected() == 0 {
+            let fresh = load_owned_session(pool, user_id, project_id, session_id).await?;
+            if fresh.status == "completed" {
+                return Err(AppError::Conflict("已完成的上传会话不能取消".into()));
+            }
+        }
     }
     remove_session_dir(paths, session_id).await;
+    if let Err(error) = delete_session_parts(pool, session_id).await {
+        tracing::warn!(error = %error, "清理已取消会话的分片行失败");
+    }
+    Ok(())
+}
+
+/// 删除某个会话的全部分片行。终态会话的 parts 行没有读取方。
+async fn delete_session_parts(pool: &SqlitePool, session_id: &str) -> AppResult<()> {
+    sqlx::query("DELETE FROM upload_session_parts WHERE session_id = ?")
+        .bind(session_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -866,6 +959,22 @@ pub async fn cleanup_expired(
         remove_session_dir(paths, id).await;
     }
 
+    // 2b. 终态会话的 parts 行已无读取方（续传只面向活跃会话），及时删除，
+    //     防止 upload_session_parts 随时间无限膨胀（每会话可达数百行）。
+    let removed_parts = sqlx::query(
+        "DELETE FROM upload_session_parts
+         WHERE session_id IN (
+             SELECT id FROM upload_sessions
+             WHERE status IN ('completed', 'aborted', 'failed', 'expired')
+         )",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if removed_parts > 0 {
+        report.pruned_part_rows = removed_parts as usize;
+    }
+
     // 3. 清理一天前的终态会话行（completed 行只用于短期幂等返回）。
     let cutoff = (now - Duration::seconds(86_400)).to_rfc3339();
     let pruned = sqlx::query(
@@ -903,15 +1012,50 @@ pub async fn cleanup_expired(
         }
     }
 
+    // 5. 正式资产目录中残留的 .upload-*.tmp：finalize 在“复制完成、改名前/
+    //    提交前”崩溃时留下。改名窗口只有毫秒级，超过 1 小时的必然是残留。
+    sweep_stale_upload_tmp_files(&paths.assets_dir).await;
+
     if report.expired_sessions > 0 || report.removed_orphan_dirs > 0 {
         tracing::info!(
             expired_sessions = report.expired_sessions,
             removed_orphan_dirs = report.removed_orphan_dirs,
             pruned_terminal_sessions = report.pruned_terminal_sessions,
+            pruned_part_rows = report.pruned_part_rows,
             "分片上传清理完成"
         );
     }
     Ok(report)
+}
+
+/// 删除资产目录中超过 1 小时的 `.upload-*.tmp` 暂存文件（finalize 崩溃残留）。
+async fn sweep_stale_upload_tmp_files(assets_dir: &Path) {
+    const TMP_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
+    let Ok(mut entries) = fs::read_dir(assets_dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|v| v.to_str()) else {
+            continue;
+        };
+        if !(name.starts_with(".upload-") && name.ends_with(".tmp")) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .await
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= TMP_STALE_AFTER);
+        if stale {
+            let _ = fs::remove_file(&path).await;
+        }
+    }
 }
 
 /// 启动进程内清理任务：启动时先跑一次，之后每小时一次。
@@ -1290,8 +1434,10 @@ async fn verify_quota_with_conn(
     file_size: u64,
     exclude_session_id: Option<&str>,
 ) -> AppResult<()> {
+    // MAX(...) 钳制负值：历史脏数据里若存在负的 sizeBytes，直接 as u64 会变成
+    // 极大数把用户永久锁死（配额校验永远不过）。
     let used_bytes: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(CAST(json_extract(a.metadata, '$.sizeBytes') AS INTEGER)), 0)
+        "SELECT COALESCE(SUM(MAX(CAST(json_extract(a.metadata, '$.sizeBytes') AS INTEGER), 0)), 0)
          FROM assets a JOIN projects p ON a.project_id = p.id
          WHERE p.user_id = ?",
     )
@@ -1458,6 +1604,12 @@ async fn finalize_completed_session(
     let project_id = row.project_id.clone();
     let session_id = row.id.clone();
 
+    // 文件复制（可达几十 MB 的 fs::copy）在打开写事务之前完成：BEGIN IMMEDIATE
+    // 持有 SQLite 全库写锁，锁内拷贝会把期间所有并发写（包括其他用户的每个
+    // 分片事务）全部阻塞，而 busy_timeout 只有 5 秒。复制先落到目标目录中的
+    // 临时名，事务内只做同目录原子 rename 与 SQL，耗时与锁持有时间都可忽略。
+    let staged = stage_upload_in_assets_dir(paths, merged_path).await?;
+
     let mut conn = pool.acquire().await?;
     sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
 
@@ -1465,6 +1617,20 @@ async fn finalize_completed_session(
     // 必须删除它，同时保留 merged_path 与全部分片供客户端直接重试 complete。
     let mut placed_target: Option<PathBuf> = None;
     let result: AppResult<(Asset, bool, Option<PathBuf>)> = async {
+        // 事务内复查会话状态：完成锁的 stale-break 竞态理论上可能让两个
+        // finalize 并行推进，这里保证只有第一个能把活跃会话推进到 completed，
+        // 不会出现双份资产 / 引用计数被加两次。
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM upload_sessions WHERE id = ?")
+                .bind(&session_id)
+                .fetch_one(&mut *conn)
+                .await?;
+        if !is_active(&status) {
+            return Err(AppError::Conflict(format!(
+                "上传会话状态为 {status}，无法完成"
+            )));
+        }
+
         verify_quota_with_conn(
             &mut conn,
             policy,
@@ -1485,7 +1651,8 @@ async fn finalize_completed_session(
         .await?;
 
         let (url, deduplicated, staging_to_remove) = if let Some((existing_filename,)) = existing {
-            // 同用户同内容：复用物理文件，引用计数 +1，丢弃本次合并文件。
+            // 同用户同内容：复用物理文件，引用计数 +1。预复制的 staged 文件
+            // 已无用处，提交后删除；会话目录（含 merged）由调用方统一清理。
             sqlx::query(
                 "UPDATE asset_blobs SET ref_count = ref_count + 1
                  WHERE sha256 = ? AND user_id = ?",
@@ -1497,14 +1664,18 @@ async fn finalize_completed_session(
             (
                 format!("/uploads/{existing_filename}"),
                 true,
-                Some(merged_path.to_path_buf()),
+                Some(staged.to_path_buf()),
             )
         } else {
-            // 新内容：源文件仍保留在会话目录；目标目录内先复制到临时名，
-            // 再原子改名。这样数据库提交失败时可以回滚目标文件并原会话重试。
+            // 新内容：staged 与目标在同一目录，rename 原子且瞬时。数据库提交
+            // 失败时回滚目标文件，会话保持 active，客户端可直接重试 complete。
             let stored_filename = format!("{}.{}", Uuid::new_v4(), ext);
             let target = paths.asset_path(&stored_filename);
-            copy_into_place_preserving_source(merged_path, &target).await?;
+            if let Err(error) = fs::rename(&staged, &target).await {
+                return Err(AppError::Internal(format!(
+                    "finalize upload target failed: {error}"
+                )));
+            }
             placed_target = Some(target);
             sqlx::query(
                 "INSERT INTO asset_blobs (sha256, user_id, stored_filename, size_bytes, ref_count)
@@ -1516,11 +1687,7 @@ async fn finalize_completed_session(
             .bind(row.file_size)
             .execute(&mut *conn)
             .await?;
-            (
-                format!("/uploads/{stored_filename}"),
-                false,
-                Some(merged_path.to_path_buf()),
-            )
+            (format!("/uploads/{stored_filename}"), false, None)
         };
 
         let metadata = serde_json::json!({
@@ -1542,10 +1709,10 @@ async fn finalize_completed_session(
         )
         .await?;
 
-        sqlx::query(
+        let completed = sqlx::query(
             "UPDATE upload_sessions
              SET status = 'completed', asset_id = ?, completed_at = ?, updated_at = ?
-             WHERE id = ?",
+             WHERE id = ? AND status IN ('initiated', 'uploading')",
         )
         .bind(&asset.id)
         .bind(now.to_rfc3339())
@@ -1553,6 +1720,11 @@ async fn finalize_completed_session(
         .bind(&session_id)
         .execute(&mut *conn)
         .await?;
+        if completed.rows_affected() == 0 {
+            return Err(AppError::Conflict(
+                "上传会话状态已变更，无法完成".into(),
+            ));
+        }
 
         Ok((asset, deduplicated, staging_to_remove))
     }
@@ -1570,6 +1742,7 @@ async fn finalize_completed_session(
                 if let Some(target) = placed_target.as_deref() {
                     let _ = fs::remove_file(target).await;
                 }
+                let _ = fs::remove_file(&staged).await;
                 return Err(error.into());
             }
         },
@@ -1579,6 +1752,7 @@ async fn finalize_completed_session(
             if let Some(target) = placed_target.as_deref() {
                 let _ = fs::remove_file(target).await;
             }
+            let _ = fs::remove_file(&staged).await;
             return Err(error);
         }
     };
@@ -1599,17 +1773,17 @@ async fn finalize_completed_session(
     })
 }
 
-/// 将已校验的合并文件复制到正式目录，同时保留源文件直到数据库事务提交。
-/// 复制先写入与目标同目录的临时文件，完成后再 rename，避免暴露半文件。
-async fn copy_into_place_preserving_source(from: &Path, to: &Path) -> AppResult<()> {
-    let parent = to
-        .parent()
-        .ok_or_else(|| AppError::Internal("upload target has no parent directory".into()))?;
-    fs::create_dir_all(parent)
+/// 将已校验的合并文件复制到正式资产目录中的临时名（`.upload-{uuid}.tmp`）。
+/// 复制过程不持有任何数据库事务；调用方在事务内把它原子 rename 成最终文件。
+/// 复制完成后校验字节数，防止半截文件进入 rename 阶段。
+async fn stage_upload_in_assets_dir(paths: &UploadPaths, from: &Path) -> AppResult<PathBuf> {
+    fs::create_dir_all(&paths.assets_dir)
         .await
-        .map_err(|e| AppError::Internal(format!("create target dir failed: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("create assets dir failed: {e}")))?;
 
-    let staging = parent.join(format!(".upload-{}.tmp", Uuid::new_v4()));
+    let staging = paths
+        .assets_dir
+        .join(format!(".upload-{}.tmp", Uuid::new_v4()));
     let copied = match fs::copy(from, &staging).await {
         Ok(copied) => copied,
         Err(error) => {
@@ -1629,17 +1803,13 @@ async fn copy_into_place_preserving_source(from: &Path, to: &Path) -> AppResult<
             "copy upload into target directory was incomplete: expected {expected}, copied {copied}"
         )));
     }
-    if let Err(error) = fs::rename(&staging, to).await {
-        let _ = fs::remove_file(&staging).await;
-        return Err(AppError::Internal(format!(
-            "finalize upload target failed: {error}"
-        )));
-    }
-    Ok(())
+    Ok(staging)
 }
 
 async fn mark_expired(pool: &SqlitePool, session_id: &str) -> AppResult<()> {
-    sqlx::query("UPDATE upload_sessions SET status = 'expired', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?")
+    // 仅从活跃态迁移：并发 complete 刚提交的 completed 会话不允许被改写，
+    // 否则资产已建好而会话却显示 expired，幂等 complete 会被永久破坏。
+    sqlx::query("UPDATE upload_sessions SET status = 'expired', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ? AND status IN ('initiated', 'uploading')")
         .bind(session_id)
         .execute(pool)
         .await?;
@@ -1647,7 +1817,8 @@ async fn mark_expired(pool: &SqlitePool, session_id: &str) -> AppResult<()> {
 }
 
 async fn mark_failed(pool: &SqlitePool, session_id: &str, reason: &str) -> AppResult<()> {
-    sqlx::query("UPDATE upload_sessions SET status = 'failed', last_error = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?")
+    // 同 mark_expired：终态不可逆，failed 不能覆盖 completed/aborted/expired。
+    sqlx::query("UPDATE upload_sessions SET status = 'failed', last_error = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ? AND status IN ('initiated', 'uploading')")
         .bind(reason)
         .bind(session_id)
         .execute(pool)
