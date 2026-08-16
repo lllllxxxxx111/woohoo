@@ -178,7 +178,42 @@ pub async fn commit_version_tx(
     .fetch_one(&mut **tx)
     .await?;
 
+    // 保留上限：版本快照是全量内容，自动保存类客户端会无限追加。
+    // 每次新增版本后在同一事务内裁掉超出上限的最旧版本（当前版本号只增
+    // 不减，MAX 与去重判断只看最新行，裁剪不影响任何并发语义）。
+    prune_versions_tx(tx, &input.project_id, input.content_type).await?;
+
     Ok(CommitOutcome::Created(created))
+}
+
+/// 每个 (project, content_type) 保留的最大版本数。与列表接口的单页上限
+/// （limit 钳制到 200）对齐；超出的最旧版本在每次新增时被裁剪。
+pub const MAX_RETAINED_VERSIONS: i64 = 200;
+
+/// 裁剪超出保留上限的最旧版本（必须在写事务内调用，与新增版本原子提交）。
+async fn prune_versions_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    project_id: &str,
+    content_type: ContentType,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "DELETE FROM content_versions
+         WHERE project_id = ? AND content_type = ?
+           AND version NOT IN (
+               SELECT version FROM content_versions
+               WHERE project_id = ? AND content_type = ?
+               ORDER BY version DESC
+               LIMIT ?
+           )",
+    )
+    .bind(project_id)
+    .bind(content_type.as_str())
+    .bind(project_id)
+    .bind(content_type.as_str())
+    .bind(MAX_RETAINED_VERSIONS)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 /// 便捷入口：自行开启事务提交版本（用于不需要与其他写操作合并的场景）
@@ -678,5 +713,119 @@ mod tests {
             .await
             .expect("script latest");
         assert_eq!(script_latest.expect("script latest exists").version, 1);
+    }
+
+    /// 提交超过保留上限的版本后，只保留最近 MAX_RETAINED_VERSIONS 个，
+    /// 且最新版本（含内容去重的基线）永不被裁剪。
+    #[tokio::test]
+    async fn commits_beyond_retention_cap_prune_oldest_versions() {
+        let pool = setup_pool().await;
+        seed_project(&pool, "p1", "user-1").await;
+
+        let total = MAX_RETAINED_VERSIONS + 20;
+        let mut latest_version = 0i64;
+        for seq in 0..total {
+            let outcome = commit_version(
+                &pool,
+                &input(
+                    "p1",
+                    ContentType::Script,
+                    &format!("内容-{seq}"),
+                    // 内容每次变化，标题保持一致，避免触发去重
+                    ConcurrencyToken::None,
+                    "manual",
+                ),
+            )
+            .await
+            .expect("commit version");
+            latest_version = outcome.version_row().version;
+        }
+        assert_eq!(latest_version, total);
+
+        let count = count_versions(&pool, "p1", ContentType::Script)
+            .await
+            .expect("count versions");
+        assert_eq!(count, MAX_RETAINED_VERSIONS);
+
+        // 保留的一定是最新的一段：MIN(version) = total - cap + 1
+        let (min_kept, max_kept): (i64, i64) =
+            sqlx::query_as("SELECT MIN(version), MAX(version) FROM content_versions")
+                .fetch_one(&pool)
+                .await
+                .expect("min/max versions");
+        assert_eq!(max_kept, total);
+        assert_eq!(min_kept, total - MAX_RETAINED_VERSIONS + 1);
+
+        // 版本号不回退：裁剪后再提交，新版本号仍是 max + 1
+        let next = commit_version(
+            &pool,
+            &input(
+                "p1",
+                ContentType::Script,
+                "再保存一次",
+                ConcurrencyToken::None,
+                "manual",
+            ),
+        )
+        .await
+        .expect("commit after prune");
+        assert_eq!(next.version_row().version, total + 1);
+    }
+
+    /// 保留上限按 (project, content_type) 独立计数，互不影响。
+    #[tokio::test]
+    async fn retention_cap_is_per_project_and_content_type() {
+        let pool = setup_pool().await;
+        seed_project(&pool, "p1", "user-1").await;
+        seed_project(&pool, "p2", "user-1").await;
+
+        for seq in 0..(MAX_RETAINED_VERSIONS + 5) {
+            commit_version(
+                &pool,
+                &input(
+                    "p1",
+                    ContentType::Script,
+                    &format!("p1-script-{seq}"),
+                    ConcurrencyToken::None,
+                    "manual",
+                ),
+            )
+            .await
+            .expect("commit p1 script");
+        }
+
+        let p1_script = count_versions(&pool, "p1", ContentType::Script)
+            .await
+            .expect("count p1 script");
+        assert_eq!(p1_script, MAX_RETAINED_VERSIONS);
+
+        // p1 的 storyboard 与 p2 的 script 未受影响
+        commit_version(
+            &pool,
+            &input(
+                "p1",
+                ContentType::Storyboard,
+                "{\"lines\":[]}",
+                ConcurrencyToken::BaseVersion(0),
+                "manual",
+            ),
+        )
+        .await
+        .expect("commit p1 storyboard");
+        let p1_storyboard = count_versions(&pool, "p1", ContentType::Storyboard)
+            .await
+            .expect("count p1 storyboard");
+        assert_eq!(p1_storyboard, 1);
+
+        commit_version(
+            &pool,
+            &input("p2", ContentType::Script, "A", ConcurrencyToken::BaseVersion(0), "manual"),
+        )
+        .await
+        .expect("commit p2 script");
+        let p2_script = count_versions(&pool, "p2", ContentType::Script)
+            .await
+            .expect("count p2 script");
+        assert_eq!(p2_script, 1);
     }
 }

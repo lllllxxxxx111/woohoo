@@ -242,6 +242,33 @@ pub async fn upsert_storyboard_tx(
     Ok(record)
 }
 
+/// 既有分镜行的“身份”摘要（id + 定位内容），用于给缺 ID 的输入行回填稳定 ID。
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct StoryboardLineIdentity {
+    pub id: String,
+    pub scene_number: i64,
+    pub description: String,
+    pub duration: i64,
+}
+
+/// 按展示顺序读取项目当前分镜各行的身份摘要。
+pub async fn list_line_identities(
+    pool: &SqlitePool,
+    project_id: &str,
+) -> AppResult<Vec<StoryboardLineIdentity>> {
+    let rows = sqlx::query_as::<_, StoryboardLineIdentity>(
+        "SELECT sl.id, sl.scene_number, sl.description, sl.duration
+         FROM storyboard_lines sl
+         INNER JOIN storyboards s ON s.id = sl.storyboard_id
+         WHERE s.project_id = ?
+         ORDER BY sl.sort_order ASC, sl.scene_number ASC, sl.id ASC",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 pub async fn delete_by_project(pool: &SqlitePool, project_id: &str) -> AppResult<()> {
     sqlx::query("DELETE FROM storyboards WHERE project_id = ?")
         .bind(project_id)

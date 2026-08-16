@@ -120,6 +120,11 @@ npm run dev:client
 npm run dev:all
 ```
 
+> **Git Bash 用户提示**：直接运行 `cargo build` 可能因缺少 MSVC 的
+> `INCLUDE`/`LIB` 环境变量而编译失败（cl.exe 报"不包括路径集"）。
+> 请改用 `./scripts/cargo.sh <cargo 参数>`，它会自动探测本机 MSVC 与
+> Windows SDK 并注入环境后再执行 cargo。
+
 ### 5. 访问应用
 
 打开浏览器访问 <http://127.0.0.1:1420>

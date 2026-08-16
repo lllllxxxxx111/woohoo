@@ -85,16 +85,20 @@ pub async fn upsert_storyboard(
 
     // 提前解析行 ID，保证“版本快照”和“当前分镜表”使用同一组 ID，
     // 从而让相同内容的重复保存可以被内容哈希去重。
+    // 缺 ID 的输入行优先继承“同位置且内容一致”的既有行 ID：否则每次保存
+    // 都会生成全新 UUID，快照哈希永远不同，自动保存类客户端每次都会追加
+    // 一个内容相同的新版本（版本表无限增长，diff 也全是 remove+add）。
+    let existing_identities = repo::list_line_identities(&state.db, &project_id).await?;
     let resolved_inputs: Vec<StoryboardLineInput> = req
         .lines
         .iter()
-        .map(|line| StoryboardLineInput {
-            id: Some(
-                line.id
-                    .clone()
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(|| Uuid::new_v4().to_string()),
-            ),
+        .enumerate()
+        .map(|(index, line)| StoryboardLineInput {
+            id: Some(resolve_storyboard_line_id(
+                line,
+                index,
+                &existing_identities,
+            )),
             scene_number: line.scene_number,
             description: line.description.trim().to_string(),
             duration: line.duration,
@@ -166,9 +170,32 @@ pub async fn delete_storyboard(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// 为输入行确定行 ID：显式提供的 ID 优先；缺失/空白时，若同一位置存在
+/// 内容一致的既有行则继承其 ID（保证重复保存快照稳定）；否则生成新 UUID。
+fn resolve_storyboard_line_id(
+    line: &StoryboardLineInput,
+    index: usize,
+    existing: &[repo::StoryboardLineIdentity],
+) -> String {
+    if let Some(provided) = line.id.as_deref() {
+        let trimmed = provided.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Some(existing_line) = existing.get(index) {
+        if existing_line.scene_number == line.scene_number
+            && existing_line.description == line.description.trim()
+            && existing_line.duration == line.duration
+        {
+            return existing_line.id.clone();
+        }
+    }
+    Uuid::new_v4().to_string()
+}
+
 /// 从当前分镜构建快照（用于无版本行时计算内容哈希）
-fn build_snapshot_from_storyboard(storyboard: &Storyboard) -> StoryboardSnapshot {
-    StoryboardSnapshot {
+fn build_snapshot_from_storyboard(storyboard: &Storyboard) -> StoryboardSnapshot {    StoryboardSnapshot {
         lines: storyboard
             .lines
             .iter()
@@ -260,4 +287,79 @@ fn escape_markdown_table_cell(value: &str) -> String {
         .replace('\n', "<br>")
         .trim()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input_line(id: Option<&str>, scene_number: i64, description: &str, duration: i64) -> StoryboardLineInput {
+        StoryboardLineInput {
+            id: id.map(str::to_string),
+            scene_number,
+            description: description.to_string(),
+            duration,
+            asset_ids: Vec::new(),
+        }
+    }
+
+    fn identity(id: &str, scene_number: i64, description: &str, duration: i64) -> repo::StoryboardLineIdentity {
+        repo::StoryboardLineIdentity {
+            id: id.to_string(),
+            scene_number,
+            description: description.to_string(),
+            duration,
+        }
+    }
+
+    /// 显式提供的 id（含去除空白后仍非空的）必须原样保留。
+    #[test]
+    fn resolve_line_id_prefers_provided_id() {
+        let existing = vec![identity("old-1", 1, "描述", 3)];
+        let resolved = resolve_storyboard_line_id(
+            &input_line(Some(" client-id "), 1, "描述", 3),
+            0,
+            &existing,
+        );
+        assert_eq!(resolved, "client-id");
+    }
+
+    /// 缺 id 时，同位置内容一致的既有行 id 被继承：同样的无 id 请求重复
+    /// 保存会得到相同 id，快照哈希稳定，内容去重才能命中。
+    #[test]
+    fn resolve_line_id_adopts_matching_existing_identity() {
+        let existing = vec![
+            identity("keep-1", 1, "第一镜", 3),
+            identity("keep-2", 2, "第二镜", 5),
+        ];
+        let first = resolve_storyboard_line_id(&input_line(None, 1, " 第一镜 ", 3), 0, &existing);
+        let second = resolve_storyboard_line_id(&input_line(None, 2, "第二镜", 5), 1, &existing);
+        assert_eq!(first, "keep-1");
+        assert_eq!(second, "keep-2");
+    }
+
+    /// 同位置但内容已变的行不继承旧 id（避免把“修改”伪装成“未变”），
+    /// 也不影响其他位置行的继承。
+    #[test]
+    fn resolve_line_id_generates_new_id_when_content_changed() {
+        let existing = vec![identity("old-1", 1, "旧描述", 3)];
+        let resolved =
+            resolve_storyboard_line_id(&input_line(None, 1, "新描述", 3), 0, &existing);
+        assert_ne!(resolved, "old-1");
+        assert!(!resolved.is_empty());
+    }
+
+    /// 没有任何既有行（首次创建）时生成新 id；空白 id 视为缺失。
+    #[test]
+    fn resolve_line_id_generates_new_id_without_existing_rows() {
+        let resolved = resolve_storyboard_line_id(&input_line(None, 1, "描述", 3), 0, &[]);
+        assert!(!resolved.is_empty());
+
+        let blank = resolve_storyboard_line_id(
+            &input_line(Some("   "), 1, "描述", 3),
+            0,
+            &[identity("old-1", 1, "描述", 3)],
+        );
+        assert_eq!(blank, "old-1");
+    }
 }
