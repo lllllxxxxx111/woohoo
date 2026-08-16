@@ -1343,6 +1343,16 @@ export async function fetchServer(
     markServerBaseUrlReachable(baseUrl);
     return response;
   } catch (error) {
+    // 超时/调用方取消（AbortError）时，服务端可能已经收到并处理完该请求；
+    // fallback baseURL 只是同一服务端的别名，非幂等方法换地址重发会重复执行
+    // （例如 POST 恢复版本会追加两条恢复版本）。仅只读方法允许换地址重试；
+    // 网络层失败（服务端不可达，请求必然未被处理）不受此限制。
+    const isAbortError = error instanceof DOMException && error.name === 'AbortError';
+    const method = (init.method ?? 'GET').toUpperCase();
+    const isReadOnly = method === 'GET' || method === 'HEAD';
+    if (isAbortError && !isReadOnly) {
+      throw error;
+    }
     for (const fallbackBaseUrl of getLoopbackFallbackBaseUrls(baseUrl)) {
       try {
         const fallbackResponse = await executeFetch(`${fallbackBaseUrl}${path}`);

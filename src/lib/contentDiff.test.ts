@@ -58,6 +58,33 @@ describe('diffScriptText', () => {
     expect(ops).toContain('modify_to');
   });
 
+  it('连续多行替换按文档顺序 FIFO 配对且行号升序', () => {
+    const result = diffScriptText('A\nB\nC', 'X\nY\nZ');
+    expect(result.modified).toBe(3);
+    expect(result.added).toBe(0);
+    expect(result.removed).toBe(0);
+    const pairs = result.entries
+      .filter((entry) => entry.op === 'modify_from' || entry.op === 'modify_to')
+      .map((entry) => ({ op: entry.op, text: entry.text, old: entry.oldLine, new: entry.newLine }));
+    // A→X、B→Y、C→Z 顺序配对（LIFO 实现会错配成 C→X、B→Y、A→Z）
+    expect(pairs).toEqual([
+      { op: 'modify_from', text: 'A', old: 1, new: undefined },
+      { op: 'modify_to', text: 'X', old: undefined, new: 1 },
+      { op: 'modify_from', text: 'B', old: 2, new: undefined },
+      { op: 'modify_to', text: 'Y', old: undefined, new: 2 },
+      { op: 'modify_from', text: 'C', old: 3, new: undefined },
+      { op: 'modify_to', text: 'Z', old: undefined, new: 3 },
+    ]);
+  });
+
+  it('仅换行符风格不同的相同文本不显示为整行修改', () => {
+    const result = diffScriptText('keep\r\nA', 'keep\nA');
+    expect(result.modified).toBe(0);
+    expect(result.added).toBe(0);
+    expect(result.removed).toBe(0);
+    expect(result.unchanged).toBe(2);
+  });
+
   it('首次保存（从空到有内容）全部计为新增', () => {
     const result = diffScriptText('', '第一场\n第二场');
     expect(result.added).toBe(2);

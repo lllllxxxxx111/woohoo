@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { History, RefreshCw, X } from 'lucide-react';
 import {
   getContentVersion,
@@ -14,8 +14,35 @@ import {
   type ContentDiffResult,
   type StoryboardLineView,
 } from '../../../../lib/contentDiff';
+import { shouldPromptCopyDraft } from '../../../../lib/versionConflict';
 import { useToast } from '../../../../context/useToast';
 import styles from './ContentVersionHistory.module.css';
+
+const PAGE_SIZE = 50;
+
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // 忽略，回退到 execCommand
+  }
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const succeeded = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    return succeeded;
+  } catch {
+    return false;
+  }
+}
 
 const SOURCE_LABELS: Record<string, string> = {
   manual: '手动',
@@ -86,6 +113,10 @@ export interface ContentVersionHistoryProps {
   currentVersion?: number;
   /** 恢复成功后的回调（父组件据此重新加载当前内容） */
   onRestored?: () => void;
+  /** 编辑器当前是否有未保存的修改；恢复版本会丢弃这些修改，需要用户确认 */
+  hasUnsavedChanges?: boolean;
+  /** 未保存草稿的文本形式，用于恢复前自动复制兜底 */
+  draftText?: string;
 }
 
 export const ContentVersionHistory: React.FC<ContentVersionHistoryProps> = ({
@@ -93,6 +124,8 @@ export const ContentVersionHistory: React.FC<ContentVersionHistoryProps> = ({
   contentType,
   currentVersion,
   onRestored,
+  hasUnsavedChanges = false,
+  draftText = '',
 }) => {
   const { showToast } = useToast();
   const [open, setOpen] = useState(false);
@@ -104,26 +137,89 @@ export const ContentVersionHistory: React.FC<ContentVersionHistoryProps> = ({
   const [diff, setDiff] = useState<ContentDiffResult | null>(null);
   const [diffMeta, setDiffMeta] = useState<{ base: number; target: number } | null>(null);
   const [busy, setBusy] = useState(false);
+  // 请求序号：并发/乱序返回时只有最新一次请求的结果可以落进状态，
+  // 防止旧响应覆盖新响应（例如连点刷新、或切换项目后旧请求才返回）。
+  const loadSeqRef = useRef(0);
 
   const loadVersions = useCallback(async () => {
+    const seq = ++loadSeqRef.current;
     setLoading(true);
     setLoadError(null);
+    setPreview(null);
+    setDiff(null);
+    setDiffMeta(null);
     try {
-      const result = await listContentVersions(projectId, contentType, 50, 0);
+      const result = await listContentVersions(projectId, contentType, PAGE_SIZE, 0);
+      if (seq !== loadSeqRef.current) {
+        return;
+      }
       setVersions(result.versions);
       setTotal(result.total);
     } catch (error) {
+      if (seq !== loadSeqRef.current) {
+        return;
+      }
+      // 项目切换后旧项目的列表不能残留：失败也要清空，否则“恢复”会把
+      // 旧项目的版本号作用到新项目上（版本号在不同项目间会重叠）。
+      setVersions([]);
+      setTotal(0);
       setLoadError(error instanceof Error ? error.message : '版本历史加载失败');
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current) {
+        setLoading(false);
+      }
     }
   }, [projectId, contentType]);
+
+  const loadMore = useCallback(async () => {
+    if (loading || versions.length >= total) {
+      return;
+    }
+    const seq = ++loadSeqRef.current;
+    setLoading(true);
+    try {
+      const result = await listContentVersions(projectId, contentType, PAGE_SIZE, versions.length);
+      if (seq !== loadSeqRef.current) {
+        return;
+      }
+      setVersions((previous) => {
+        const seen = new Set(previous.map((item) => item.version));
+        return [...previous, ...result.versions.filter((item) => !seen.has(item.version))];
+      });
+      setTotal(result.total);
+    } catch (error) {
+      if (seq !== loadSeqRef.current) {
+        return;
+      }
+      showToast({
+        type: 'error',
+        title: '加载失败',
+        message: error instanceof Error ? error.message : '无法加载更多版本',
+      });
+    } finally {
+      if (seq === loadSeqRef.current) {
+        setLoading(false);
+      }
+    }
+  }, [loading, versions.length, total, projectId, contentType, showToast]);
 
   useEffect(() => {
     if (open) {
       void loadVersions();
     }
   }, [open, loadVersions]);
+
+  // 项目/内容类型变化时立即清空旧数据，避免旧项目版本残留可操作。
+  useEffect(() => {
+    loadSeqRef.current += 1;
+    setVersions([]);
+    setTotal(0);
+    setLoadError(null);
+    setPreview(null);
+    setDiff(null);
+    setDiffMeta(null);
+    setLoading(false);
+  }, [projectId, contentType]);
 
   const handlePreview = useCallback(
     async (version: number) => {
@@ -183,9 +279,27 @@ export const ContentVersionHistory: React.FC<ContentVersionHistoryProps> = ({
 
   const handleRestore = useCallback(
     async (version: number) => {
+      // 恢复会用历史内容替换编辑器内容，未保存的草稿若不处理会直接丢失。
+      if (hasUnsavedChanges) {
+        let draftCopied = false;
+        if (shouldPromptCopyDraft(draftText)) {
+          draftCopied = await copyTextToClipboard(draftText);
+        }
+        const message = draftCopied
+          ? `当前有未保存的修改，恢复 v${version} 会用历史内容替换它们（草稿已复制到剪贴板）。确定继续吗？`
+          : `当前有未保存的修改，恢复 v${version} 会用历史内容替换它们且无法撤销。建议先手动复制草稿。确定继续吗？`;
+        if (!window.confirm(message)) {
+          return;
+        }
+      }
       setBusy(true);
       try {
-        await restoreContentVersion(projectId, contentType, version);
+        // 携带已知当前版本做乐观并发校验：他人（或另一窗口）已保存更新时
+        // 服务端返回 409，而不是静默覆盖掉更新的内容。
+        const knownCurrent = currentVersion ?? versions[0]?.version;
+        await restoreContentVersion(projectId, contentType, version, {
+          baseVersion: knownCurrent,
+        });
         showToast({
           type: 'success',
           title: '已恢复',
@@ -201,8 +315,11 @@ export const ContentVersionHistory: React.FC<ContentVersionHistoryProps> = ({
           showToast({
             type: 'warning',
             title: '恢复冲突',
-            message: `当前内容已更新到 v${error.currentVersion}，请刷新后重试。`,
+            message: `当前内容已更新到 v${error.currentVersion}，已刷新列表，请基于新状态重试。`,
           });
+          // 服务器内容已前进：刷新列表与父组件，让用户基于新状态决定。
+          await loadVersions();
+          onRestored?.();
         } else {
           showToast({
             type: 'error',
@@ -214,7 +331,17 @@ export const ContentVersionHistory: React.FC<ContentVersionHistoryProps> = ({
         setBusy(false);
       }
     },
-    [projectId, contentType, showToast, loadVersions, onRestored],
+    [
+      projectId,
+      contentType,
+      currentVersion,
+      versions,
+      hasUnsavedChanges,
+      draftText,
+      showToast,
+      loadVersions,
+      onRestored,
+    ],
   );
 
   const renderDiff = () => {
@@ -295,7 +422,12 @@ export const ContentVersionHistory: React.FC<ContentVersionHistoryProps> = ({
             <span>
               共 {total} 个版本{currentVersion ? ` · 当前 v${currentVersion}` : ''}
             </span>
-            <button className={styles.miniBtn} onClick={() => void loadVersions()}>
+            <button
+              className={styles.miniBtn}
+              onClick={() => void loadVersions()}
+              disabled={loading}
+              title={loading ? '正在加载…' : '重新加载版本列表'}
+            >
               <RefreshCw size={12} /> 刷新
             </button>
           </div>
@@ -351,6 +483,16 @@ export const ContentVersionHistory: React.FC<ContentVersionHistoryProps> = ({
               </div>
             ))}
           </div>
+
+          {versions.length < total && (
+            <button
+              className={styles.miniBtn}
+              onClick={() => void loadMore()}
+              disabled={loading || busy}
+            >
+              加载更多（已显示 {versions.length}/{total}）
+            </button>
+          )}
 
           {preview && (
             <div className={styles.detail}>

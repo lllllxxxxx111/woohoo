@@ -26,6 +26,7 @@ import {
 } from '../../../../lib/serverApi';
 import {
   applyConflictResolution,
+  shouldPromptCopyDraft,
   toConflictState,
   type SaveConflictState,
 } from '../../../../lib/versionConflict';
@@ -120,7 +121,13 @@ export const StoryboardArea: React.FC = () => {
         baseVersion,
         source: 'manual',
       });
-      setBaseVersion(saved.version ?? baseVersion);
+      if (typeof saved.version === 'number') {
+        setBaseVersion(saved.version);
+      } else {
+        // 响应缺 version 时主动对齐，避免后续保存持续 409。
+        const latest = await getServerStoryboard(activeState.projectId).catch(() => null);
+        setBaseVersion(latest?.version ?? 0);
+      }
       setConflict(null);
       showToast({
         type: 'success',
@@ -201,7 +208,13 @@ export const StoryboardArea: React.FC = () => {
         baseVersion,
         source: 'manual',
       });
-      setBaseVersion(saved.version ?? baseVersion);
+      if (typeof saved.version === 'number') {
+        setBaseVersion(saved.version);
+      } else {
+        // 响应缺 version 时主动对齐，避免后续保存持续 409。
+        const latest = await getServerStoryboard(activeState.projectId).catch(() => null);
+        setBaseVersion(latest?.version ?? 0);
+      }
       setConflict(null);
       showToast({
         type: 'success',
@@ -228,9 +241,17 @@ export const StoryboardArea: React.FC = () => {
     }
   };
 
-  /** 冲突时：加载服务器最新版（替换当前草稿，请先复制草稿） */
+  /** 冲突时：加载服务器最新版（替换当前草稿前先确认并自动复制草稿兜底） */
   const handleLoadServerLatest = useCallback(async () => {
     if (!activeState.projectId) {
+      return;
+    }
+    const draftJson = JSON.stringify(lines, null, 2);
+    const draftCopied = shouldPromptCopyDraft(draftJson) ? await copyTextToClipboard(draftJson) : false;
+    const message = draftCopied
+      ? '将丢弃当前分镜草稿并加载服务器最新版（草稿已复制为 JSON 到剪贴板）。确定继续吗？'
+      : '将丢弃当前分镜草稿并加载服务器最新版，该操作无法撤销。确定继续吗？';
+    if (!window.confirm(message)) {
       return;
     }
     try {
@@ -278,10 +299,19 @@ export const StoryboardArea: React.FC = () => {
       }
       setConflict(null);
       void refreshWorkspace('storyboard version restored');
-    } catch {
-      // 忽略，版本面板已自行刷新
+    } catch (error) {
+      // 恢复已在服务端生效，但本地拉取失败：必须提示，否则编辑器会带着
+      // 旧内容与旧 baseVersion 继续编辑，下一次保存必然出现混乱的 409。
+      showToast({
+        type: 'error',
+        title: '同步恢复结果失败',
+        message:
+          error instanceof Error && error.message
+            ? `服务器已恢复，但拉取最新分镜失败：${error.message}。请手动刷新后再编辑。`
+            : '服务器已恢复，但拉取最新分镜失败，请手动刷新后再编辑。',
+      });
     }
-  }, [activeState.projectId, refreshWorkspace]);
+  }, [activeState.projectId, refreshWorkspace, showToast]);
 
   /** 图生图：基于当前镜头描述生成画面 */
   const handleImageToImage = useCallback(async (line: StoryboardLine) => {
@@ -383,6 +413,10 @@ export const StoryboardArea: React.FC = () => {
               contentType="storyboard"
               currentVersion={activeStoryboard?.version}
               onRestored={() => void handleVersionRestored()}
+              hasUnsavedChanges={
+                JSON.stringify(lines) !== JSON.stringify(activeStoryboard?.lines || [])
+              }
+              draftText={JSON.stringify(lines, null, 2)}
             />
           )}
         </div>

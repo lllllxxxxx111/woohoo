@@ -13,6 +13,7 @@ import {
 } from '../../../../lib/serverApi';
 import {
   applyConflictResolution,
+  shouldPromptCopyDraft,
   toConflictState,
   type SaveConflictState,
 } from '../../../../lib/versionConflict';
@@ -82,7 +83,14 @@ export const ScriptEditor: React.FC = () => {
         baseVersion,
         source: 'manual',
       });
-      setBaseVersion(savedScript.version ?? baseVersion);
+      if (typeof savedScript.version === 'number') {
+        setBaseVersion(savedScript.version);
+      } else {
+        // 旧服务端/网关可能不回传 version：保留旧 baseVersion 会让后续每次
+        // 保存都 409。主动拉一次当前文档重新对齐。
+        const latest = await getServerScript(activeState.projectId).catch(() => null);
+        setBaseVersion(latest?.version ?? 0);
+      }
       setConflict(null);
       showToast({
         type: 'success',
@@ -110,9 +118,16 @@ export const ScriptEditor: React.FC = () => {
     }
   };
 
-  /** 冲突时：加载服务器最新版（会替换当前草稿，请先复制草稿） */
+  /** 冲突时：加载服务器最新版（替换当前草稿前先确认并自动复制草稿兜底） */
   const handleLoadServerLatest = useCallback(async () => {
     if (!activeState.projectId) {
+      return;
+    }
+    const draftCopied = shouldPromptCopyDraft(content) ? await copyTextToClipboard(content) : false;
+    const message = draftCopied
+      ? '将丢弃当前草稿并加载服务器最新版（草稿已复制到剪贴板）。确定继续吗？'
+      : '将丢弃当前草稿并加载服务器最新版，该操作无法撤销。确定继续吗？';
+    if (!window.confirm(message)) {
       return;
     }
     try {
@@ -159,10 +174,19 @@ export const ScriptEditor: React.FC = () => {
       }
       setConflict(null);
       void refreshWorkspace('script version restored');
-    } catch {
-      // 忽略，版本面板已自行刷新
+    } catch (error) {
+      // 恢复已在服务端生效，但本地拉取失败：必须让用户知道编辑器内容
+      // 已过期，否则会带着旧内容与旧 baseVersion 继续编辑并触发混乱的 409。
+      showToast({
+        type: 'error',
+        title: '同步恢复结果失败',
+        message:
+          error instanceof Error && error.message
+            ? `服务器已恢复，但拉取最新内容失败：${error.message}。请手动刷新后再编辑。`
+            : '服务器已恢复，但拉取最新内容失败，请手动刷新后再编辑。',
+      });
     }
-  }, [activeState.projectId, refreshWorkspace]);
+  }, [activeState.projectId, refreshWorkspace, showToast]);
 
   /** 智能续写：调用 AI 任务为当前剧本生成续写内容 */
   const handleSmartContinue = useCallback(async () => {
@@ -249,6 +273,8 @@ export const ScriptEditor: React.FC = () => {
               contentType="script"
               currentVersion={activeScript?.version}
               onRestored={() => void handleVersionRestored()}
+              hasUnsavedChanges={content !== (activeScript?.content || '')}
+              draftText={content}
             />
           )}
         </div>

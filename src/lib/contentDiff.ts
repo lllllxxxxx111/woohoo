@@ -135,8 +135,12 @@ export function diffScriptText(base: string, target: string): ScriptDiffResult {
     };
   }
 
-  let baseLines = base.length === 0 ? [] : base.split('\n');
-  let targetLines = target.length === 0 ? [] : target.split('\n');
+  // 行切分同时归一化换行：来自粘贴/AI 输出的 CRLF 与库内 LF 混存时，
+  // 若保留 \r，完全相同的行也会被判为“整行修改”，整份 diff 全是噪音。
+  const splitLines = (text: string): string[] =>
+    text.length === 0 ? [] : text.split(/\r\n|\r|\n/);
+  let baseLines = splitLines(base);
+  let targetLines = splitLines(target);
   let truncated = false;
   if (baseLines.length > MAX_DIFF_LINES || targetLines.length > MAX_DIFF_LINES) {
     truncated = true;
@@ -168,7 +172,9 @@ export function diffScriptText(base: string, target: string): ScriptDiffResult {
     if (item.type === 'remove') {
       removes.push({ text: item.text, oldLine: item.oldLine });
     } else if (item.type === 'add') {
-      const from = removes.pop();
+      // FIFO 配对（shift 而非 pop）：连续多行修改时按文档顺序配对
+      // 第 1 个旧行 ↔ 第 1 个新行；LIFO 会把行序倒过来，输出错乱的 diff。
+      const from = removes.shift();
       if (from) {
         paired.push({
           type: 'modify',
@@ -216,9 +222,13 @@ export function diffScriptText(base: string, target: string): ScriptDiffResult {
       }
     } else {
       modified += 1;
-      if (entries.length < MAX_DIFF_ENTRIES) {
+      // modify 会产出两条条目（from/to），预留检查按 +2 计，
+      // 否则上限会被超出 1 条。
+      if (entries.length + 2 <= MAX_DIFF_ENTRIES) {
         entries.push({ op: 'modify_from', text: truncatePreview(item.fromText), oldLine: item.oldLine });
         entries.push({ op: 'modify_to', text: truncatePreview(item.toText), newLine: item.newLine });
+      } else {
+        truncated = true;
       }
     }
   }
@@ -226,6 +236,10 @@ export function diffScriptText(base: string, target: string): ScriptDiffResult {
   if (entries.length >= MAX_DIFF_ENTRIES) {
     truncated = true;
   }
+
+  const summary = `新增 ${added} 行，删除 ${removed} 行，修改 ${modified} 行，未变 ${unchanged} 行${
+    truncated ? '（内容过大，仅统计前 1200 行/前 400 条，未显示的部分可能还有差异）' : ''
+  }`;
 
   return {
     kind: 'script',
@@ -235,7 +249,7 @@ export function diffScriptText(base: string, target: string): ScriptDiffResult {
     unchanged,
     truncated,
     entries,
-    summary: `新增 ${added} 行，删除 ${removed} 行，修改 ${modified} 行，未变 ${unchanged} 行`,
+    summary,
   };
 }
 
