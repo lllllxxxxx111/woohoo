@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::VecDeque;
 
 use super::model::{ContentType, StoryboardSnapshot};
 
@@ -105,6 +106,13 @@ pub fn diff_script(base_content: &str, target_content: &str) -> ContentDiff {
 
     let ops = lcs_diff(&base_lines, &target_lines);
 
+    // Rust 的 lines() 会忽略“末尾有没有换行符”这一差异（"A" 与 "A\n" 行数
+    // 相同）。字符串确实不同而行完全一致时，唯一可能的差异就是末尾换行，
+    // 显式标注出来，否则 diff 会声称“无变化”但内容其实不同。
+    let trailing_newline_only = !truncated
+        && base_lines == target_lines
+        && base_content != target_content;
+
     // 将紧邻的 remove+add 组合识别为 modify
     let grouped = group_modifications(ops);
 
@@ -151,7 +159,9 @@ pub fn diff_script(base_content: &str, target_content: &str) -> ContentDiff {
             }
             DiffItem::Modify(from_text, to_text, old_line, new_line) => {
                 modified += 1;
-                if entries.len() < MAX_HUNK_ENTRIES {
+                // modify 产出两条条目（from/to），容量检查按 +2 计，
+                // 否则上限会溢出 1 条。
+                if entries.len() + 2 <= MAX_HUNK_ENTRIES {
                     entries.push(ScriptDiffEntry {
                         op: "modify_from".to_string(),
                         text: truncate_preview(from_text),
@@ -164,6 +174,8 @@ pub fn diff_script(base_content: &str, target_content: &str) -> ContentDiff {
                         old_line: None,
                         new_line: Some(*new_line),
                     });
+                } else {
+                    truncated = true;
                 }
             }
         }
@@ -173,10 +185,16 @@ pub fn diff_script(base_content: &str, target_content: &str) -> ContentDiff {
         truncated = true;
     }
 
-    let summary = format!(
+    let mut summary = format!(
         "新增 {} 行，删除 {} 行，修改 {} 行，未变 {} 行",
         added, removed, modified, unchanged
     );
+    if trailing_newline_only {
+        summary.push_str("（差异仅为末尾换行符）");
+    }
+    if truncated {
+        summary.push_str("（内容过大，仅统计前 1200 行/前 400 条，未显示部分可能还有差异）");
+    }
 
     ContentDiff::Script(ScriptDiff {
         added,
@@ -377,33 +395,34 @@ fn lcs_diff(base_lines: &[&str], target_lines: &[&str]) -> Vec<DiffItem> {
 /// 将紧邻的 Remove…Add… 段配对为 Modify，提升可读性
 fn group_modifications(items: Vec<DiffItem>) -> Vec<DiffItem> {
     let mut output: Vec<DiffItem> = Vec::new();
-    let mut removes: Vec<(String, usize)> = Vec::new();
-
-    let flush_removes = |output: &mut Vec<DiffItem>, removes: &mut Vec<(String, usize)>| {
-        for (text, old_line) in removes.drain(..) {
-            output.push(DiffItem::Remove(text, old_line));
-        }
-    };
+    let mut removes: VecDeque<(String, usize)> = VecDeque::new();
 
     for item in items {
         match item {
             DiffItem::Remove(text, old_line) => {
-                removes.push((text, old_line));
+                removes.push_back((text, old_line));
             }
             DiffItem::Add(text, new_line) => {
-                if let Some((from_text, old_line)) = removes.pop() {
+                // FIFO 配对（队首而非队尾）：连续多行修改按文档顺序配对
+                // 第 1 个旧行 ↔ 第 1 个新行。LIFO 会把配对与输出顺序颠倒，
+                // 整段重写（AI 重新生成的常见形态）会显示错乱的 diff。
+                if let Some((from_text, old_line)) = removes.pop_front() {
                     output.push(DiffItem::Modify(from_text, text, old_line, new_line));
                 } else {
                     output.push(DiffItem::Add(text, new_line));
                 }
             }
             other => {
-                flush_removes(&mut output, &mut removes);
+                while let Some((text, old_line)) = removes.pop_front() {
+                    output.push(DiffItem::Remove(text, old_line));
+                }
                 output.push(other);
             }
         }
     }
-    flush_removes(&mut output, &mut removes);
+    while let Some((text, old_line)) = removes.pop_front() {
+        output.push(DiffItem::Remove(text, old_line));
+    }
 
     output
 }
@@ -442,6 +461,55 @@ mod tests {
         }
     }
 
+    /// 连续多行替换必须按文档顺序 FIFO 配对，且行号升序输出。
+    #[test]
+    fn script_diff_pairs_consecutive_modified_lines_in_order() {
+        let diff = diff_script("A\nB\nC", "X\nY\nZ");
+        match diff {
+            ContentDiff::Script(script) => {
+                assert_eq!(script.modified, 3);
+                assert_eq!(script.added, 0);
+                assert_eq!(script.removed, 0);
+                // A→X、B→Y、C→Z 按顺序配对：旧行号 1,2,3 与新行号 1,2,3 对齐
+                let pairs: Vec<(&str, &str, usize, usize)> = script
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.op == "modify_from" || entry.op == "modify_to")
+                    .map(|entry| {
+                        (
+                            entry.op.as_str(),
+                            entry.text.as_str(),
+                            entry.old_line.unwrap_or(0),
+                            entry.new_line.unwrap_or(0),
+                        )
+                    })
+                    .collect();
+                // A→X、B→Y、C→Z 按顺序配对，而非 C→X、B→Y、A→Z
+                assert_eq!(pairs[0], ("modify_from", "A", 1, 0));
+                assert_eq!(pairs[1], ("modify_to", "X", 0, 1));
+                assert_eq!(pairs[2], ("modify_from", "B", 2, 0));
+                assert_eq!(pairs[3], ("modify_to", "Y", 0, 2));
+                assert_eq!(pairs[4], ("modify_from", "C", 3, 0));
+                assert_eq!(pairs[5], ("modify_to", "Z", 0, 3));
+            }
+            _ => panic!("expected script diff"),
+        }
+    }
+
+    /// 行内容一致但末尾换行不同：必须显式提示而不是报告“无变化”。
+    #[test]
+    fn script_diff_reports_trailing_newline_difference() {
+        let diff = diff_script("A\nB", "A\nB\n");
+        match diff {
+            ContentDiff::Script(script) => {
+                assert_eq!(script.added, 0);
+                assert_eq!(script.removed, 0);
+                assert!(script.summary.contains("末尾换行"), "summary={}", script.summary);
+            }
+            _ => panic!("expected script diff"),
+        }
+    }
+
     #[test]
     fn script_diff_handles_empty_versions() {
         let from_empty = diff_script("", "新增一\n新增二");
@@ -475,7 +543,7 @@ mod tests {
         match diff {
             ContentDiff::Script(script) => {
                 assert!(script.truncated);
-                assert!(script.entries.len() <= MAX_HUNK_ENTRIES + 2);
+                assert!(script.entries.len() <= MAX_HUNK_ENTRIES);
             }
             _ => panic!("expected script diff"),
         }

@@ -69,6 +69,19 @@ pub struct RestoreResponse {
     pub new_version: ContentVersion,
 }
 
+/// 解析历史版本里的分镜快照。空字符串视为合法的“空分镜”（旧数据存在该形态），
+/// 其余解析失败一律报错——恢复操作宁可失败也不能把当前分镜静默清空。
+fn parse_storyboard_snapshot(content: &str, version: i64) -> AppResult<StoryboardSnapshot> {
+    if content.trim().is_empty() {
+        return Ok(StoryboardSnapshot { lines: Vec::new() });
+    }
+    serde_json::from_str(content).map_err(|_| {
+        AppError::Validation(format!(
+            "版本 v{version} 的分镜快照格式无效，无法恢复；请选择其他版本"
+        ))
+    })
+}
+
 async fn ensure_project_access(
     pool: &sqlx::SqlitePool,
     user_id: &str,
@@ -87,12 +100,18 @@ async fn ensure_project_access(
 
 /// 解析并发令牌：优先显式 baseVersion，其次尝试从 If-Match 头解析版本号。
 /// 供剧本 / 分镜保存主链路复用。
+///
+/// If-Match 语义：
+///   - 数字（可带引号）→ 作为 baseVersion 乐观锁；
+///   - `*` → 我们没有实体标签，按“存在性校验”无法映射到版本比较，视为不校验；
+///   - 其他无法解析的值 → 400。客户端显式带了前置条件却被静默降级成
+///     last-write-wins，会制造“以为有并发保护其实没有”的假象。
 pub fn resolve_concurrency_token(
     base_version: Option<i64>,
     headers: &HeaderMap,
-) -> ConcurrencyToken {
+) -> AppResult<ConcurrencyToken> {
     if let Some(base) = base_version {
-        return ConcurrencyToken::BaseVersion(base.max(0));
+        return Ok(ConcurrencyToken::BaseVersion(base.max(0)));
     }
 
     if let Some(if_match) = headers
@@ -100,12 +119,18 @@ pub fn resolve_concurrency_token(
         .and_then(|value| value.to_str().ok())
     {
         let cleaned = if_match.trim().trim_matches('"');
-        if let Ok(version) = cleaned.parse::<i64>() {
-            return ConcurrencyToken::BaseVersion(version.max(0));
+        if cleaned == "*" {
+            return Ok(ConcurrencyToken::None);
         }
+        if let Ok(version) = cleaned.parse::<i64>() {
+            return Ok(ConcurrencyToken::BaseVersion(version.max(0)));
+        }
+        return Err(AppError::Validation(format!(
+            "无效的 If-Match 头：{if_match}（应为版本号或 *）"
+        )));
     }
 
-    ConcurrencyToken::None
+    Ok(ConcurrencyToken::None)
 }
 
 // ─── 内部实现（按内容类型参数化） ──────────────────────────────────────
@@ -128,7 +153,11 @@ async fn list_versions_inner(
     let total = repo::count_versions(&state.db, project_id, content_type)
         .await
         .map_err(AppError::Sqlx)?;
-    let current_version = rows.first().map(|row| row.version).unwrap_or(0);
+    // 当前版本必须取全局 MAX，不能用分页后的首行：offset>0 时首行只是
+    // “本页最新”，客户端若拿它当 baseVersion 会得到虚假的 409。
+    let current_version = repo::current_version_number(&state.db, project_id, content_type)
+        .await
+        .map_err(AppError::Sqlx)?;
 
     let versions = rows
         .into_iter()
@@ -245,10 +274,9 @@ async fn restore_version_inner(
                 .unwrap_or_else(|| format!("恢复到版本 v{}", version)),
         ),
         ContentType::Storyboard => {
-            let snapshot: StoryboardSnapshot =
-                serde_json::from_str(&target.content).unwrap_or(StoryboardSnapshot {
-                    lines: Vec::new(),
-                });
+            // 坏快照必须显式报错：回填/旧数据可能产生 "" 或非法 JSON，
+            // 若静默当作空分镜恢复，会把当前分镜清空并追加一个空版本。
+            let snapshot = parse_storyboard_snapshot(&target.content, version)?;
             let mut effective_lines = Vec::with_capacity(snapshot.lines.len());
             for line in &snapshot.lines {
                 let mut valid_asset_ids = Vec::with_capacity(line.asset_ids.len());
@@ -313,10 +341,9 @@ async fn restore_version_inner(
                 .await?;
         }
         ContentType::Storyboard => {
-            let snapshot: StoryboardSnapshot =
-                serde_json::from_str(&effective_content).unwrap_or(StoryboardSnapshot {
-                    lines: Vec::new(),
-                });
+            // effective_content 由上面刚序列化而来，理论上必然可解析；
+            // 即便意外失败也显式报错，绝不静默清空当前分镜。
+            let snapshot = parse_storyboard_snapshot(&effective_content, version)?;
             let inputs: Vec<storyboard::model::StoryboardLineInput> = snapshot
                 .lines
                 .into_iter()

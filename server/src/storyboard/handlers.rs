@@ -117,7 +117,7 @@ pub async fn upsert_storyboard(
     let snapshot_content = serde_json::to_string(&snapshot)
         .map_err(|err| AppError::Internal(format!("分镜快照序列化失败: {}", err)))?;
 
-    let expected_base = resolve_concurrency_token(req.base_version, &headers);
+    let expected_base = resolve_concurrency_token(req.base_version, &headers)?;
     let source = normalize_source(req.source.as_deref());
     let note = req.note.clone();
 
@@ -139,11 +139,14 @@ pub async fn upsert_storyboard(
 
     repo::upsert_storyboard_tx(&mut tx, &project_id, &resolved_inputs, true).await?;
 
-    tx.commit().await?;
-
-    let storyboard = repo::find_by_project(&state.db, &project_id)
+    // 响应必须在事务内构造：提交后再从连接池重读，并发保存可能已经插队，
+    // 会把别人的 lines 与本次的 version_row/content_hash 错配返回，
+    // 客户端拿它当下一次保存的基线会引发虚假冲突。
+    let storyboard = repo::find_by_project_tx(&mut tx, &project_id)
         .await?
         .ok_or_else(|| AppError::NotFound("分镜不存在".into()))?;
+
+    tx.commit().await?;
 
     let version_row = outcome.version_row().clone();
     let deduplicated = outcome.is_duplicate();

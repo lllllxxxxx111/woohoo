@@ -72,6 +72,24 @@ pub async fn current_version_number_tx(
     Ok(version)
 }
 
+/// 读取当前版本号（连接池版本）。列表接口分页时不能拿“当前页首行”当
+/// 当前版本：offset>0 时那是页内最新而非全局最新。
+pub async fn current_version_number(
+    pool: &SqlitePool,
+    project_id: &str,
+    content_type: ContentType,
+) -> Result<i64, sqlx::Error> {
+    let version = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(version), 0) FROM content_versions
+         WHERE project_id = ? AND content_type = ?",
+    )
+    .bind(project_id)
+    .bind(content_type.as_str())
+    .fetch_one(pool)
+    .await?;
+    Ok(version)
+}
+
 /**
  * 在当前事务内提交一个新版本。
  *
@@ -93,8 +111,10 @@ pub async fn commit_version_tx(
 
     // 幂等重试优先：请求内容已经等于当前版本时直接返回已有版本。
     // 这允许客户端在响应丢失后带着旧 baseVersion 安全重试，不会误报并发冲突。
+    // 标题也参与去重：仅改标题的保存若不记版本，最新版本将永远停留在旧标题，
+    // 事后“恢复到最新版”会把标题一并回退。
     if let Some(current_row) = &current {
-        if current_row.content_hash == content_hash {
+        if current_row.content_hash == content_hash && current_row.title == input.title {
             return Ok(CommitOutcome::Duplicate(current_row.clone()));
         }
     }

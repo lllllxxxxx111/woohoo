@@ -72,7 +72,7 @@ pub async fn upsert_script(
     }
 
     // 并发令牌：优先 body.baseVersion，其次 If-Match 头
-    let expected_base = resolve_concurrency_token(req.base_version, &headers);
+    let expected_base = resolve_concurrency_token(req.base_version, &headers)?;
 
     let content = req.content.clone();
     let title = req.title.trim().to_string();

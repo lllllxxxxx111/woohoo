@@ -45,6 +45,22 @@ pub async fn find_by_project(pool: &SqlitePool, project_id: &str) -> AppResult<O
     }
 }
 
+/// 事务内读取当前分镜（与写操作同一事务，读到的一定是本事务的状态）。
+pub async fn find_by_project_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    project_id: &str,
+) -> AppResult<Option<Storyboard>> {
+    let record =
+        sqlx::query_as::<_, StoryboardRecord>("SELECT * FROM storyboards WHERE project_id = ?")
+            .bind(project_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+
+    match record {
+        Some(record) => Ok(Some(load_storyboard_with(&mut **tx, record).await?)),
+        None => Ok(None),
+    }
+}
 pub async fn list_by_user(pool: &SqlitePool, user_id: &str) -> AppResult<Vec<Storyboard>> {
     let records = sqlx::query_as::<_, StoryboardRecord>(
         "SELECT s.*
@@ -235,6 +251,16 @@ pub async fn delete_by_project(pool: &SqlitePool, project_id: &str) -> AppResult
 }
 
 async fn load_storyboard(pool: &SqlitePool, record: StoryboardRecord) -> AppResult<Storyboard> {
+    let mut conn = pool.acquire().await?;
+    load_storyboard_with(&mut conn, record).await
+}
+
+/// 在指定连接上加载完整分镜。保存链路必须在同一事务内读取，提交后再读
+/// 会被并发保存插队，把别人的 lines 和本次的 version_row 错配进同一个响应。
+async fn load_storyboard_with(
+    conn: &mut sqlx::SqliteConnection,
+    record: StoryboardRecord,
+) -> AppResult<Storyboard> {
     let line_rows = sqlx::query_as::<_, StoryboardLineRow>(
         "SELECT id, storyboard_id, scene_number, description, duration
          FROM storyboard_lines
@@ -242,7 +268,7 @@ async fn load_storyboard(pool: &SqlitePool, record: StoryboardRecord) -> AppResu
          ORDER BY sort_order ASC, scene_number ASC, id ASC",
     )
     .bind(&record.id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
 
     let asset_rows = sqlx::query_as::<_, StoryboardLineAssetRow>(
@@ -254,7 +280,7 @@ async fn load_storyboard(pool: &SqlitePool, record: StoryboardRecord) -> AppResu
          ORDER BY sl.sort_order ASC, a.created_at ASC, a.id ASC",
     )
     .bind(&record.id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
 
     let mut line_assets: HashMap<String, Vec<Asset>> = HashMap::new();
