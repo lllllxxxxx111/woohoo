@@ -177,7 +177,7 @@ export const ExportHistoryDialog: React.FC<ExportHistoryDialogProps> = ({
       width: 150,
       render: (_: unknown, record: ExportAuditRecord) => (
         <Space size={4}>
-          {Boolean(record.precheckPassed) ? (
+          {record.precheckPassed ? (
             <Tag size="small" color="green" icon={<CheckCircle size={10} />}>预检通过</Tag>
           ) : (
             <Tag size="small" color="orange" icon={<AlertTriangle size={10} />}>预检警告</Tag>

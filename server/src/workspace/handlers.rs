@@ -6,7 +6,9 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 use crate::{
-    ai, asset, auth::middleware::UserId, content_version, conversation,
+    ai, asset,
+    auth::middleware::UserId,
+    content_version, conversation,
     error::{AppError, AppResult},
     project, script, storyboard, AppState,
 };
@@ -209,8 +211,9 @@ pub async fn bootstrap(
         scripts: scripts
             .into_iter()
             .map(|script| {
-                let version_summary =
-                    script_version_by_project.get(script.project_id.as_str()).copied();
+                let version_summary = script_version_by_project
+                    .get(script.project_id.as_str())
+                    .copied();
                 WorkspaceScript {
                     version: version_summary.map(|summary| summary.version),
                     version_id: version_summary.map(|summary| summary.id.clone()),

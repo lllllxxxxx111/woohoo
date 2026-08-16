@@ -27,7 +27,14 @@ impl ContentType {
 
 /// 合法的版本来源标记
 pub const VALID_SOURCES: &[&str] = &[
-    "manual", "ai", "pipeline", "restore", "rewind", "baseline", "import", "collaboration",
+    "manual",
+    "ai",
+    "pipeline",
+    "restore",
+    "rewind",
+    "baseline",
+    "import",
+    "collaboration",
 ];
 
 pub fn normalize_source(value: Option<&str>) -> String {
@@ -93,7 +100,11 @@ impl ContentVersion {
             title: row.title,
             created_at: row.created_at,
             content_hash: row.content_hash,
-            content: if include_content { Some(row.content) } else { None },
+            content: if include_content {
+                Some(row.content)
+            } else {
+                None
+            },
         }
     }
 }

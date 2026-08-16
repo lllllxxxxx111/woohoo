@@ -745,10 +745,12 @@ mod tests {
             .await
             .ok();
         // 应用治理字段（027）
-        sqlx::query(include_str!("../../migrations/027_collaboration_governance.sql"))
-            .execute(&pool)
-            .await
-            .expect("failed to apply 027_collaboration_governance");
+        sqlx::query(include_str!(
+            "../../migrations/027_collaboration_governance.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("failed to apply 027_collaboration_governance");
 
         // 记录迁移版本
         for version in ["012_collaboration", "027_collaboration_governance"] {
@@ -792,9 +794,13 @@ mod tests {
             .expect("discovery -> delegating should succeed");
         assert_eq!(s.state, "delegating");
 
-        let s = update_session_state(&pool, &session.id, SessionState::ResolvingQuestions.as_str())
-            .await
-            .expect("delegating -> resolving_questions should succeed");
+        let s = update_session_state(
+            &pool,
+            &session.id,
+            SessionState::ResolvingQuestions.as_str(),
+        )
+        .await
+        .expect("delegating -> resolving_questions should succeed");
         assert_eq!(s.state, "resolving_questions");
 
         let s = update_session_state(&pool, &session.id, SessionState::Halted.as_str())
@@ -840,9 +846,13 @@ mod tests {
         update_session_state(&pool, &session.id, SessionState::Delegating.as_str())
             .await
             .unwrap();
-        update_session_state(&pool, &session.id, SessionState::ResolvingQuestions.as_str())
-            .await
-            .unwrap();
+        update_session_state(
+            &pool,
+            &session.id,
+            SessionState::ResolvingQuestions.as_str(),
+        )
+        .await
+        .unwrap();
 
         let halted = halt_session_with_audit(&pool, &session.id, "测试暂停原因", "user-1")
             .await
@@ -865,9 +875,13 @@ mod tests {
         update_session_state(&pool, &session.id, SessionState::Delegating.as_str())
             .await
             .unwrap();
-        update_session_state(&pool, &session.id, SessionState::ResolvingQuestions.as_str())
-            .await
-            .unwrap();
+        update_session_state(
+            &pool,
+            &session.id,
+            SessionState::ResolvingQuestions.as_str(),
+        )
+        .await
+        .unwrap();
         halt_session_with_audit(&pool, &session.id, "需人工介入", "system")
             .await
             .unwrap();
@@ -918,9 +932,13 @@ mod tests {
         update_session_state(&pool, &session.id, SessionState::Delegating.as_str())
             .await
             .unwrap();
-        update_session_state(&pool, &session.id, SessionState::ResolvingQuestions.as_str())
-            .await
-            .unwrap();
+        update_session_state(
+            &pool,
+            &session.id,
+            SessionState::ResolvingQuestions.as_str(),
+        )
+        .await
+        .unwrap();
         halt_session_with_audit(&pool, &session.id, "测试", "system")
             .await
             .unwrap();
@@ -1061,10 +1079,7 @@ mod tests {
 
         // 模拟 verify_session_owner: 查询会话后比对 user_id
         let fetched = get_session(&pool, &user_a_session.id).await.unwrap();
-        assert_eq!(
-            fetched.user_id, "user-a",
-            "user-b 不应能访问 user-a 的会话"
-        );
+        assert_eq!(fetched.user_id, "user-a", "user-b 不应能访问 user-a 的会话");
 
         // list_active_sessions_for_project 应按 user_id 隔离
         let user_a_active = list_active_sessions_for_project(&pool, "user-a", "proj-1", None)

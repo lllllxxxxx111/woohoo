@@ -8,7 +8,6 @@
 import type {
   Asset,
   ChatSession,
-  Message,
   Project,
   Script,
   Storyboard,
@@ -217,8 +216,8 @@ const API_KEY_PATTERNS: RegExp[] = [
   /sk_live_[a-zA-Z0-9]{16,}/g,                                    // Stripe live key
   /rk_live_[a-zA-Z0-9]{16,}/g,                                    // Stripe restricted key
   /pk_live_[a-zA-Z0-9]{16,}/g,                                    // Stripe publishable
-  /api[_-]?key["']?\s*[:=]\s*["']?[a-zA-Z0-9_\-]{16,}/gi,
-  /bearer\s+[a-zA-Z0-9._\-]{20,}/gi,
+  /api[_-]?key["']?\s*[:=]\s*["']?[a-zA-Z0-9_-]{16,}/gi,
+  /bearer\s+[a-zA-Z0-9._-]{20,}/gi,
 ];
 
 // JWT / structured tokens
@@ -231,8 +230,8 @@ const PASSWORD_PATTERNS: RegExp[] = [
   /password["']?\s*[:=]\s*["']?[^\s"']{4,}/gi,
   /passwd["']?\s*[:=]\s*["']?[^\s"']{4,}/gi,
   /secret["']?\s*[:=]\s*["']?[^\s"']{4,}/gi,
-  /token["']?\s*[:=]\s*["']?[a-zA-Z0-9._\-]{16,}/gi,
-  /auth["']?\s*[:=]\s*["']?[a-zA-Z0-9._\-]{16,}/gi,
+  /token["']?\s*[:=]\s*["']?[a-zA-Z0-9._-]{16,}/gi,
+  /auth["']?\s*[:=]\s*["']?[a-zA-Z0-9._-]{16,}/gi,
   /private[_-]?key["']?\s*[:=]\s*["']?[^\s"']{8,}/gi,
 ];
 
@@ -244,7 +243,7 @@ const SECRET_URL_PATTERNS: RegExp[] = [
 // Webhook URLs that embed tokens in path
 const WEBHOOK_PATTERNS: RegExp[] = [
   /https?:\/\/hooks\.slack\.com\/services\/T[A-Z0-9]+\/B[A-Z0-9]+\/[a-zA-Z0-9]{20,}/gi,
-  /https?:\/\/discord(?:app)?\.com\/api\/webhooks\/\d+\/[a-zA-Z0-9_\-]{20,}/gi,
+  /https?:\/\/discord(?:app)?\.com\/api\/webhooks\/\d+\/[a-zA-Z0-9_-]{20,}/gi,
 ];
 
 // Database connection strings with credentials (username may be empty, e.g. redis://:pass@host)
@@ -261,9 +260,9 @@ const SSH_KEY_PATTERNS: RegExp[] = [
 // Unix: /home/<name>/..., /Users/<name>/..., /root/..., /var/... (selective)
 // Windows: C:\Users\<name>\..., D:\Documents\...
 const LOCAL_PATH_PATTERNS: RegExp[] = [
-  /\/home\/[a-zA-Z0-9_.\-]+\/[^\s"')\]<>|]*/g,      // Linux /home/user/...
-  /\/Users\/[a-zA-Z0-9_.\-]+\/[^\s"')\]<>|]*/g,      // macOS /Users/user/...
-  /[a-zA-Z]:\\Users\\[a-zA-Z0-9_.\-]+\\[^\s"')\]<>|]*/g, // Windows C:\Users\...
+  /\/home\/[a-zA-Z0-9_.-]+\/[^\s"')\]<>|]*/g,      // Linux /home/user/...
+  /\/Users\/[a-zA-Z0-9_.-]+\/[^\s"')\]<>|]*/g,      // macOS /Users/user/...
+  /[a-zA-Z]:\\Users\\[a-zA-Z0-9_.-]+\\[^\s"')\]<>|]*/g, // Windows C:\Users\...
   /\/root\/[^\s"')\]<>|]*/g,                          // /root/...
 ];
 
@@ -271,7 +270,7 @@ const LOCAL_PATH_PATTERNS: RegExp[] = [
 // These catch unlabeled secret keys
 const LONG_HEX_SECRET_PATTERNS: RegExp[] = [
   /\b[a-f0-9]{40,}\b/gi,  // hex secret (e.g. SHA-1 sized)
-  /\b[A-Za-z0-9+\/]{60,}={0,2}\b/g, // base64 blob
+  /\b[A-Za-z0-9+/]{60,}={0,2}\b/g, // base64 blob
 ];
 
 // Pattern groups with their finding type
@@ -305,7 +304,7 @@ export function detectSensitiveData(
       pattern.lastIndex = 0;
       const matches = text.match(pattern);
       if (matches) {
-        for (const _match of matches) {
+        for (let index = 0; index < matches.length; index += 1) {
           findings.push({
             field,
             assetId: context.assetId,
@@ -338,8 +337,8 @@ export function redactSensitiveData(text: string): string {
   result = result.replace(/ASIA[0-9A-Z]{16}/g, '[REDACTED_AWS_KEY]');
   result = result.replace(/AIza[0-9A-Za-z\-_]{35}/g, '[REDACTED_GOOGLE_KEY]');
   result = result.replace(/xox[baprs]-[a-zA-Z0-9-]{10,}/g, '[REDACTED_SLACK_TOKEN]');
-  result = result.replace(/api[_-]?key["']?\s*[:=]\s*["']?[a-zA-Z0-9_\-]{16,}/gi, 'api_key=[REDACTED]');
-  result = result.replace(/bearer\s+[a-zA-Z0-9._\-]{20,}/gi, 'Bearer [REDACTED_TOKEN]');
+  result = result.replace(/api[_-]?key["']?\s*[:=]\s*["']?[a-zA-Z0-9_-]{16,}/gi, 'api_key=[REDACTED]');
+  result = result.replace(/bearer\s+[a-zA-Z0-9._-]{20,}/gi, 'Bearer [REDACTED_TOKEN]');
 
   // ── JWTs ──────────────────────────────────────────────────────────
   result = result.replace(/eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}/g, '[REDACTED_JWT]');
@@ -348,8 +347,8 @@ export function redactSensitiveData(text: string): string {
   result = result.replace(/password["']?\s*[:=]\s*["']?[^\s"']{4,}/gi, 'password=[REDACTED]');
   result = result.replace(/passwd["']?\s*[:=]\s*["']?[^\s"']{4,}/gi, 'passwd=[REDACTED]');
   result = result.replace(/secret["']?\s*[:=]\s*["']?[^\s"']{4,}/gi, 'secret=[REDACTED]');
-  result = result.replace(/token["']?\s*[:=]\s*["']?[a-zA-Z0-9._\-]{16,}/gi, 'token=[REDACTED]');
-  result = result.replace(/auth["']?\s*[:=]\s*["']?[a-zA-Z0-9._\-]{16,}/gi, 'auth=[REDACTED]');
+  result = result.replace(/token["']?\s*[:=]\s*["']?[a-zA-Z0-9._-]{16,}/gi, 'token=[REDACTED]');
+  result = result.replace(/auth["']?\s*[:=]\s*["']?[a-zA-Z0-9._-]{16,}/gi, 'auth=[REDACTED]');
   result = result.replace(/private[_-]?key["']?\s*[:=]\s*["']?[^\s"']{8,}/gi, 'private_key=[REDACTED]');
 
   // ── URLs with embedded credentials ───────────────────────────────
@@ -361,7 +360,7 @@ export function redactSensitiveData(text: string): string {
     '[REDACTED_SLACK_WEBHOOK]',
   );
   result = result.replace(
-    /https?:\/\/discord(?:app)?\.com\/api\/webhooks\/\d+\/[a-zA-Z0-9_\-]{20,}/gi,
+    /https?:\/\/discord(?:app)?\.com\/api\/webhooks\/\d+\/[a-zA-Z0-9_-]{20,}/gi,
     '[REDACTED_DISCORD_WEBHOOK]',
   );
 
@@ -379,9 +378,9 @@ export function redactSensitiveData(text: string): string {
   );
 
   // ── Local absolute paths (strip username) ────────────────────────
-  result = result.replace(/\/home\/[a-zA-Z0-9_.\-]+\//g, '/[REDACTED_HOME]/');
-  result = result.replace(/\/Users\/[a-zA-Z0-9_.\-]+\//g, '/[REDACTED_HOME]/');
-  result = result.replace(/[a-zA-Z]:\\Users\\[a-zA-Z0-9_.\-]+\\/gi, '[REDACTED_HOME]\\');
+  result = result.replace(/\/home\/[a-zA-Z0-9_.-]+\//g, '/[REDACTED_HOME]/');
+  result = result.replace(/\/Users\/[a-zA-Z0-9_.-]+\//g, '/[REDACTED_HOME]/');
+  result = result.replace(/[a-zA-Z]:\\Users\\[a-zA-Z0-9_.-]+\\/gi, '[REDACTED_HOME]\\');
   result = result.replace(/\/root\//g, '/[REDACTED_HOME]/');
 
   // ── Long unstructured hex secrets (40+ char continuous hex) ─────

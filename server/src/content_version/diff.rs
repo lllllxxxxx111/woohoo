@@ -109,9 +109,8 @@ pub fn diff_script(base_content: &str, target_content: &str) -> ContentDiff {
     // Rust 的 lines() 会忽略“末尾有没有换行符”这一差异（"A" 与 "A\n" 行数
     // 相同）。字符串确实不同而行完全一致时，唯一可能的差异就是末尾换行，
     // 显式标注出来，否则 diff 会声称“无变化”但内容其实不同。
-    let trailing_newline_only = !truncated
-        && base_lines == target_lines
-        && base_content != target_content;
+    let trailing_newline_only =
+        !truncated && base_lines == target_lines && base_content != target_content;
 
     // 将紧邻的 remove+add 组合识别为 modify
     let grouped = group_modifications(ops);
@@ -312,9 +311,8 @@ pub fn diff_storyboard(base_content: &str, target_content: &str) -> ContentDiff 
 }
 
 fn parse_snapshot(content: &str) -> StoryboardSnapshot {
-    serde_json::from_str::<StoryboardSnapshot>(content).unwrap_or(StoryboardSnapshot {
-        lines: Vec::new(),
-    })
+    serde_json::from_str::<StoryboardSnapshot>(content)
+        .unwrap_or(StoryboardSnapshot { lines: Vec::new() })
 }
 
 fn count_lines(content: &str) -> usize {
@@ -365,11 +363,7 @@ fn lcs_diff(base_lines: &[&str], target_lines: &[&str]) -> Vec<DiffItem> {
     let mut j = 0usize;
     while i < n && j < m {
         if base_lines[i] == target_lines[j] {
-            result.push(DiffItem::Keep(
-                base_lines[i].to_string(),
-                i + 1,
-                j + 1,
-            ));
+            result.push(DiffItem::Keep(base_lines[i].to_string(), i + 1, j + 1));
             i += 1;
             j += 1;
         } else if lcs[i + 1][j] >= lcs[i][j + 1] {
@@ -504,7 +498,11 @@ mod tests {
             ContentDiff::Script(script) => {
                 assert_eq!(script.added, 0);
                 assert_eq!(script.removed, 0);
-                assert!(script.summary.contains("末尾换行"), "summary={}", script.summary);
+                assert!(
+                    script.summary.contains("末尾换行"),
+                    "summary={}",
+                    script.summary
+                );
             }
             _ => panic!("expected script diff"),
         }
@@ -549,7 +547,12 @@ mod tests {
         }
     }
 
-    fn line(id: &str, scene: i64, desc: &str, duration: i64) -> super::super::model::StoryboardSnapshotLine {
+    fn line(
+        id: &str,
+        scene: i64,
+        desc: &str,
+        duration: i64,
+    ) -> super::super::model::StoryboardSnapshotLine {
         super::super::model::StoryboardSnapshotLine {
             id: id.to_string(),
             scene_number: scene,
@@ -567,7 +570,10 @@ mod tests {
     #[test]
     fn storyboard_diff_detects_added_removed_modified() {
         let base = snapshot_json(vec![line("l1", 1, "开场", 3), line("l2", 2, "将被删除", 4)]);
-        let target = snapshot_json(vec![line("l1", 1, "开场改写", 5), line("l3", 3, "新增镜头", 2)]);
+        let target = snapshot_json(vec![
+            line("l1", 1, "开场改写", 5),
+            line("l3", 3, "新增镜头", 2),
+        ]);
 
         let diff = diff_storyboard(&base, &target);
         match diff {
@@ -578,8 +584,12 @@ mod tests {
                 assert_eq!(storyboard.removed[0].line_id, "l2");
                 assert_eq!(storyboard.modified.len(), 1);
                 assert_eq!(storyboard.modified[0].line_id, "l1");
-                assert!(storyboard.modified[0].changed_fields.contains(&"description".to_string()));
-                assert!(storyboard.modified[0].changed_fields.contains(&"duration".to_string()));
+                assert!(storyboard.modified[0]
+                    .changed_fields
+                    .contains(&"description".to_string()));
+                assert!(storyboard.modified[0]
+                    .changed_fields
+                    .contains(&"duration".to_string()));
             }
             _ => panic!("expected storyboard diff"),
         }
@@ -607,4 +617,3 @@ mod tests {
         }
     }
 }
-

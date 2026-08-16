@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import { BUNDLE_SCHEMA_VERSION } from './exportAudit';
 import type {
   AssetRegistryEntry,
-  AuditableManifest,
   MissingAssetEntry,
   ExportResult,
 } from './exportAudit';

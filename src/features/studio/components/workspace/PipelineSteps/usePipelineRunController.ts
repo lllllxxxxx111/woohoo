@@ -41,7 +41,6 @@ import { useToast } from '../../../../../context/useToast';
 import {
   deriveDisplayState,
   getDisplayPreset,
-  isTerminalRun,
   pickCurrentStep,
   type PipelineDisplayState,
 } from './pipelineStatusPresets';
@@ -196,7 +195,7 @@ export function usePipelineRunController(
   const [promptOptimizations, setPromptOptimizations] = useState<PipelinePromptOptimization[]>(
     [],
   );
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 

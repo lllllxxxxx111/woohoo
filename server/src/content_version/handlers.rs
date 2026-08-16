@@ -15,7 +15,7 @@ use crate::{
 use super::{
     diff::diff_contents,
     model::{
-        CommitInput, ConcurrencyToken, ContentVersion, ContentType, StoryboardSnapshot,
+        CommitInput, ConcurrencyToken, ContentType, ContentVersion, StoryboardSnapshot,
         StoryboardSnapshotLine,
     },
     repo,
@@ -281,13 +281,12 @@ async fn restore_version_inner(
             for line in &snapshot.lines {
                 let mut valid_asset_ids = Vec::with_capacity(line.asset_ids.len());
                 for asset_id in &line.asset_ids {
-                    let owned: Option<(String,)> = sqlx::query_as(
-                        "SELECT id FROM assets WHERE id = ? AND project_id = ?",
-                    )
-                    .bind(asset_id)
-                    .bind(project_id)
-                    .fetch_optional(&mut *tx)
-                    .await?;
+                    let owned: Option<(String,)> =
+                        sqlx::query_as("SELECT id FROM assets WHERE id = ? AND project_id = ?")
+                            .bind(asset_id)
+                            .bind(project_id)
+                            .fetch_optional(&mut *tx)
+                            .await?;
                     if owned.is_some() {
                         valid_asset_ids.push(asset_id.clone());
                     }
@@ -337,8 +336,7 @@ async fn restore_version_inner(
                 .clone()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "未命名剧本".to_string());
-            script::repo::write_current_tx(&mut tx, project_id, &title, &effective_content)
-                .await?;
+            script::repo::write_current_tx(&mut tx, project_id, &title, &effective_content).await?;
         }
         ContentType::Storyboard => {
             // effective_content 由上面刚序列化而来，理论上必然可解析；
@@ -384,7 +382,14 @@ pub async fn get_script_version_detail(
     Extension(user_id): Extension<UserId>,
     Path((project_id, version)): Path<(String, i64)>,
 ) -> AppResult<Json<ContentVersion>> {
-    get_version_detail_inner(&state, &user_id.0, &project_id, ContentType::Script, version).await
+    get_version_detail_inner(
+        &state,
+        &user_id.0,
+        &project_id,
+        ContentType::Script,
+        version,
+    )
+    .await
 }
 
 pub async fn get_script_version_diff(
@@ -393,8 +398,15 @@ pub async fn get_script_version_diff(
     Path((project_id, version)): Path<(String, i64)>,
     Query(query): Query<DiffQuery>,
 ) -> AppResult<Json<DiffResponse>> {
-    get_version_diff_inner(&state, &user_id.0, &project_id, ContentType::Script, version, query)
-        .await
+    get_version_diff_inner(
+        &state,
+        &user_id.0,
+        &project_id,
+        ContentType::Script,
+        version,
+        query,
+    )
+    .await
 }
 
 pub async fn restore_script_version(
@@ -403,8 +415,15 @@ pub async fn restore_script_version(
     Path((project_id, version)): Path<(String, i64)>,
     Json(req): Json<RestoreReq>,
 ) -> AppResult<Json<RestoreResponse>> {
-    restore_version_inner(&state, &user_id.0, &project_id, ContentType::Script, version, req)
-        .await
+    restore_version_inner(
+        &state,
+        &user_id.0,
+        &project_id,
+        ContentType::Script,
+        version,
+        req,
+    )
+    .await
 }
 
 // ─── 分镜版本路由 handler ────────────────────────────────────────────
@@ -415,7 +434,14 @@ pub async fn list_storyboard_versions(
     Path(project_id): Path<String>,
     Query(query): Query<ListVersionsQuery>,
 ) -> AppResult<Json<VersionListResponse>> {
-    list_versions_inner(&state, &user_id.0, &project_id, ContentType::Storyboard, query).await
+    list_versions_inner(
+        &state,
+        &user_id.0,
+        &project_id,
+        ContentType::Storyboard,
+        query,
+    )
+    .await
 }
 
 pub async fn get_storyboard_version_detail(
@@ -423,8 +449,14 @@ pub async fn get_storyboard_version_detail(
     Extension(user_id): Extension<UserId>,
     Path((project_id, version)): Path<(String, i64)>,
 ) -> AppResult<Json<ContentVersion>> {
-    get_version_detail_inner(&state, &user_id.0, &project_id, ContentType::Storyboard, version)
-        .await
+    get_version_detail_inner(
+        &state,
+        &user_id.0,
+        &project_id,
+        ContentType::Storyboard,
+        version,
+    )
+    .await
 }
 
 pub async fn get_storyboard_version_diff(
@@ -509,7 +541,11 @@ mod tests {
         seed_project(&pool, "project-1", "user-1").await;
 
         let result = ensure_project_access(&pool, "user-1", "project-1").await;
-        assert!(result.is_ok(), "项目所有者应通过权限校验, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "项目所有者应通过权限校验, got: {:?}",
+            result
+        );
         pool.close().await;
     }
 

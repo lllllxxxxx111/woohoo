@@ -1553,14 +1553,7 @@ async fn dispatch_image_gen_step(
     )
     .await?;
 
-    insert_external_job(
-        &state.db,
-        &run.id,
-        &step.id,
-        "image",
-        &generation.id,
-    )
-    .await?;
+    insert_external_job(&state.db, &run.id, &step.id, "image", &generation.id).await?;
 
     mark_step_running_external(&state.db, &run.id, &step.id).await?;
 
@@ -1609,14 +1602,7 @@ async fn dispatch_video_gen_step(
     )
     .await?;
 
-    insert_external_job(
-        &state.db,
-        &run.id,
-        &step.id,
-        "video",
-        &generation.id,
-    )
-    .await?;
+    insert_external_job(&state.db, &run.id, &step.id, "video", &generation.id).await?;
 
     mark_step_running_external(&state.db, &run.id, &step.id).await?;
 
@@ -2023,11 +2009,7 @@ async fn update_external_job_status(
 /**
  * 标记步骤 running（不写 ai_task_id，用于 image_gen / video_gen 外部任务）
  */
-async fn mark_step_running_external(
-    pool: &SqlitePool,
-    run_id: &str,
-    step_id: &str,
-) -> Result<()> {
+async fn mark_step_running_external(pool: &SqlitePool, run_id: &str, step_id: &str) -> Result<()> {
     let now = now_iso();
     let affected = sqlx::query(
         "UPDATE pipeline_run_steps

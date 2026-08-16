@@ -214,9 +214,7 @@ pub(super) fn parse_video_gen_params(
  * @returns None 表示无 requires 或解析失败；Some(items) 表示要求项列表（含 project: 前缀原样保留）
  */
 pub(super) fn parse_business_requires(review_policy_json: &Option<String>) -> Option<Vec<String>> {
-    let raw = review_policy_json
-        .as_deref()?
-        .trim();
+    let raw = review_policy_json.as_deref()?.trim();
     if raw.is_empty() {
         return None;
     }
@@ -959,7 +957,10 @@ mod tests {
             normalize_step_type(&build_step(Some("unknown"), "queued", None)),
             "design"
         );
-        assert_eq!(normalize_step_type(&build_step(None, "queued", None)), "design");
+        assert_eq!(
+            normalize_step_type(&build_step(None, "queued", None)),
+            "design"
+        );
     }
 
     #[test]
@@ -1004,12 +1005,7 @@ mod tests {
     #[test]
     fn parse_image_gen_params_uses_defaults_when_no_policy() {
         // 无 review_policy_json → 使用 input_summary 作为 prompt，size/n/model/endpoint 全部默认
-        let step = build_step_with_policy(
-            Some("image_gen"),
-            "queued",
-            None,
-            Some("生成角色立绘"),
-        );
+        let step = build_step_with_policy(Some("image_gen"), "queued", None, Some("生成角色立绘"));
         let (prompt, size, n, model, endpoint_id) = parse_image_gen_params(&step);
         assert_eq!(prompt, "生成角色立绘");
         assert_eq!(size, "1024x1024");
@@ -1026,7 +1022,8 @@ mod tests {
     #[test]
     fn parse_image_gen_params_reads_camel_and_snake_endpoint() {
         // camelCase endpointId
-        let policy_camel = r#"{"prompt":"cat","size":"512x512","n":2,"model":"dall-e-3","endpointId":"ep-1"}"#;
+        let policy_camel =
+            r#"{"prompt":"cat","size":"512x512","n":2,"model":"dall-e-3","endpointId":"ep-1"}"#;
         let step_camel =
             build_step_with_policy(Some("image_gen"), "queued", Some(policy_camel), None);
         let (prompt_camel, size_camel, n_camel, model_camel, endpoint_camel) =
@@ -1062,12 +1059,8 @@ mod tests {
     #[test]
     fn parse_video_gen_params_defaults_and_override() {
         // 默认值兜底
-        let step_default = build_step_with_policy(
-            Some("video_gen"),
-            "queued",
-            None,
-            Some("生成开场镜头"),
-        );
+        let step_default =
+            build_step_with_policy(Some("video_gen"), "queued", None, Some("生成开场镜头"));
         let (prompt, model, duration, aspect) = parse_video_gen_params(&step_default);
         assert_eq!(prompt, "生成开场镜头");
         assert_eq!(model, "wan2.1-t2v-480p");

@@ -115,13 +115,11 @@ pub async fn create_asset(
     ensure_project_access(&state, &user_id.0, &project_id).await?;
     validate_asset_fields(&req.name, &req.asset_type, &req.url)?;
 
-    let metadata = req
-        .metadata
-        .map(|mut value| {
-            // sizeBytes/sha256 等服务端专有键不接受客户端初始值（配额统计依赖它们）。
-            repo::strip_server_owned_metadata_keys(&mut value);
-            value.to_string()
-        });
+    let metadata = req.metadata.map(|mut value| {
+        // sizeBytes/sha256 等服务端专有键不接受客户端初始值（配额统计依赖它们）。
+        repo::strip_server_owned_metadata_keys(&mut value);
+        value.to_string()
+    });
     let asset = repo::create_asset(
         &state.db,
         &project_id,

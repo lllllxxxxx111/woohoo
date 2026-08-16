@@ -110,10 +110,7 @@ pub async fn validate_path_override(path_override: &str) -> AppResult<()> {
  * @param path_override 待校验的 path_override 值
  * @param dev_mode 是否为开发模式
  */
-pub async fn validate_path_override_with(
-    path_override: &str,
-    dev_mode: bool,
-) -> AppResult<()> {
+pub async fn validate_path_override_with(path_override: &str, dev_mode: bool) -> AppResult<()> {
     let trimmed = path_override.trim();
     if trimmed.is_empty() {
         return Ok(());
@@ -493,26 +490,47 @@ mod tests {
     #[test]
     fn always_blocked_ipv4_blocks_cloud_metadata_and_link_local() {
         // AWS / GCP 元数据
-        assert!(is_blocked_ip_with(&"169.254.169.254".parse().unwrap(), false));
-        assert!(is_blocked_ip_with(&"169.254.169.254".parse().unwrap(), true));
+        assert!(is_blocked_ip_with(
+            &"169.254.169.254".parse().unwrap(),
+            false
+        ));
+        assert!(is_blocked_ip_with(
+            &"169.254.169.254".parse().unwrap(),
+            true
+        ));
         // 链路本地
         assert!(is_blocked_ip_with(&"169.254.0.1".parse().unwrap(), false));
         assert!(is_blocked_ip_with(&"169.254.0.1".parse().unwrap(), true));
         // 阿里云元数据 100.100.100.200（属于 CGNAT 100.64.0.0/10）
-        assert!(is_blocked_ip_with(&"100.100.100.200".parse().unwrap(), false));
-        assert!(is_blocked_ip_with(&"100.100.100.200".parse().unwrap(), true));
+        assert!(is_blocked_ip_with(
+            &"100.100.100.200".parse().unwrap(),
+            false
+        ));
+        assert!(is_blocked_ip_with(
+            &"100.100.100.200".parse().unwrap(),
+            true
+        ));
         // CGNAT 边界
         assert!(is_blocked_ip_with(&"100.64.0.1".parse().unwrap(), true));
-        assert!(is_blocked_ip_with(&"100.127.255.255".parse().unwrap(), true));
+        assert!(is_blocked_ip_with(
+            &"100.127.255.255".parse().unwrap(),
+            true
+        ));
         // 0.0.0.0/8
         assert!(is_blocked_ip_with(&"0.0.0.0".parse().unwrap(), true));
         assert!(is_blocked_ip_with(&"0.1.2.3".parse().unwrap(), true));
         // 组播
         assert!(is_blocked_ip_with(&"224.0.0.1".parse().unwrap(), true));
-        assert!(is_blocked_ip_with(&"239.255.255.255".parse().unwrap(), true));
+        assert!(is_blocked_ip_with(
+            &"239.255.255.255".parse().unwrap(),
+            true
+        ));
         // reserved
         assert!(is_blocked_ip_with(&"240.0.0.1".parse().unwrap(), true));
-        assert!(is_blocked_ip_with(&"255.255.255.255".parse().unwrap(), true));
+        assert!(is_blocked_ip_with(
+            &"255.255.255.255".parse().unwrap(),
+            true
+        ));
         // TEST-NET
         assert!(is_blocked_ip_with(&"192.0.2.1".parse().unwrap(), true));
         assert!(is_blocked_ip_with(&"198.51.100.1".parse().unwrap(), true));
@@ -529,17 +547,32 @@ mod tests {
     fn prod_only_blocked_ipv4_blocks_loopback_and_rfc1918_in_prod() {
         // 生产模式：拒绝
         assert!(is_blocked_ip_with(&"127.0.0.1".parse().unwrap(), false));
-        assert!(is_blocked_ip_with(&"127.255.255.255".parse().unwrap(), false));
+        assert!(is_blocked_ip_with(
+            &"127.255.255.255".parse().unwrap(),
+            false
+        ));
         assert!(is_blocked_ip_with(&"10.0.0.1".parse().unwrap(), false));
-        assert!(is_blocked_ip_with(&"10.255.255.255".parse().unwrap(), false));
+        assert!(is_blocked_ip_with(
+            &"10.255.255.255".parse().unwrap(),
+            false
+        ));
         assert!(is_blocked_ip_with(&"172.16.0.1".parse().unwrap(), false));
-        assert!(is_blocked_ip_with(&"172.31.255.255".parse().unwrap(), false));
+        assert!(is_blocked_ip_with(
+            &"172.31.255.255".parse().unwrap(),
+            false
+        ));
         assert!(is_blocked_ip_with(&"192.168.0.1".parse().unwrap(), false));
-        assert!(is_blocked_ip_with(&"192.168.255.255".parse().unwrap(), false));
+        assert!(is_blocked_ip_with(
+            &"192.168.255.255".parse().unwrap(),
+            false
+        ));
 
         // 开发模式：允许（保持本地 Ollama / 内网开发场景可用）
         assert!(!is_blocked_ip_with(&"127.0.0.1".parse().unwrap(), true));
-        assert!(!is_blocked_ip_with(&"127.255.255.255".parse().unwrap(), true));
+        assert!(!is_blocked_ip_with(
+            &"127.255.255.255".parse().unwrap(),
+            true
+        ));
         assert!(!is_blocked_ip_with(&"10.0.0.1".parse().unwrap(), true));
         assert!(!is_blocked_ip_with(&"172.16.0.1".parse().unwrap(), true));
         assert!(!is_blocked_ip_with(&"192.168.1.100".parse().unwrap(), true));
@@ -578,19 +611,46 @@ mod tests {
     #[test]
     fn ipv4_mapped_ipv6_recurses_with_dev_mode() {
         // 始终禁止（云元数据 / 链路本地）：dev/prod 都拒绝
-        assert!(is_blocked_ip_with(&"::ffff:169.254.169.254".parse().unwrap(), false));
-        assert!(is_blocked_ip_with(&"::ffff:169.254.169.254".parse().unwrap(), true));
-        assert!(is_blocked_ip_with(&"::ffff:100.100.100.200".parse().unwrap(), true));
+        assert!(is_blocked_ip_with(
+            &"::ffff:169.254.169.254".parse().unwrap(),
+            false
+        ));
+        assert!(is_blocked_ip_with(
+            &"::ffff:169.254.169.254".parse().unwrap(),
+            true
+        ));
+        assert!(is_blocked_ip_with(
+            &"::ffff:100.100.100.200".parse().unwrap(),
+            true
+        ));
 
         // 仅生产禁止（loopback / RFC1918）：dev 允许
-        assert!(is_blocked_ip_with(&"::ffff:127.0.0.1".parse().unwrap(), false));
-        assert!(!is_blocked_ip_with(&"::ffff:127.0.0.1".parse().unwrap(), true));
-        assert!(is_blocked_ip_with(&"::ffff:10.0.0.1".parse().unwrap(), false));
-        assert!(!is_blocked_ip_with(&"::ffff:10.0.0.1".parse().unwrap(), true));
+        assert!(is_blocked_ip_with(
+            &"::ffff:127.0.0.1".parse().unwrap(),
+            false
+        ));
+        assert!(!is_blocked_ip_with(
+            &"::ffff:127.0.0.1".parse().unwrap(),
+            true
+        ));
+        assert!(is_blocked_ip_with(
+            &"::ffff:10.0.0.1".parse().unwrap(),
+            false
+        ));
+        assert!(!is_blocked_ip_with(
+            &"::ffff:10.0.0.1".parse().unwrap(),
+            true
+        ));
 
         // 公网 IPv4-mapped：dev/prod 都通过
-        assert!(!is_blocked_ip_with(&"::ffff:8.8.8.8".parse().unwrap(), false));
-        assert!(!is_blocked_ip_with(&"::ffff:8.8.8.8".parse().unwrap(), true));
+        assert!(!is_blocked_ip_with(
+            &"::ffff:8.8.8.8".parse().unwrap(),
+            false
+        ));
+        assert!(!is_blocked_ip_with(
+            &"::ffff:8.8.8.8".parse().unwrap(),
+            true
+        ));
     }
 
     /// 公网 IPv4 地址在任何模式下都通过
@@ -611,11 +671,23 @@ mod tests {
     #[test]
     fn public_ipv6_passes_in_both_modes() {
         // 2001:4860:4860::8888 (Google Public DNS)
-        assert!(!is_blocked_ip_with(&"2001:4860:4860::8888".parse().unwrap(), false));
-        assert!(!is_blocked_ip_with(&"2001:4860:4860::8888".parse().unwrap(), true));
+        assert!(!is_blocked_ip_with(
+            &"2001:4860:4860::8888".parse().unwrap(),
+            false
+        ));
+        assert!(!is_blocked_ip_with(
+            &"2001:4860:4860::8888".parse().unwrap(),
+            true
+        ));
         // 2606:4700:4700::1111 (Cloudflare DNS)
-        assert!(!is_blocked_ip_with(&"2606:4700:4700::1111".parse().unwrap(), false));
-        assert!(!is_blocked_ip_with(&"2606:4700:4700::1111".parse().unwrap(), true));
+        assert!(!is_blocked_ip_with(
+            &"2606:4700:4700::1111".parse().unwrap(),
+            false
+        ));
+        assert!(!is_blocked_ip_with(
+            &"2606:4700:4700::1111".parse().unwrap(),
+            true
+        ));
     }
 
     /// 生产模式 URL 校验：公网通过
@@ -657,21 +729,39 @@ mod tests {
     #[tokio::test]
     async fn validate_url_rejects_internal_in_prod() {
         // loopback
-        assert!(validate_endpoint_url_with("http://127.0.0.1:8080/", false).await.is_err());
-        assert!(validate_endpoint_url_with("http://127.255.255.255/", false).await.is_err());
-        assert!(validate_endpoint_url_with("http://[::1]:8080/", false).await.is_err());
+        assert!(validate_endpoint_url_with("http://127.0.0.1:8080/", false)
+            .await
+            .is_err());
+        assert!(validate_endpoint_url_with("http://127.255.255.255/", false)
+            .await
+            .is_err());
+        assert!(validate_endpoint_url_with("http://[::1]:8080/", false)
+            .await
+            .is_err());
 
         // 0.0.0.0
-        assert!(validate_endpoint_url_with("http://0.0.0.0:8080/", false).await.is_err());
+        assert!(validate_endpoint_url_with("http://0.0.0.0:8080/", false)
+            .await
+            .is_err());
 
         // RFC1918
-        assert!(validate_endpoint_url_with("http://10.0.0.1/", false).await.is_err());
-        assert!(validate_endpoint_url_with("http://172.16.0.1/", false).await.is_err());
-        assert!(validate_endpoint_url_with("http://172.31.255.255/", false).await.is_err());
-        assert!(validate_endpoint_url_with("http://192.168.1.1/", false).await.is_err());
+        assert!(validate_endpoint_url_with("http://10.0.0.1/", false)
+            .await
+            .is_err());
+        assert!(validate_endpoint_url_with("http://172.16.0.1/", false)
+            .await
+            .is_err());
+        assert!(validate_endpoint_url_with("http://172.31.255.255/", false)
+            .await
+            .is_err());
+        assert!(validate_endpoint_url_with("http://192.168.1.1/", false)
+            .await
+            .is_err());
 
         // 链路本地 + 云元数据
-        assert!(validate_endpoint_url_with("http://169.254.0.1/", false).await.is_err());
+        assert!(validate_endpoint_url_with("http://169.254.0.1/", false)
+            .await
+            .is_err());
         assert!(
             validate_endpoint_url_with("http://169.254.169.254/latest/meta-data/", false)
                 .await
@@ -686,12 +776,20 @@ mod tests {
         );
 
         // IPv6 链路本地 / ULA / 组播
-        assert!(validate_endpoint_url_with("http://[fe80::1]/", false).await.is_err());
-        assert!(validate_endpoint_url_with("http://[fc00::1]/", false).await.is_err());
-        assert!(validate_endpoint_url_with("http://[ff02::1]/", false).await.is_err());
+        assert!(validate_endpoint_url_with("http://[fe80::1]/", false)
+            .await
+            .is_err());
+        assert!(validate_endpoint_url_with("http://[fc00::1]/", false)
+            .await
+            .is_err());
+        assert!(validate_endpoint_url_with("http://[ff02::1]/", false)
+            .await
+            .is_err());
 
         // IPv4 组播
-        assert!(validate_endpoint_url_with("http://224.0.0.1/", false).await.is_err());
+        assert!(validate_endpoint_url_with("http://224.0.0.1/", false)
+            .await
+            .is_err());
 
         // 带路径 / 查询 / userinfo 的内网
         assert!(
@@ -709,15 +807,23 @@ mod tests {
     /// 生产模式 URL 校验：非 http/https 协议拒绝
     #[tokio::test]
     async fn validate_url_rejects_non_http_scheme_in_prod() {
-        assert!(validate_endpoint_url_with("ftp://example.com/", false).await.is_err());
-        assert!(validate_endpoint_url_with("file:///etc/passwd", false).await.is_err());
-        assert!(validate_endpoint_url_with("gopher://example.com/", false).await.is_err());
+        assert!(validate_endpoint_url_with("ftp://example.com/", false)
+            .await
+            .is_err());
+        assert!(validate_endpoint_url_with("file:///etc/passwd", false)
+            .await
+            .is_err());
+        assert!(validate_endpoint_url_with("gopher://example.com/", false)
+            .await
+            .is_err());
     }
 
     /// 生产模式 URL 校验：非法 / 空 / 缺 host URL 拒绝
     #[tokio::test]
     async fn validate_url_rejects_malformed_in_prod() {
-        assert!(validate_endpoint_url_with("not a url at all", false).await.is_err());
+        assert!(validate_endpoint_url_with("not a url at all", false)
+            .await
+            .is_err());
         assert!(validate_endpoint_url_with("http://", false).await.is_err());
         assert!(validate_endpoint_url_with("", false).await.is_err());
         assert!(validate_endpoint_url_with("   ", false).await.is_err());
@@ -728,29 +834,41 @@ mod tests {
     async fn validate_url_allows_loopback_and_rfc1918_in_dev() {
         // Ollama 默认端口
         assert!(
-            validate_endpoint_url_with("http://localhost:11434", true).await.is_ok(),
+            validate_endpoint_url_with("http://localhost:11434", true)
+                .await
+                .is_ok(),
             "开发模式 localhost:11434 (Ollama) 应通过"
         );
         assert!(
-            validate_endpoint_url_with("http://127.0.0.1:11434", true).await.is_ok(),
+            validate_endpoint_url_with("http://127.0.0.1:11434", true)
+                .await
+                .is_ok(),
             "开发模式 127.0.0.1:11434 (Ollama) 应通过"
         );
         assert!(
-            validate_endpoint_url_with("http://[::1]:11434", true).await.is_ok(),
+            validate_endpoint_url_with("http://[::1]:11434", true)
+                .await
+                .is_ok(),
             "开发模式 [::1]:11434 (IPv6 Ollama) 应通过"
         );
 
         // RFC1918 私网
         assert!(
-            validate_endpoint_url_with("http://192.168.1.100:8080", true).await.is_ok(),
+            validate_endpoint_url_with("http://192.168.1.100:8080", true)
+                .await
+                .is_ok(),
             "开发模式 192.168 应通过"
         );
         assert!(
-            validate_endpoint_url_with("http://10.0.0.5:8000", true).await.is_ok(),
+            validate_endpoint_url_with("http://10.0.0.5:8000", true)
+                .await
+                .is_ok(),
             "开发模式 10.x 应通过"
         );
         assert!(
-            validate_endpoint_url_with("http://172.16.0.1:3000", true).await.is_ok(),
+            validate_endpoint_url_with("http://172.16.0.1:3000", true)
+                .await
+                .is_ok(),
             "开发模式 172.16 应通过"
         );
     }
@@ -767,7 +885,9 @@ mod tests {
         );
         // 链路本地
         assert!(
-            validate_endpoint_url_with("http://169.254.0.1/", true).await.is_err(),
+            validate_endpoint_url_with("http://169.254.0.1/", true)
+                .await
+                .is_err(),
             "开发模式仍拒绝链路本地 169.254.0.1"
         );
         // 阿里云元数据
@@ -779,22 +899,30 @@ mod tests {
         );
         // IPv6 链路本地
         assert!(
-            validate_endpoint_url_with("http://[fe80::1]/", true).await.is_err(),
+            validate_endpoint_url_with("http://[fe80::1]/", true)
+                .await
+                .is_err(),
             "开发模式仍拒绝 IPv6 链路本地 [fe80::1]"
         );
         // IPv6 组播
         assert!(
-            validate_endpoint_url_with("http://[ff02::1]/", true).await.is_err(),
+            validate_endpoint_url_with("http://[ff02::1]/", true)
+                .await
+                .is_err(),
             "开发模式仍拒绝 IPv6 组播 [ff02::1]"
         );
         // IPv4 组播
         assert!(
-            validate_endpoint_url_with("http://224.0.0.1/", true).await.is_err(),
+            validate_endpoint_url_with("http://224.0.0.1/", true)
+                .await
+                .is_err(),
             "开发模式仍拒绝 IPv4 组播 224.0.0.1"
         );
         // 0.0.0.0 未指定
         assert!(
-            validate_endpoint_url_with("http://0.0.0.0:8080/", true).await.is_err(),
+            validate_endpoint_url_with("http://0.0.0.0:8080/", true)
+                .await
+                .is_err(),
             "开发模式仍拒绝 0.0.0.0"
         );
         // IPv4-mapped 云元数据
@@ -810,11 +938,15 @@ mod tests {
     #[tokio::test]
     async fn validate_url_rejects_non_http_scheme_in_dev() {
         assert!(
-            validate_endpoint_url_with("ftp://127.0.0.1/", true).await.is_err(),
+            validate_endpoint_url_with("ftp://127.0.0.1/", true)
+                .await
+                .is_err(),
             "开发模式仍拒绝 ftp 协议"
         );
         assert!(
-            validate_endpoint_url_with("file:///etc/passwd", true).await.is_err(),
+            validate_endpoint_url_with("file:///etc/passwd", true)
+                .await
+                .is_err(),
             "开发模式仍拒绝 file 协议"
         );
     }
@@ -854,18 +986,18 @@ mod tests {
             "相对路径应通过"
         );
         assert!(
-            validate_path_override_with("v1/responses", false).await.is_ok(),
+            validate_path_override_with("v1/responses", false)
+                .await
+                .is_ok(),
             "无前导斜杠的相对路径应通过"
         );
         assert!(
             validate_path_override_with("", false).await.is_ok(),
             "空 path_override 应通过"
         );
-        assert!(
-            validate_path_override_with("/v1/video/generations", true)
-                .await
-                .is_ok(),
-        );
+        assert!(validate_path_override_with("/v1/video/generations", true)
+            .await
+            .is_ok(),);
     }
 
     /// path_override 绝对 URL：公网通过，内网按模式校验
@@ -938,11 +1070,7 @@ mod tests {
             false,
         )
         .await;
-        assert!(
-            result.is_err(),
-            "GCP 元数据地址应被拒绝: {:?}",
-            result
-        );
+        assert!(result.is_err(), "GCP 元数据地址应被拒绝: {:?}", result);
     }
 
     /// IP 字面量同步校验路径（不触发 DNS）
@@ -953,17 +1081,17 @@ mod tests {
         // dev_mode=false 表示生产模式（严格执行黑名单）
         let cases: &[(&str, bool, bool)] = &[
             // 127.0.0.1 loopback — 仅生产禁止
-            ("127.0.0.1", true, false),  // dev: allowed
-            ("127.0.0.1", false, true),  // prod: blocked
+            ("127.0.0.1", true, false), // dev: allowed
+            ("127.0.0.1", false, true), // prod: blocked
             // 169.254.169.254 链路本地 / 云元数据 — 始终禁止
             ("169.254.169.254", true, true),  // dev: still blocked
             ("169.254.169.254", false, true), // prod: blocked
             // 10.0.0.1 RFC1918 — 仅生产禁止
-            ("10.0.0.1", true, false),  // dev: allowed
-            ("10.0.0.1", false, true),  // prod: blocked
+            ("10.0.0.1", true, false), // dev: allowed
+            ("10.0.0.1", false, true), // prod: blocked
             // 192.168.1.1 RFC1918 — 仅生产禁止
-            ("192.168.1.1", true, false),  // dev: allowed
-            ("192.168.1.1", false, true),  // prod: blocked
+            ("192.168.1.1", true, false), // dev: allowed
+            ("192.168.1.1", false, true), // prod: blocked
             // 100.100.100.200 阿里云元数据 — 始终禁止（CGNAT 范围）
             ("100.100.100.200", true, true),  // dev: still blocked
             ("100.100.100.200", false, true), // prod: blocked
@@ -975,15 +1103,9 @@ mod tests {
             ("1.1.1.1", false, false),
         ];
         for (host, dev_mode, should_block) in cases {
-            let result =
-                validate_endpoint_url_with(&format!("http://{}/", host), *dev_mode).await;
+            let result = validate_endpoint_url_with(&format!("http://{}/", host), *dev_mode).await;
             if *should_block {
-                assert!(
-                    result.is_err(),
-                    "{} (dev_mode={}) 应被拒绝",
-                    host,
-                    dev_mode
-                );
+                assert!(result.is_err(), "{} (dev_mode={}) 应被拒绝", host, dev_mode);
             } else {
                 assert!(
                     result.is_ok(),
@@ -1000,15 +1122,15 @@ mod tests {
     #[test]
     fn redirect_attack_targets_all_blocked() {
         let redirect_targets = [
-            ("169.254.169.254", true),   // AWS/GCP metadata - always blocked
-            ("100.100.100.200", true),   // Aliyun metadata - always blocked
-            ("127.0.0.1", false),        // loopback - blocked in prod only
-            ("10.0.0.1", false),         // RFC1918 - blocked in prod only
+            ("169.254.169.254", true), // AWS/GCP metadata - always blocked
+            ("100.100.100.200", true), // Aliyun metadata - always blocked
+            ("127.0.0.1", false),      // loopback - blocked in prod only
+            ("10.0.0.1", false),       // RFC1918 - blocked in prod only
             ("172.16.0.1", false),
             ("192.168.1.1", false),
-            ("::1", false),              // IPv6 loopback
-            ("fe80::1", true),           // IPv6 link-local - always
-            ("fc00::1", false),          // IPv6 ULA
+            ("::1", false),     // IPv6 loopback
+            ("fe80::1", true),  // IPv6 link-local - always
+            ("fc00::1", false), // IPv6 ULA
         ];
 
         for (target, always_blocked) in &redirect_targets {
@@ -1045,10 +1167,7 @@ mod tests {
         );
 
         // 全部公网 IP 应通过
-        let all_public: Vec<IpAddr> = vec![
-            "8.8.8.8".parse().unwrap(),
-            "1.1.1.1".parse().unwrap(),
-        ];
+        let all_public: Vec<IpAddr> = vec!["8.8.8.8".parse().unwrap(), "1.1.1.1".parse().unwrap()];
         let all_safe = all_public.iter().all(|ip| !is_blocked_ip_with(ip, false));
         assert!(all_safe, "全部公网 IP 应通过 DNS rebinding 校验");
     }
@@ -1104,10 +1223,7 @@ mod tests {
     #[test]
     fn dev_mode_defaults_to_false() {
         let _guard = EnvGuard::acquire();
-        assert!(
-            !dev_mode_allows_private(),
-            "未设置环境变量时应为生产模式"
-        );
+        assert!(!dev_mode_allows_private(), "未设置环境变量时应为生产模式");
     }
 
     /// dev_mode_allows_private: true/1/yes/TRUE 等真值返回 true
@@ -1116,11 +1232,7 @@ mod tests {
         let _guard = EnvGuard::acquire();
         for value in &["true", "1", "yes", "TRUE", "Yes", "  true  "] {
             std::env::set_var(DEV_ALLOW_PRIVATE_ENV, value);
-            assert!(
-                dev_mode_allows_private(),
-                "值 {:?} 应识别为开发模式",
-                value
-            );
+            assert!(dev_mode_allows_private(), "值 {:?} 应识别为开发模式", value);
         }
     }
 
@@ -1193,10 +1305,7 @@ mod tests {
             err.contains(DEV_ALLOW_PRIVATE_ENV),
             "错误信息应包含环境变量名"
         );
-        assert!(
-            err.contains("production"),
-            "错误信息应包含生产环境提示"
-        );
+        assert!(err.contains("production"), "错误信息应包含生产环境提示");
     }
 
     /// 启动检查：dev=true + 非生产 → 允许启动

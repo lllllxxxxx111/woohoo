@@ -2,6 +2,7 @@ import js from '@eslint/js';
 import globals from 'globals';
 import tseslint from '@typescript-eslint/eslint-plugin';
 import tsParser from '@typescript-eslint/parser';
+import reactHooks from 'eslint-plugin-react-hooks';
 import eslintConfigPrettier from 'eslint-config-prettier';
 
 /**
@@ -39,10 +40,14 @@ export default [
     },
     plugins: {
       '@typescript-eslint': tseslint,
+      'react-hooks': reactHooks,
     },
     rules: {
       /** 继承 @typescript-eslint/recommended 规则 */
       ...tseslint.configs.recommended.rules,
+
+      /** React Hooks 规则（组件里的 eslint-disable-next-line 注释依赖它存在） */
+      ...reactHooks.configs.recommended.rules,
 
       /** 关闭 no-undef，TypeScript 编译器已处理未定义变量检查 */
       'no-undef': 'off',
@@ -56,8 +61,11 @@ export default [
       /** TypeScript any 类型使用警告 */
       '@typescript-eslint/no-explicit-any': 'warn',
 
-      /** 未使用变量报错，下划线前缀参数忽略 */
-      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      /** 未使用变量报错，下划线前缀（含数组解构占位）忽略 */
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', destructuredArrayIgnorePattern: '^_' },
+      ],
 
       /** 不强制函数返回类型声明 */
       '@typescript-eslint/explicit-function-return-type': 'off',

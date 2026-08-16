@@ -672,13 +672,7 @@ pub(crate) async fn halt_failed_session(
     if matches!(session.state.as_str(), "completed" | "halted") {
         return Ok(());
     }
-    let updated = repo::halt_session_with_audit(
-        &state.db,
-        session_id,
-        reason,
-        "system",
-    )
-    .await?;
+    let updated = repo::halt_session_with_audit(&state.db, session_id, reason, "system").await?;
     let payload = json!({ "reason": reason, "state": updated.state, "haltedBy": "system" });
     let _ = repo::create_event(
         &state.db,
@@ -870,14 +864,9 @@ pub async fn halt(
         )));
     }
 
-    let session = repo::halt_session_with_audit(
-        &state.db,
-        &session_id,
-        &req.reason,
-        &user_id.0,
-    )
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    let session = repo::halt_session_with_audit(&state.db, &session_id, &req.reason, &user_id.0)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let payload = json!({
         "reason": req.reason,
@@ -1010,10 +999,12 @@ pub async fn get_queue(
         .map(|a| BlockedMember {
             agent_id: a.agent_id.clone(),
             goal: a.goal.clone(),
-            blocking_reason: a
-                .failure_reason
-                .clone()
-                .unwrap_or_else(|| format!("智能体 {} 有 {} 个未解决问题", a.agent_id, a.blocking_question_count)),
+            blocking_reason: a.failure_reason.clone().unwrap_or_else(|| {
+                format!(
+                    "智能体 {} 有 {} 个未解决问题",
+                    a.agent_id, a.blocking_question_count
+                )
+            }),
             blocking_question_count: a.blocking_question_count,
         })
         .collect();

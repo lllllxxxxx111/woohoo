@@ -537,7 +537,11 @@ pub async fn stream_pipeline_run(
 /**
  * 根据ID获取流程运行记录并验证用户权限
  */
-pub(crate) async fn get_run_by_id(pool: &SqlitePool, user_id: &str, run_id: &str) -> AppResult<PipelineRun> {
+pub(crate) async fn get_run_by_id(
+    pool: &SqlitePool,
+    user_id: &str,
+    run_id: &str,
+) -> AppResult<PipelineRun> {
     sqlx::query_as::<_, PipelineRun>("SELECT * FROM pipeline_runs WHERE id = ? AND user_id = ?")
         .bind(run_id)
         .bind(user_id)

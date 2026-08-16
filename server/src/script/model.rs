@@ -45,7 +45,11 @@ pub struct ScriptResponse {
 }
 
 impl ScriptResponse {
-    pub fn new(script: Script, version_row: &crate::content_version::model::ContentVersionRow, deduplicated: bool) -> Self {
+    pub fn new(
+        script: Script,
+        version_row: &crate::content_version::model::ContentVersionRow,
+        deduplicated: bool,
+    ) -> Self {
         ScriptResponse {
             id: script.id,
             project_id: script.project_id,

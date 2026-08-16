@@ -166,15 +166,11 @@ async fn acquire_completion_lock(
                     Ok(content) if content == token => return Ok(CompletionLock { path }),
                     Ok(_) => {
                         // 文件已被他人重建，当前持有者不是我们；不能删除它。
-                        return Err(AppError::Conflict(
-                            "上传会话正在完成，请稍后重试".into(),
-                        ));
+                        return Err(AppError::Conflict("上传会话正在完成，请稍后重试".into()));
                     }
                     Err(_) => {
                         // 锁文件已消失（被 stale 清理者移除），视为竞争失败。
-                        return Err(AppError::Conflict(
-                            "上传会话正在完成，请稍后重试".into(),
-                        ));
+                        return Err(AppError::Conflict("上传会话正在完成，请稍后重试".into()));
                     }
                 }
             }
@@ -658,10 +654,11 @@ pub async fn upload_part(
         // 上面的状态校验与这里之间存在多个 await（哈希、落盘）；迟到/重复的
         // 分片请求必须在写事务内复查状态，否则会把 completed/aborted 会话
         // 复活成 uploading，导致配额被双倍占用、幂等 complete 失效。
-        let current_status: String = sqlx::query_scalar("SELECT status FROM upload_sessions WHERE id = ?")
-            .bind(session_id)
-            .fetch_one(&mut *conn)
-            .await?;
+        let current_status: String =
+            sqlx::query_scalar("SELECT status FROM upload_sessions WHERE id = ?")
+                .bind(session_id)
+                .fetch_one(&mut *conn)
+                .await?;
         if !is_active(&current_status) {
             return Err(AppError::Conflict(format!(
                 "上传会话状态为 {current_status}，无法继续上传分片"
@@ -1620,11 +1617,10 @@ async fn finalize_completed_session(
         // 事务内复查会话状态：完成锁的 stale-break 竞态理论上可能让两个
         // finalize 并行推进，这里保证只有第一个能把活跃会话推进到 completed，
         // 不会出现双份资产 / 引用计数被加两次。
-        let status: String =
-            sqlx::query_scalar("SELECT status FROM upload_sessions WHERE id = ?")
-                .bind(&session_id)
-                .fetch_one(&mut *conn)
-                .await?;
+        let status: String = sqlx::query_scalar("SELECT status FROM upload_sessions WHERE id = ?")
+            .bind(&session_id)
+            .fetch_one(&mut *conn)
+            .await?;
         if !is_active(&status) {
             return Err(AppError::Conflict(format!(
                 "上传会话状态为 {status}，无法完成"
@@ -1721,9 +1717,7 @@ async fn finalize_completed_session(
         .execute(&mut *conn)
         .await?;
         if completed.rows_affected() == 0 {
-            return Err(AppError::Conflict(
-                "上传会话状态已变更，无法完成".into(),
-            ));
+            return Err(AppError::Conflict("上传会话状态已变更，无法完成".into()));
         }
 
         Ok((asset, deduplicated, staging_to_remove))

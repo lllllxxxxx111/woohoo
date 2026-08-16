@@ -89,8 +89,7 @@ async fn reconcile_active_sessions(state: &AppState) -> anyhow::Result<()> {
         }
 
         // 派发就绪任务（依赖已完成）
-        if let Err(error) =
-            handlers::dispatch_ready_assignments(state, &user_id, &session_id).await
+        if let Err(error) = handlers::dispatch_ready_assignments(state, &user_id, &session_id).await
         {
             tracing::warn!(session_id = %session_id, error = %error, "failed to dispatch ready collaboration assignments");
         }
@@ -101,8 +100,7 @@ async fn reconcile_active_sessions(state: &AppState) -> anyhow::Result<()> {
             .iter()
             .filter(|assignment| matches!(assignment.status.as_str(), "assigned" | "running"))
         {
-            if let Err(error) =
-                reconcile_assignment(state, &user_id, &session_id, assignment).await
+            if let Err(error) = reconcile_assignment(state, &user_id, &session_id, assignment).await
             {
                 tracing::warn!(
                     session_id = %session_id,
@@ -115,7 +113,10 @@ async fn reconcile_active_sessions(state: &AppState) -> anyhow::Result<()> {
 
         // 重新评估是否需要 halt / 自动入场
         let refreshed = repo::list_assignments(&state.db, &session_id).await?;
-        if refreshed.iter().any(|assignment| assignment.status == "failed") {
+        if refreshed
+            .iter()
+            .any(|assignment| assignment.status == "failed")
+        {
             handlers::halt_failed_session(state, &session_id, "服务恢复时发现协同任务已失败或丢失")
                 .await?;
         } else {
@@ -168,14 +169,8 @@ async fn recover_session(
             error_codes::TASK_UNRECOVERABLE,
             session.state
         );
-        let _ = repo::update_assignment_failure_reason(
-            &state.db,
-            session_id,
-            &reason,
-        )
-        .await;
-        let _ =
-            handlers::halt_failed_session(state, session_id, &reason).await?;
+        let _ = repo::update_assignment_failure_reason(&state.db, session_id, &reason).await;
+        let _ = handlers::halt_failed_session(state, session_id, &reason).await?;
         return Ok(());
     }
 
@@ -214,9 +209,7 @@ async fn reconcile_assignment(
     };
 
     match state.ai_runtime.get_task(user_id, task_id).await {
-        Some(task)
-            if matches!(task.status, AiTaskStatus::Completed | AiTaskStatus::Failed) =>
-        {
+        Some(task) if matches!(task.status, AiTaskStatus::Completed | AiTaskStatus::Failed) => {
             sync_terminal_task(state, &task).await?;
         }
         Some(_) => {}
@@ -229,8 +222,8 @@ async fn reconcile_assignment(
                 task_id
             );
             tracing::warn!(session_id = %session_id, assignment_id = %assignment.id, task_id = %task_id, "AI task missing during reconcile");
-            let _ = repo::update_assignment_failure_reason(&state.db, &assignment.id, &reason)
-                .await;
+            let _ =
+                repo::update_assignment_failure_reason(&state.db, &assignment.id, &reason).await;
             let updated = repo::update_assignment_status(
                 &state.db,
                 &assignment.id,

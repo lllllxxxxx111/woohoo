@@ -411,8 +411,7 @@ async fn main() {
         )
         .route(
             "/api/projects/{project_id}/uploads/{session_id}",
-            get(asset::handlers::get_upload_session)
-                .delete(asset::handlers::abort_upload_session),
+            get(asset::handlers::get_upload_session).delete(asset::handlers::abort_upload_session),
         )
         .route(
             "/api/projects/{project_id}/uploads/{session_id}/complete",

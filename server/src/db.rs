@@ -99,9 +99,7 @@ pub async fn init_db(database_url: &str, ai_max_concurrent_tasks: usize) -> Sqli
     pool
 }
 
-pub(crate) async fn run_schema_migrations(
-    pool: &SqlitePool,
-) -> Result<Vec<String>, sqlx::Error> {
+pub(crate) async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<String>, sqlx::Error> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
             version    TEXT PRIMARY KEY NOT NULL,
@@ -385,9 +383,7 @@ async fn ensure_pipeline_prompt_optimization_step_keys(
     pool: &SqlitePool,
 ) -> Result<(), sqlx::Error> {
     let tables: HashSet<String> = list_all_tables(pool).await?.into_iter().collect();
-    if !tables.contains("pipeline_prompt_optimizations")
-        || !tables.contains("pipeline_run_steps")
-    {
+    if !tables.contains("pipeline_prompt_optimizations") || !tables.contains("pipeline_run_steps") {
         return Ok(());
     }
 
@@ -645,9 +641,7 @@ async fn apply_migration_026_pipeline_prompt_optimization_versions(
  * @param pool 数据库连接池
  * @returns true 表示本次执行了迁移；false 表示已应用过（幂等跳过）
  */
-async fn apply_migration_028_billing_ref_id_unique(
-    pool: &SqlitePool,
-) -> Result<bool, sqlx::Error> {
+async fn apply_migration_028_billing_ref_id_unique(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
     const VERSION: &str = "028_billing_ref_id_unique";
 
     if has_schema_migration(pool, VERSION).await? {
@@ -4293,9 +4287,33 @@ mod tests {
 
         // 迁移前插入 3 条白名单事件
         let before_rows: Vec<(&str, &str, &str, &str, &str, &str, &str)> = vec![
-            ("evt-1", "run-1", "step-1", "step_started", r#"{"k":1}"#, "system", "2026-04-14T00:01:00Z"),
-            ("evt-2", "run-1", "step-1", "step_completed", r#"{"k":2}"#, "scheduler", "2026-04-14T00:02:00Z"),
-            ("evt-3", "run-1", "step-2", "step_failed", r#"{"k":3}"#, "api", "2026-04-14T00:03:00Z"),
+            (
+                "evt-1",
+                "run-1",
+                "step-1",
+                "step_started",
+                r#"{"k":1}"#,
+                "system",
+                "2026-04-14T00:01:00Z",
+            ),
+            (
+                "evt-2",
+                "run-1",
+                "step-1",
+                "step_completed",
+                r#"{"k":2}"#,
+                "scheduler",
+                "2026-04-14T00:02:00Z",
+            ),
+            (
+                "evt-3",
+                "run-1",
+                "step-2",
+                "step_failed",
+                r#"{"k":3}"#,
+                "api",
+                "2026-04-14T00:03:00Z",
+            ),
         ];
         for (id, run_id, step_id, event_type, payload, source, created_at) in &before_rows {
             sqlx::query(
@@ -4352,7 +4370,11 @@ mod tests {
             assert_eq!(run_id, expected.1, "run_id 不匹配");
             assert_eq!(step_id.as_deref(), Some(expected.2), "step_id 不匹配");
             assert_eq!(event_type, expected.3, "event_type 不匹配");
-            assert_eq!(payload_json.as_deref(), Some(expected.4), "payload_json 不匹配");
+            assert_eq!(
+                payload_json.as_deref(),
+                Some(expected.4),
+                "payload_json 不匹配"
+            );
             assert_eq!(source, expected.5, "source 不匹配");
             assert_eq!(created_at, expected.6, "created_at 不匹配");
         }
@@ -4808,10 +4830,7 @@ mod tests {
         let applied2 = apply_migration_026_pipeline_prompt_optimization_versions(&pool)
             .await
             .expect("second 026 run should be idempotent");
-        assert!(
-            !applied2,
-            "第二次启动应返回 false（已应用，不重复执行）"
-        );
+        assert!(!applied2, "第二次启动应返回 false（已应用，不重复执行）");
 
         // schema_migrations 中 026 仅一条记录
         let count: i64 = sqlx::query_scalar(
@@ -4989,7 +5008,10 @@ mod tests {
         .expect("failed to fetch backfilled step_key");
         assert_eq!(
             backfilled,
-            vec!["outline_generate".to_string(), "outline_generate".to_string()],
+            vec![
+                "outline_generate".to_string(),
+                "outline_generate".to_string()
+            ],
             "step_key 应被回填为 pipeline_run_steps.step_key 的值"
         );
 

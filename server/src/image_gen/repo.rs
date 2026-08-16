@@ -26,7 +26,15 @@ pub async fn create_generation(
 ) -> Result<ImageGeneration> {
     let id = Uuid::new_v4().to_string();
     create_generation_with_id(
-        pool, &id, user_id, project_id, prompt, model, size, n, cost_credits,
+        pool,
+        &id,
+        user_id,
+        project_id,
+        prompt,
+        model,
+        size,
+        n,
+        cost_credits,
     )
     .await
 }

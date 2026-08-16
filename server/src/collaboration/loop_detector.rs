@@ -77,10 +77,7 @@ impl LoopDetector {
     }
 
     /// 检查同智能体重复追问是否达到硬上限
-    async fn check_question_limit(
-        pool: &SqlitePool,
-        session_id: &str,
-    ) -> Result<Vec<LoopSignal>> {
+    async fn check_question_limit(pool: &SqlitePool, session_id: &str) -> Result<Vec<LoopSignal>> {
         let assignments = repo::list_assignments(pool, session_id).await?;
 
         let over_limit = assignments
@@ -124,8 +121,8 @@ impl LoopDetector {
         pool: &SqlitePool,
         session_id: &str,
     ) -> Result<Vec<LoopSignal>> {
-        let contents = repo::get_recent_question_contents(pool, session_id, SEMANTIC_WINDOW_SIZE)
-            .await?;
+        let contents =
+            repo::get_recent_question_contents(pool, session_id, SEMANTIC_WINDOW_SIZE).await?;
 
         if contents.len() < 2 {
             return Ok(vec![]);
@@ -288,7 +285,11 @@ mod tests {
         let a = "如何设计大纲结构";
         let b = "大纲结构怎么设计";
         let sim = jaccard_similarity(a, b);
-        assert!(sim > 0.3, "similar questions should have similarity > 0.3, got {}", sim);
+        assert!(
+            sim > 0.3,
+            "similar questions should have similarity > 0.3, got {}",
+            sim
+        );
     }
 
     #[test]
@@ -305,7 +306,10 @@ mod tests {
 
     #[test]
     fn calculate_level_semantic_signal_elevates_level() {
-        let signals = vec![LoopSignal::SemanticSimilarQuestion, LoopSignal::PingPongBetweenAgents];
+        let signals = vec![
+            LoopSignal::SemanticSimilarQuestion,
+            LoopSignal::PingPongBetweenAgents,
+        ];
         assert_eq!(LoopDetector::calculate_level(&signals, 10), 2);
     }
 }

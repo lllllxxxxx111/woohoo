@@ -36,10 +36,9 @@ pub async fn get_storyboard(
         None => return Ok(Json(None)),
     };
 
-    let latest =
-        version_repo::get_latest_version(&state.db, &project_id, ContentType::Storyboard)
-            .await
-            .map_err(AppError::Sqlx)?;
+    let latest = version_repo::get_latest_version(&state.db, &project_id, ContentType::Storyboard)
+        .await
+        .map_err(AppError::Sqlx)?;
 
     let response = match latest {
         Some(row) => StoryboardResponse::new(storyboard, &row, false),
@@ -195,7 +194,8 @@ fn resolve_storyboard_line_id(
 }
 
 /// 从当前分镜构建快照（用于无版本行时计算内容哈希）
-fn build_snapshot_from_storyboard(storyboard: &Storyboard) -> StoryboardSnapshot {    StoryboardSnapshot {
+fn build_snapshot_from_storyboard(storyboard: &Storyboard) -> StoryboardSnapshot {
+    StoryboardSnapshot {
         lines: storyboard
             .lines
             .iter()
@@ -293,7 +293,12 @@ fn escape_markdown_table_cell(value: &str) -> String {
 mod tests {
     use super::*;
 
-    fn input_line(id: Option<&str>, scene_number: i64, description: &str, duration: i64) -> StoryboardLineInput {
+    fn input_line(
+        id: Option<&str>,
+        scene_number: i64,
+        description: &str,
+        duration: i64,
+    ) -> StoryboardLineInput {
         StoryboardLineInput {
             id: id.map(str::to_string),
             scene_number,
@@ -303,7 +308,12 @@ mod tests {
         }
     }
 
-    fn identity(id: &str, scene_number: i64, description: &str, duration: i64) -> repo::StoryboardLineIdentity {
+    fn identity(
+        id: &str,
+        scene_number: i64,
+        description: &str,
+        duration: i64,
+    ) -> repo::StoryboardLineIdentity {
         repo::StoryboardLineIdentity {
             id: id.to_string(),
             scene_number,
@@ -343,8 +353,7 @@ mod tests {
     #[test]
     fn resolve_line_id_generates_new_id_when_content_changed() {
         let existing = vec![identity("old-1", 1, "旧描述", 3)];
-        let resolved =
-            resolve_storyboard_line_id(&input_line(None, 1, "新描述", 3), 0, &existing);
+        let resolved = resolve_storyboard_line_id(&input_line(None, 1, "新描述", 3), 0, &existing);
         assert_ne!(resolved, "old-1");
         assert!(!resolved.is_empty());
     }

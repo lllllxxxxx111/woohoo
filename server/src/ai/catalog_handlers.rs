@@ -154,8 +154,7 @@ pub async fn update_endpoint(
     };
 
     // 校验连接字段：validate_connection_fields 接受明文，需要解密（若已是密文）
-    let next_api_key_for_validation =
-        api_key_crypto::maybe_decrypt(&next_api_key_stored)?;
+    let next_api_key_for_validation = api_key_crypto::maybe_decrypt(&next_api_key_stored)?;
     validate_connection_fields(&req.provider, &req.base_url, &next_api_key_for_validation).await?;
 
     let endpoint = sqlx::query_as::<_, AiEndpoint>(
@@ -333,13 +332,14 @@ pub async fn list_endpoint_models(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let endpoint =
-            sqlx::query_as::<_, AiEndpoint>("SELECT * FROM ai_endpoints WHERE id = ? AND user_id = ?")
-                .bind(endpoint_id)
-                .bind(&user_id.0)
-                .fetch_optional(&state.db)
-                .await?
-                .ok_or_else(|| AppError::NotFound("AI 通道不存在".into()))?;
+        let endpoint = sqlx::query_as::<_, AiEndpoint>(
+            "SELECT * FROM ai_endpoints WHERE id = ? AND user_id = ?",
+        )
+        .bind(endpoint_id)
+        .bind(&user_id.0)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("AI 通道不存在".into()))?;
         // 惰性迁移：若数据库中是旧明文 key，加密后写回
         api_key_crypto::migrate_endpoint_if_needed(&state.db, &endpoint).await?;
         // 重新读取（迁移后值已变化）

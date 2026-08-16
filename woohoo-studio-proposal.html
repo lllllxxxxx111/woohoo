@@ -1,0 +1,2138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Woohoo Studio - AI 多智能体视频创作工作台 | TRAE AI 创造力大赛</title>
+    <style>
+        /* ========== CSS 变量与主题 ========== */
+        :root {
+            --bg-primary: #0a0e1a;
+            --bg-secondary: #111827;
+            --bg-card: rgba(255, 255, 255, 0.04);
+            --bg-card-hover: rgba(255, 255, 255, 0.08);
+            --border-color: rgba(255, 255, 255, 0.1);
+            --border-color-hover: rgba(0, 212, 255, 0.4);
+            --text-primary: #ffffff;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent-cyan: #00d4ff;
+            --accent-blue: #0099ff;
+            --accent-purple: #8b5cf6;
+            --accent-green: #10b981;
+            --accent-pink: #ec4899;
+            --gradient-main: linear-gradient(135deg, #00d4ff 0%, #0099ff 50%, #8b5cf6 100%);
+            --gradient-bg: linear-gradient(180deg, #0a0e1a 0%, #1a1f35 50%, #0f172a 100%);
+            --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.3);
+            --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
+            --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.5);
+            --radius-sm: 8px;
+            --radius-md: 12px;
+            --radius-lg: 16px;
+            --radius-xl: 24px;
+        }
+
+        /* ========== 基础样式重置 ========== */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+            font-size: 16px;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+            background: var(--gradient-bg);
+            color: var(--text-primary);
+            line-height: 1.6;
+            overflow-x: hidden;
+            min-height: 100vh;
+        }
+
+        /* 背景装饰 */
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background:
+                radial-gradient(circle at 20% 20%, rgba(0, 212, 255, 0.08) 0%, transparent 50%),
+                radial-gradient(circle at 80% 80%, rgba(139, 92, 246, 0.06) 0%, transparent 50%),
+                radial-gradient(circle at 50% 50%, rgba(0, 153, 255, 0.04) 0%, transparent 70%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* ========== 导航栏 ========== */
+        .navbar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 1000;
+            background: rgba(10, 14, 26, 0.85);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--border-color);
+            padding: 0 2rem;
+            transition: all 0.3s ease;
+        }
+
+        .navbar-content {
+            max-width: 1400px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            height: 64px;
+        }
+
+        .navbar-logo {
+            font-size: 1.25rem;
+            font-weight: 700;
+            background: var(--gradient-main);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: -0.02em;
+        }
+
+        .navbar-nav {
+            display: flex;
+            gap: 2rem;
+            list-style: none;
+        }
+
+        .navbar-nav a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.875rem;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            position: relative;
+        }
+
+        .navbar-nav a:hover {
+            color: var(--accent-cyan);
+        }
+
+        .navbar-nav a::after {
+            content: '';
+            position: absolute;
+            bottom: -4px;
+            left: 0;
+            width: 0;
+            height: 2px;
+            background: var(--gradient-main);
+            transition: width 0.2s ease;
+        }
+
+        .navbar-nav a:hover::after {
+            width: 100%;
+        }
+
+        /* ========== 通用 Section 样式 ========== */
+        section {
+            position: relative;
+            z-index: 1;
+            padding: 6rem 2rem;
+            opacity: 0;
+            transform: translateY(30px);
+            transition: opacity 0.6s ease, transform 0.6s ease;
+        }
+
+        section.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .section-container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .section-title {
+            font-size: 2.5rem;
+            font-weight: 700;
+            text-align: center;
+            margin-bottom: 1rem;
+            letter-spacing: -0.02em;
+        }
+
+        .section-subtitle {
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 1.125rem;
+            margin-bottom: 4rem;
+            max-width: 700px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        /* ========== Hero 区域 ========== */
+        #hero {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            padding-top: 6rem;
+            overflow: hidden;
+        }
+
+        .hero-container {
+            max-width: 1400px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 4rem;
+            align-items: center;
+            width: 100%;
+            padding: 0 2rem;
+        }
+
+        .hero-content {
+            z-index: 2;
+        }
+
+        .hero-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: rgba(0, 212, 255, 0.1);
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            color: var(--accent-cyan);
+            margin-bottom: 1.5rem;
+            font-weight: 500;
+        }
+
+        .hero-title {
+            font-size: clamp(2.5rem, 5vw, 4rem);
+            font-weight: 800;
+            line-height: 1.1;
+            margin-bottom: 1.5rem;
+            letter-spacing: -0.03em;
+        }
+
+        .hero-title .gradient-text {
+            background: var(--gradient-main);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .hero-subtitle {
+            font-size: 1.25rem;
+            color: var(--text-secondary);
+            margin-bottom: 2rem;
+            line-height: 1.7;
+        }
+
+        .hero-description {
+            font-size: 1rem;
+            color: var(--text-muted);
+            margin-bottom: 2.5rem;
+            line-height: 1.8;
+            max-width: 540px;
+        }
+
+        .hero-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+            margin-bottom: 2.5rem;
+        }
+
+        .tag {
+            padding: 0.5rem 1rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            transition: all 0.2s ease;
+        }
+
+        .tag:hover {
+            border-color: var(--accent-cyan);
+            color: var(--accent-cyan);
+            background: rgba(0, 212, 255, 0.05);
+        }
+
+        .tag.highlight {
+            background: linear-gradient(135deg, rgba(0, 212, 255, 0.15), rgba(139, 92, 246, 0.15));
+            border-color: rgba(0, 212, 255, 0.3);
+            color: var(--accent-cyan);
+        }
+
+        /* 产品界面示意图 */
+        .hero-visual {
+            position: relative;
+            z-index: 2;
+        }
+
+        .product-mockup {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow-lg), 0 0 60px rgba(0, 212, 255, 0.1);
+            overflow: hidden;
+            transform: perspective(1000px) rotateY(-5deg) rotateX(2deg);
+            transition: transform 0.4s ease;
+        }
+
+        .product-mockup:hover {
+            transform: perspective(1000px) rotateY(0deg) rotateX(0deg);
+        }
+
+        .mockup-header {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 0.75rem 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .mockup-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--text-muted);
+        }
+
+        .mockup-dot:nth-child(1) { background: #ef4444; }
+        .mockup-dot:nth-child(2) { background: #eab308; }
+        .mockup-dot:nth-child(3) { background: #22c55e; }
+
+        .mockup-body {
+            display: grid;
+            grid-template-columns: 200px 1fr 240px;
+            min-height: 380px;
+        }
+
+        .mockup-sidebar {
+            background: rgba(0, 0, 0, 0.2);
+            border-right: 1px solid var(--border-color);
+            padding: 1rem;
+        }
+
+        .sidebar-logo {
+            font-size: 0.875rem;
+            font-weight: 700;
+            color: var(--accent-cyan);
+            margin-bottom: 1.5rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .sidebar-item {
+            padding: 0.625rem 0.75rem;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            border-radius: var(--radius-sm);
+            margin-bottom: 0.375rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .sidebar-item.active {
+            background: rgba(0, 212, 255, 0.1);
+            color: var(--accent-cyan);
+        }
+
+        .sidebar-item:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .mockup-main {
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .main-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .main-title {
+            font-size: 0.875rem;
+            font-weight: 600;
+        }
+
+        .main-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .action-btn {
+            padding: 0.375rem 0.75rem;
+            font-size: 0.7rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            color: var(--text-secondary);
+            cursor: pointer;
+        }
+
+        .chat-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            overflow: hidden;
+        }
+
+        .chat-message {
+            max-width: 85%;
+            padding: 0.75rem 1rem;
+            border-radius: var(--radius-md);
+            font-size: 0.75rem;
+            line-height: 1.5;
+        }
+
+        .chat-message.user {
+            background: linear-gradient(135deg, rgba(0, 212, 255, 0.15), rgba(0, 153, 255, 0.15));
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            align-self: flex-end;
+            color: var(--text-primary);
+        }
+
+        .chat-message.ai {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            align-self: flex-start;
+            color: var(--text-secondary);
+        }
+
+        .chat-input-area {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 0.75rem;
+            padding-top: 0.75rem;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .chat-input {
+            flex: 1;
+            padding: 0.5rem 0.75rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            font-size: 0.75rem;
+            color: var(--text-primary);
+        }
+
+        .send-btn {
+            padding: 0.5rem 1rem;
+            background: var(--gradient-main);
+            border: none;
+            border-radius: var(--radius-sm);
+            font-size: 0.7rem;
+            color: white;
+            cursor: pointer;
+        }
+
+        .mockup-panel {
+            background: rgba(0, 0, 0, 0.2);
+            border-left: 1px solid var(--border-color);
+            padding: 1rem;
+        }
+
+        .panel-title {
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-bottom: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .pipeline-step {
+            padding: 0.625rem 0.75rem;
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            border-left: 2px solid transparent;
+            margin-bottom: 0.375rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .pipeline-step.active {
+            border-left-color: var(--accent-cyan);
+            color: var(--accent-cyan);
+            background: rgba(0, 212, 255, 0.05);
+        }
+
+        .pipeline-step:hover {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .pipeline-step.completed {
+            border-left-color: var(--accent-green);
+            color: var(--accent-green);
+        }
+
+        /* ========== 痛点区域 ========== */
+        #pain-points {
+            background: transparent;
+        }
+
+        .pain-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .pain-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-lg);
+            padding: 2rem;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .pain-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: var(--gradient-main);
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .pain-card:hover {
+            transform: translateY(-6px);
+            border-color: var(--border-color-hover);
+            box-shadow: var(--shadow-lg), 0 0 30px rgba(0, 212, 255, 0.1);
+            background: var(--bg-card-hover);
+        }
+
+        .pain-card:hover::before {
+            opacity: 1;
+        }
+
+        .pain-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: var(--radius-md);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            margin-bottom: 1.25rem;
+            background: linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(239, 68, 68, 0.05));
+            border: 1px solid rgba(239, 68, 68, 0.2);
+        }
+
+        .pain-card h3 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 0.75rem;
+        }
+
+        .pain-card p {
+            color: var(--text-secondary);
+            font-size: 0.9375rem;
+            line-height: 1.7;
+        }
+
+        /* ========== 解决方案区域 ========== */
+        #solution {
+            background: linear-gradient(180deg, transparent 0%, rgba(0, 212, 255, 0.03) 50%, transparent 100%);
+        }
+
+        .solution-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .solution-item {
+            text-align: center;
+            padding: 2.5rem 1.5rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-lg);
+            transition: all 0.3s ease;
+        }
+
+        .solution-item:hover {
+            transform: translateY(-4px);
+            border-color: rgba(0, 212, 255, 0.3);
+            box-shadow: var(--shadow-md), 0 0 20px rgba(0, 212, 255, 0.08);
+        }
+
+        .solution-number {
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            background: var(--gradient-main);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin: 0 auto 1.25rem;
+            color: white;
+        }
+
+        .solution-item h3 {
+            font-size: 1.125rem;
+            font-weight: 600;
+            margin-bottom: 0.75rem;
+        }
+
+        .solution-item p {
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+            line-height: 1.6;
+        }
+
+        /* ========== 核心功能区域 ========== */
+        #features {
+            background: transparent;
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .feature-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-lg);
+            padding: 2rem;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .feature-card::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: radial-gradient(circle at var(--mouse-x, 50%) var(--mouse-y, 50%), rgba(0, 212, 255, 0.08) 0%, transparent 60%);
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            pointer-events: none;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-8px);
+            border-color: var(--border-color-hover);
+            box-shadow: var(--shadow-lg), 0 0 40px rgba(0, 212, 255, 0.12);
+        }
+
+        .feature-card:hover::after {
+            opacity: 1;
+        }
+
+        .feature-icon {
+            width: 52px;
+            height: 52px;
+            border-radius: var(--radius-md);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            margin-bottom: 1.25rem;
+            background: linear-gradient(135deg, rgba(0, 212, 255, 0.12), rgba(139, 92, 246, 0.08));
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            position: relative;
+            z-index: 1;
+        }
+
+        .feature-card h3 {
+            font-size: 1.125rem;
+            font-weight: 600;
+            margin-bottom: 0.625rem;
+            position: relative;
+            z-index: 1;
+        }
+
+        .feature-card p {
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+            line-height: 1.65;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* ========== 使用流程区域 ========== */
+        #workflow {
+            background: linear-gradient(180deg, transparent 0%, rgba(139, 92, 246, 0.03) 50%, transparent 100%);
+        }
+
+        .workflow-container {
+            position: relative;
+            padding: 3rem 0;
+        }
+
+        .workflow-line {
+            position: absolute;
+            top: 50%;
+            left: 5%;
+            right: 5%;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--border-color), transparent);
+            z-index: 0;
+        }
+
+        .workflow-steps {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: relative;
+            z-index: 1;
+            gap: 1rem;
+        }
+
+        .workflow-step {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            flex: 1;
+            max-width: 140px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .step-circle {
+            width: 64px;
+            height: 64px;
+            border-radius: 50%;
+            background: var(--bg-card);
+            border: 2px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+            transition: all 0.3s ease;
+            position: relative;
+        }
+
+        .workflow-step:hover .step-circle {
+            border-color: var(--accent-cyan);
+            box-shadow: 0 0 20px rgba(0, 212, 255, 0.3);
+            transform: scale(1.1);
+            background: rgba(0, 212, 255, 0.1);
+        }
+
+        .step-label {
+            font-size: 0.8125rem;
+            font-weight: 500;
+            color: var(--text-secondary);
+            transition: color 0.3s ease;
+        }
+
+        .workflow-step:hover .step-label {
+            color: var(--accent-cyan);
+        }
+
+        .step-arrow {
+            color: var(--text-muted);
+            font-size: 1.25rem;
+            flex-shrink: 0;
+        }
+
+        /* ========== 产品原型示意区域 ========== */
+        #prototype {
+            background: transparent;
+            padding: 6rem 2rem;
+        }
+
+        .prototype-wrapper {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-xl);
+            overflow: hidden;
+            box-shadow: var(--shadow-lg);
+        }
+
+        .prototype-header {
+            background: rgba(0, 0, 0, 0.4);
+            padding: 1rem 1.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .prototype-title {
+            font-size: 1rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .prototype-tabs {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .prototype-tab {
+            padding: 0.5rem 1rem;
+            font-size: 0.8125rem;
+            background: transparent;
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .prototype-tab.active,
+        .prototype-tab:hover {
+            background: rgba(0, 212, 255, 0.1);
+            border-color: var(--accent-cyan);
+            color: var(--accent-cyan);
+        }
+
+        .prototype-body {
+            display: grid;
+            grid-template-columns: 220px 1fr 280px;
+            min-height: 500px;
+        }
+
+        .proto-sidebar {
+            background: rgba(0, 0, 0, 0.25);
+            border-right: 1px solid var(--border-color);
+            padding: 1.25rem;
+        }
+
+        .proto-sidebar-section {
+            margin-bottom: 1.5rem;
+        }
+
+        .proto-sidebar-label {
+            font-size: 0.6875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--text-muted);
+            margin-bottom: 0.75rem;
+            font-weight: 600;
+        }
+
+        .proto-project-item {
+            padding: 0.75rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            margin-bottom: 0.5rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .proto-project-item:hover,
+        .proto-project-item.active {
+            border-color: var(--accent-cyan);
+            background: rgba(0, 212, 255, 0.05);
+        }
+
+        .proto-project-name {
+            font-size: 0.8125rem;
+            font-weight: 500;
+            margin-bottom: 0.25rem;
+        }
+
+        .proto-project-meta {
+            font-size: 0.6875rem;
+            color: var(--text-muted);
+        }
+
+        .proto-main {
+            display: flex;
+            flex-direction: column;
+            padding: 1.25rem;
+        }
+
+        .proto-chat-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .proto-chat-messages {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            overflow-y: auto;
+            margin-bottom: 1rem;
+        }
+
+        .proto-msg {
+            max-width: 80%;
+            padding: 1rem 1.25rem;
+            border-radius: var(--radius-md);
+            font-size: 0.875rem;
+            line-height: 1.6;
+        }
+
+        .proto-msg.user {
+            background: linear-gradient(135deg, rgba(0, 212, 255, 0.18), rgba(0, 153, 255, 0.12));
+            border: 1px solid rgba(0, 212, 255, 0.25);
+            align-self: flex-end;
+            border-bottom-right-radius: 4px;
+        }
+
+        .proto-msg.ai {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            align-self: flex-start;
+            border-bottom-left-radius: 4px;
+        }
+
+        .proto-msg-agent {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.375rem;
+            font-size: 0.75rem;
+            color: var(--accent-purple);
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+        }
+
+        .proto-input-area {
+            display: flex;
+            gap: 0.75rem;
+            padding: 1rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+        }
+
+        .proto-input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            outline: none;
+            color: var(--text-primary);
+            font-size: 0.875rem;
+        }
+
+        .proto-input::placeholder {
+            color: var(--text-muted);
+        }
+
+        .proto-send-btn {
+            padding: 0.625rem 1.25rem;
+            background: var(--gradient-main);
+            border: none;
+            border-radius: var(--radius-sm);
+            color: white;
+            font-size: 0.8125rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .proto-send-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 4px 12px rgba(0, 212, 255, 0.3);
+        }
+
+        .proto-panel {
+            background: rgba(0, 0, 0, 0.2);
+            border-left: 1px solid var(--border-color);
+            padding: 1.25rem;
+            overflow-y: auto;
+        }
+
+        .proto-panel-tabs {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1.25rem;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 0.75rem;
+        }
+
+        .proto-panel-tab {
+            padding: 0.375rem 0.75rem;
+            font-size: 0.75rem;
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: all 0.2s ease;
+            border-bottom: 2px solid transparent;
+        }
+
+        .proto-panel-tab.active {
+            color: var(--accent-cyan);
+            border-bottom-color: var(--accent-cyan);
+        }
+
+        .proto-content-block {
+            display: none;
+        }
+
+        .proto-content-block.active {
+            display: block;
+        }
+
+        .proto-content-title {
+            font-size: 0.875rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: var(--text-primary);
+        }
+
+        .proto-content-text {
+            font-size: 0.8125rem;
+            color: var(--text-secondary);
+            line-height: 1.7;
+            margin-bottom: 1rem;
+        }
+
+        .proto-mini-cards {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 0.5rem;
+        }
+
+        .proto-mini-card {
+            aspect-ratio: 1;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.25rem;
+            transition: all 0.2s ease;
+            cursor: pointer;
+        }
+
+        .proto-mini-card:hover {
+            border-color: var(--accent-cyan);
+            background: rgba(0, 212, 255, 0.05);
+        }
+
+        .proto-assets-bar {
+            grid-column: 1 / -1;
+            background: rgba(0, 0, 0, 0.3);
+            border-top: 1px solid var(--border-color);
+            padding: 1rem 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .assets-label {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            font-weight: 500;
+            white-space: nowrap;
+        }
+
+        .assets-grid {
+            display: flex;
+            gap: 0.75rem;
+            flex: 1;
+            overflow-x: auto;
+        }
+
+        .asset-thumb {
+            flex-shrink: 0;
+            width: 72px;
+            height: 72px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 0.25rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .asset-thumb:hover {
+            border-color: var(--accent-cyan);
+            transform: translateY(-2px);
+        }
+
+        .asset-icon {
+            font-size: 1.25rem;
+        }
+
+        .asset-name {
+            font-size: 0.625rem;
+            color: var(--text-muted);
+        }
+
+        /* ========== 目标用户区域 ========== */
+        #users {
+            background: transparent;
+        }
+
+        .users-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .user-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-lg);
+            padding: 2rem 1.5rem;
+            text-align: center;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .user-card::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(0, 212, 255, 0.06) 0%, transparent 70%);
+            opacity: 0;
+            transition: opacity 0.4s ease;
+        }
+
+        .user-card:hover {
+            transform: translateY(-6px);
+            border-color: rgba(0, 212, 255, 0.3);
+            box-shadow: var(--shadow-md), 0 0 30px rgba(0, 212, 255, 0.08);
+        }
+
+        .user-card:hover::before {
+            opacity: 1;
+        }
+
+        .user-avatar {
+            width: 64px;
+            height: 64px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, rgba(0, 212, 255, 0.2), rgba(139, 92, 246, 0.15));
+            border: 2px solid rgba(0, 212, 255, 0.3);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.75rem;
+            margin: 0 auto 1.25rem;
+            position: relative;
+            z-index: 1;
+        }
+
+        .user-card h3 {
+            font-size: 1.0625rem;
+            font-weight: 600;
+            margin-bottom: 0.625rem;
+            position: relative;
+            z-index: 1;
+        }
+
+        .user-card p {
+            color: var(--text-secondary);
+            font-size: 0.8125rem;
+            line-height: 1.6;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* ========== 价值意义区域 ========== */
+        #value {
+            background: linear-gradient(180deg, transparent 0%, rgba(16, 185, 129, 0.03) 50%, transparent 100%);
+        }
+
+        .value-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .value-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-lg);
+            padding: 2rem;
+            transition: all 0.3s ease;
+            position: relative;
+            padding-left: 4rem;
+        }
+
+        .value-card:hover {
+            transform: translateX(6px);
+            border-color: rgba(0, 212, 255, 0.25);
+            box-shadow: var(--shadow-md);
+        }
+
+        .value-icon {
+            position: absolute;
+            left: 1.5rem;
+            top: 2rem;
+            width: 40px;
+            height: 40px;
+            border-radius: var(--radius-sm);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.25rem;
+        }
+
+        .value-card h3 {
+            font-size: 1.125rem;
+            font-weight: 600;
+            margin-bottom: 0.75rem;
+        }
+
+        .value-card p {
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+            line-height: 1.7;
+        }
+
+        /* ========== 总结区域 ========== */
+        #summary {
+            background: linear-gradient(180deg, transparent 0%, rgba(139, 92, 246, 0.05) 100%);
+            text-align: center;
+        }
+
+        .summary-content {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .summary-quote {
+            font-size: 1.5rem;
+            font-weight: 300;
+            line-height: 1.8;
+            color: var(--text-primary);
+            margin-bottom: 2rem;
+            position: relative;
+        }
+
+        .summary-quote::before {
+            content: '"';
+            position: absolute;
+            top: -1rem;
+            left: -2rem;
+            font-size: 4rem;
+            color: var(--accent-cyan);
+            opacity: 0.3;
+            font-family: Georgia, serif;
+        }
+
+        .summary-highlight {
+            display: inline-flex;
+            flex-wrap: wrap;
+            gap: 1rem;
+            justify-content: center;
+            margin-top: 2rem;
+        }
+
+        .highlight-item {
+            padding: 0.75rem 1.5rem;
+            background: rgba(0, 212, 255, 0.08);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            color: var(--accent-cyan);
+            font-weight: 500;
+        }
+
+        /* ========== Footer ========== */
+        footer {
+            position: relative;
+            z-index: 1;
+            text-align: center;
+            padding: 3rem 2rem;
+            border-top: 1px solid var(--border-color);
+            color: var(--text-muted);
+            font-size: 0.875rem;
+        }
+
+        footer a {
+            color: var(--accent-cyan);
+            text-decoration: none;
+        }
+
+        /* ========== 响应式设计 ========== */
+        @media (max-width: 1024px) {
+            .hero-container {
+                grid-template-columns: 1fr;
+                text-align: center;
+            }
+
+            .hero-content {
+                order: 1;
+            }
+
+            .hero-visual {
+                order: 2;
+            }
+
+            .hero-description {
+                margin-left: auto;
+                margin-right: auto;
+            }
+
+            .hero-tags {
+                justify-content: center;
+            }
+
+            .mockup-body {
+                grid-template-columns: 160px 1fr 200px;
+                min-height: 320px;
+            }
+
+            .prototype-body {
+                grid-template-columns: 180px 1fr 240px;
+                min-height: 420px;
+            }
+
+            .navbar-nav {
+                display: none;
+            }
+        }
+
+        @media (max-width: 768px) {
+            section {
+                padding: 4rem 1.25rem;
+            }
+
+            .section-title {
+                font-size: 2rem;
+            }
+
+            .section-subtitle {
+                font-size: 1rem;
+                margin-bottom: 2.5rem;
+            }
+
+            .hero-title {
+                font-size: 2rem;
+            }
+
+            .hero-subtitle {
+                font-size: 1.0625rem;
+            }
+
+            .mockup-body {
+                grid-template-columns: 1fr;
+                min-height: auto;
+            }
+
+            .mockup-sidebar {
+                display: none;
+            }
+
+            .mockup-panel {
+                border-left: none;
+                border-top: 1px solid var(--border-color);
+            }
+
+            .prototype-body {
+                grid-template-columns: 1fr;
+                min-height: auto;
+            }
+
+            .proto-sidebar {
+                display: none;
+            }
+
+            .proto-panel {
+                border-left: none;
+                border-top: 1px solid var(--border-color);
+            }
+
+            .workflow-steps {
+                flex-wrap: wrap;
+                justify-content: center;
+            }
+
+            .workflow-line {
+                display: none;
+            }
+
+            .step-arrow {
+                display: none;
+            }
+
+            .workflow-step {
+                max-width: 100px;
+            }
+
+            .step-circle {
+                width: 52px;
+                height: 52px;
+                font-size: 1.25rem;
+            }
+
+            .pain-grid,
+            .solution-grid,
+            .features-grid,
+            .users-grid,
+            .value-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .summary-quote {
+                font-size: 1.25rem;
+            }
+
+            .summary-quote::before {
+                display: none;
+            }
+
+            .value-card {
+                padding-left: 2rem;
+            }
+
+            .value-icon {
+                position: static;
+                margin-bottom: 0.75rem;
+            }
+        }
+
+        /* ========== 动画关键帧 ========== */
+        @keyframes float {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-10px); }
+        }
+
+        @keyframes pulse-glow {
+            0%, 100% { box-shadow: 0 0 20px rgba(0, 212, 255, 0.2); }
+            50% { box-shadow: 0 0 40px rgba(0, 212, 255, 0.4); }
+        }
+
+        @keyframes gradient-shift {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+
+        .floating {
+            animation: float 6s ease-in-out infinite;
+        }
+
+        /* 滚动条样式 */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 3px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--text-muted);
+        }
+    </style>
+</head>
+<body>
+    <!-- 导航栏 -->
+    <nav class="navbar">
+        <div class="navbar-content">
+            <div class="navbar-logo">Woohoo Studio</div>
+            <ul class="navbar-nav">
+                <li><a href="#hero">首页</a></li>
+                <li><a href="#pain-points">痛点</a></li>
+                <li><a href="#solution">解决方案</a></li>
+                <li><a href="#features">核心功能</a></li>
+                <li><a href="#workflow">使用流程</a></li>
+                <li><a href="#prototype">产品原型</a></li>
+                <li><a href="#users">目标用户</a></li>
+                <li><a href="#value">价值意义</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <!-- 第一屏：Hero 区 -->
+    <section id="hero" class="visible">
+        <div class="hero-container">
+            <div class="hero-content">
+                <div class="hero-badge">
+                    <span>TRAE AI 创造力大赛</span>
+                    <span style="color: var(--accent-purple);">学习工作赛道</span>
+                </div>
+                <h1 class="hero-title">
+                    <span class="gradient-text">Woohoo Studio</span>
+                </h1>
+                <p class="hero-subtitle">AI 多智能体视频创作工作台</p>
+                <p class="hero-description">
+                    从一个想法出发，自动辅助完成大纲、剧本、分镜、素材与视频创作流程。
+                    不是单一的 AI 聊天工具，而是一个「从想法到可展示作品」的完整创意生产系统。
+                </p>
+                <div class="hero-tags">
+                    <span class="tag highlight">多智能体协作</span>
+                    <span class="tag highlight">AI 剧本生成</span>
+                    <span class="tag">分镜规划</span>
+                    <span class="tag">素材管理</span>
+                    <span class="tag">视频创作</span>
+                    <span class="tag">流程化制作</span>
+                </div>
+            </div>
+            <div class="hero-visual floating">
+                <div class="product-mockup">
+                    <div class="mockup-header">
+                        <div class="mockup-dot"></div>
+                        <div class="mockup-dot"></div>
+                        <div class="mockup-dot"></div>
+                    </div>
+                    <div class="mockup-body">
+                        <!-- 左侧边栏 -->
+                        <div class="mockup-sidebar">
+                            <div class="sidebar-logo">Woohoo</div>
+                            <div class="sidebar-item active">科幻短片《星际》</div>
+                            <div class="sidebar-item">校园微电影</div>
+                            <div class="sidebar-item">品牌宣传片</div>
+                            <div class="sidebar-item">动画短剧企划</div>
+                        </div>
+                        <!-- 中间主区域 -->
+                        <div class="mockup-main">
+                            <div class="main-header">
+                                <span class="main-title">科幻短片《星际》</span>
+                                <div class="main-actions">
+                                    <button class="action-btn">导出</button>
+                                    <button class="action-btn">分享</button>
+                                </div>
+                            </div>
+                            <div class="chat-area">
+                                <div class="chat-message user">
+                                    我想做一个关于太空探索的科幻短片，主角是一名年轻的宇航员...
+                                </div>
+                                <div class="chat-message ai">
+                                    <strong style="color: var(--accent-cyan);">大纲架构师：</strong>
+                                    很棒的想法！我建议从三个维度展开：内心成长线、外部冲突线、视觉奇观线...
+                                </div>
+                                <div class="chat-message ai">
+                                    <strong style="color: var(--accent-purple);">人设专家：</strong>
+                                    主角可以设定为首次执行深空任务的新人，增加代入感...
+                                </div>
+                            </div>
+                            <div class="chat-input-area">
+                                <input type="text" class="chat-input" placeholder="输入你的创意想法..." readonly>
+                                <button class="send-btn">发送</button>
+                            </div>
+                        </div>
+                        <!-- 右侧面板 -->
+                        <div class="mockup-panel">
+                            <div class="panel-title">制作流水线</div>
+                            <div class="pipeline-step completed">✓ 创意输入</div>
+                            <div class="pipeline-step completed">✓ 大纲生成</div>
+                            <div class="pipeline-step active">→ 剧本生成</div>
+                            <div class="pipeline-step">章节拆解</div>
+                            <div class="pipeline-step">人物场景</div>
+                            <div class="pipeline-step">关键帧</div>
+                            <div class="pipeline-step">视频分镜</div>
+                            <div class="pipeline-step">预览导出</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- 第二部分：为什么需要它（痛点） -->
+    <section id="pain-points">
+        <div class="section-container">
+            <h2 class="section-title">为什么需要 Woohoo Studio？</h2>
+            <p class="section-subtitle">当前创作者面临的四大核心痛点</p>
+            <div class="pain-grid">
+                <div class="pain-card">
+                    <div class="pain-icon">💡</div>
+                    <h3>创意难落地</h3>
+                    <p>有很好的创意想法，但不知道如何系统化展开成完整的故事结构、角色设定和视觉方案，从灵感到可执行方案的转化效率极低。</p>
+                </div>
+                <div class="pain-card">
+                    <div class="pain-icon">🔧</div>
+                    <h3>工具太分散</h3>
+                    <p>需要在聊天工具、文档软件、表格工具、图片生成工具和素材文件夹之间反复切换，工作流断裂，注意力被严重分散。</p>
+                </div>
+                <div class="pain-card">
+                    <div class="pain-icon">🎬</div>
+                    <h3>分镜剧本门槛高</h3>
+                    <p>非专业创作者缺少编剧、分镜设计、镜头语言和角色设定的专业知识，想做出专业级策划案却不知从何入手。</p>
+                </div>
+                <div class="pain-card">
+                    <div class="pain-icon">📁</div>
+                    <h3>素材版本难管理</h3>
+                    <p>创作资料散落在各处，多个版本混杂，团队协同时信息不同步，素材查找耗时，项目资产管理混乱。</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- 第三部分：产品如何解决 -->
+    <section id="solution">
+        <div class="section-container">
+            <h2 class="section-title">Woohoo Studio 如何解决？</h2>
+            <p class="section-subtitle">五大核心能力，构建完整的创意生产闭环</p>
+            <div class="solution-grid">
+                <div class="solution-item">
+                    <div class="solution-number">1</div>
+                    <h3>一个工作台</h3>
+                    <p>所有创作环节集中在一个界面完成，告别多工具切换的碎片化体验。</p>
+                </div>
+                <div class="solution-item">
+                    <div class="solution-number">2</div>
+                    <h3>多个 AI 智能体</h3>
+                    <p>大纲架构师、人设专家、分镜渲染师等角色智能体协同工作，覆盖创作全链路。</p>
+                </div>
+                <div class="solution-item">
+                    <div class="solution-number">3</div>
+                    <h3>一条制作流水线</h3>
+                    <p>从创意到成品的标准化流程，每一步都有清晰的产出和衔接。</p>
+                </div>
+                <div class="solution-item">
+                    <div class="solution-number">4</div>
+                    <h3>一个素材库</h3>
+                    <p>统一管理图片、视频、音频、文档和生成结果，资产永不丢失。</p>
+                </div>
+                <div class="solution-item">
+                    <div class="solution-number">5</div>
+                    <h3>一键导出</h3>
+                    <p>支持导出完整策划包或项目资料，无缝对接后续制作或团队协作。</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- 第四部分：核心功能 -->
+    <section id="features">
+        <div class="section-container">
+            <h2 class="section-title">核心功能模块</h2>
+            <p class="section-subtitle">八大功能，覆盖从创意到交付的全流程</p>
+            <div class="features-grid">
+                <div class="feature-card">
+                    <div class="feature-icon">💬</div>
+                    <h3>创意对话</h3>
+                    <p>与 AI 自由讨论创意，输入故事想法、视频主题或项目需求，让灵感自然流淌并逐步成型。</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🤖</div>
+                    <h3>多智能体协作</h3>
+                    <p>大纲架构师、人设专家、分镜渲染师、合规审核官等角色智能体协同讨论，多视角完善方案。</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">📋</div>
+                    <h3>大纲生成</h3>
+                    <p>基于创意对话自动生成结构化故事大纲，包含起承转合、情节节点和节奏把控。</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">📝</div>
+                    <h3>剧本生成</h3>
+                    <p>将大纲细化为完整剧本，包含对白、旁白、场景描述和情绪标注，支持多种剧本格式。</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">👥</div>
+                    <h3>人物与场景设定</h3>
+                    <p>创建详细的角色档案（外貌、性格、背景）和场景卡片（环境、氛围、关键元素）。</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🎞️</div>
+                    <h3>关键帧规划</h3>
+                    <p>为每个重要场景规划关键画面，定义构图、运镜、色调和情感表达方向。</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🖼️</div>
+                    <h3>AI 图片生成</h3>
+                    <p>根据角色、场景、关键帧描述自动生成视觉参考图，快速建立画面感和视觉风格。</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">📦</div>
+                    <h3>素材库与项目导出</h3>
+                    <p>统一管理所有创作资产，支持导出完整策划包，方便团队继续制作或提交 Demo。</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- 第五部分：使用流程 -->
+    <section id="workflow">
+        <div class="section-container">
+            <h2 class="section-title">使用流程</h2>
+            <p class="section-subtitle">从模糊想法到完整方案的七步创作路径</p>
+            <div class="workflow-container">
+                <div class="workflow-line"></div>
+                <div class="workflow-steps">
+                    <div class="workflow-step">
+                        <div class="step-circle">💭</div>
+                        <div class="step-label">输入创意</div>
+                    </div>
+                    <div class="step-arrow">→</div>
+                    <div class="workflow-step">
+                        <div class="step-circle">🤝</div>
+                        <div class="step-label">AI 协作讨论</div>
+                    </div>
+                    <div class="step-arrow">→</div>
+                    <div class="workflow-step">
+                        <div class="step-circle">📋</div>
+                        <div class="step-label">生成大纲</div>
+                    </div>
+                    <div class="step-arrow">→</div>
+                    <div class="workflow-step">
+                        <div class="step-circle">📝</div>
+                        <div class="step-label">生成剧本</div>
+                    </div>
+                    <div class="step-arrow">→</div>
+                    <div class="workflow-step">
+                        <div class="step-circle">🎬</div>
+                        <div class="step-label">拆解分镜</div>
+                    </div>
+                    <div class="step-arrow">→</div>
+                    <div class="workflow-step">
+                        <div class="step-circle">🖼️</div>
+                        <div class="step-label">生成素材</div>
+                    </div>
+                    <div class="step-arrow">→</div>
+                    <div class="workflow-step">
+                        <div class="step-circle">✨</div>
+                        <div class="step-label">预览导出</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- 第六部分：轻量产品原型示意 -->
+    <section id="prototype">
+        <div class="section-container">
+            <h2 class="section-title">产品原型示意</h2>
+            <p class="section-subtitle">Woohoo Studio 工作台界面概念展示（点击右侧面板切换查看不同步骤内容）</p>
+
+            <div class="prototype-wrapper">
+                <div class="prototype-header">
+                    <div class="prototype-title">
+                        <span style="font-size: 1.25rem;">⚡</span>
+                        Woohoo Studio — 工作台
+                    </div>
+                    <div class="prototype-tabs">
+                        <button class="prototype-tab active" onclick="switchPrototypeTab(this, 'workspace')">工作区视图</button>
+                        <button class="prototype-tab" onclick="switchPrototypeTab(this, 'pipeline')">流水线视图</button>
+                    </div>
+                </div>
+
+                <div class="prototype-body">
+                    <!-- 左侧项目列表 -->
+                    <div class="proto-sidebar">
+                        <div class="proto-sidebar-section">
+                            <div class="proto-sidebar-label">我的项目</div>
+                            <div class="proto-project-item active">
+                                <div class="proto-project-name">科幻短片《星际》</div>
+                                <div class="proto-project-meta">更新于 2 小时前</div>
+                            </div>
+                            <div class="proto-project-item">
+                                <div class="proto-project-name">校园微电影《青春》</div>
+                                <div class="proto-project-meta">更新于昨天</div>
+                            </div>
+                            <div class="proto-project-item">
+                                <div class="proto-project-name">品牌宣传片</div>
+                                <div class="proto-project-meta">更新于 3 天前</div>
+                            </div>
+                        </div>
+                        <div class="proto-sidebar-section">
+                            <div class="proto-sidebar-label">快捷操作</div>
+                            <div class="proto-project-item" style="border-style: dashed;">
+                                <div class="proto-project-name" style="color: var(--accent-cyan);">+ 新建项目</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 中间 AI 对话区 -->
+                    <div class="proto-main">
+                        <div class="proto-chat-header">
+                            <span style="font-weight: 600;">AI 创意对话</span>
+                            <span style="font-size: 0.8125rem; color: var(--text-muted);">当前：剧本生成阶段</span>
+                        </div>
+                        <div class="proto-chat-messages">
+                            <div class="proto-msg user">
+                                我想做一个关于太空探索的科幻短片，主角是一名年轻宇航员，在第一次深空任务中发现了惊人的秘密...
+                            </div>
+                            <div class="proto-msg ai">
+                                <div class="proto-msg-agent">🤖 大纲架构师</div>
+                                这个创意非常有张力！我建议从三个叙事线索展开：<br><br>
+                                1. <strong>成长线</strong>：新人宇航员从紧张到自信的心理变化<br>
+                                2. <strong>冲突线</strong>：发现秘密后的道德抉择<br>
+                                3. <strong>视觉线</strong>：太空的壮美 vs 未知的恐惧<br><br>
+                                要不要先让我生成一份详细的故事大纲？
+                            </div>
+                            <div class="proto-msg ai">
+                                <div class="proto-msg-agent">🎭 人设专家</div>
+                                关于主角设定，我有几个建议：<br><br>
+                                • 姓名：林远星（寓意向往星空）<br>
+                                • 年龄：26 岁，航天局最年轻成员<br>
+                                • 性格：外表冷静但内心敏感<br>
+                                • 背景：父亲是失踪的航天先驱<br><br>
+                                这样能增加故事的代入感和情感深度。
+                            </div>
+                        </div>
+                        <div class="proto-input-area">
+                            <input type="text" class="proto-input" placeholder="继续描述你的想法，或让 AI 智能体继续推进..." readonly>
+                            <button class="proto-send-btn">发送</button>
+                        </div>
+                    </div>
+
+                    <!-- 右侧制作流程面板 -->
+                    <div class="proto-panel">
+                        <div class="proto-panel-tabs">
+                            <button class="proto-panel-tab active" onclick="switchPanelTab(this, 'outline')">大纲</button>
+                            <button class="proto-panel-tab" onclick="switchPanelTab(this, 'script')">剧本</button>
+                            <button class="proto-panel-tab" onclick="switchPanelTab(this, 'character')">人物</button>
+                            <button class="proto-panel-tab" onclick="switchPanelTab(this, 'storyboard')">分镜</button>
+                        </div>
+
+                        <!-- 大纲内容 -->
+                        <div class="proto-content-block active" id="panel-outline">
+                            <div class="proto-content-title">故事大纲</div>
+                            <div class="proto-content-text">
+                                <strong>第一幕：启程（0-15分钟）</strong><br>
+                                林远星接到首次深空任务，内心忐忑。飞船升空，离开地球。<br><br>
+                                <strong>第二幕：发现（15-35分钟）</strong><br>
+                                在太空中收到神秘信号，追踪后发现废弃空间站，里面藏着关于父亲失踪的线索。<br><br>
+                                <strong>第三幕：抉择（35-50分钟）</strong><br>
+                                面对揭露真相可能带来的后果，林远星做出了勇敢的选择。
+                            </div>
+                        </div>
+
+                        <!-- 剧本内容 -->
+                        <div class="proto-content-block" id="panel-script">
+                            <div class="proto-content-title">剧本片段 · 第一场</div>
+                            <div class="proto-content-text">
+                                <strong>[内景 · 航天局会议室 · 日]</strong><br><br>
+                                <strong>林远星</strong>（紧张地握着双手）<br>
+                                长官，我真的准备好了吗？这是我的第一次...<br><br>
+                                <strong>陈指挥官</strong>（微笑）<br>
+                                远星，选中你不是因为你是新人，而是因为你是最合适的。<br><br>
+                                <strong>[切至：窗外火箭矗立在发射台上，阳光照射金属外壳]</strong>
+                            </div>
+                        </div>
+
+                        <!-- 人物内容 -->
+                        <div class="proto-content-block" id="panel-character">
+                            <div class="proto-content-title">主要角色</div>
+                            <div class="proto-content-text">
+                                <strong>林远星（主角）</strong><br>
+                                26岁，男性，航天局新晋宇航员。外表冷静沉稳，内心充满对未知的渴望和对父亲的思念。<br><br>
+                                <strong>陈指挥官（导师型）</strong><br>
+                                50岁，女性，经验丰富的任务指挥官。严厉但关心下属成长。<br><br>
+                                <strong>神秘信号（悬念元素）</strong><br>
+                                来自深空的规律性信号，成为推动剧情的关键线索。
+                            </div>
+                            <div class="proto-mini-cards">
+                                <div class="proto-mini-card">👨‍🚀</div>
+                                <div class="proto-mini-card">👩‍✈️</div>
+                                <div class="proto-mini-card">🛸</div>
+                                <div class="proto-mini-card">🌍</div>
+                            </div>
+                        </div>
+
+                        <!-- 分镜内容 -->
+                        <div class="proto-content-block" id="panel-storyboard">
+                            <div class="proto-content-title">分镜板 · 序幕</div>
+                            <div class="proto-content-text">
+                                <strong>镜号 01 | 全景 → 推近</strong><br>
+                                火箭矗立在发射场，晨光中金属表面反射光芒。缓慢推向驾驶舱窗户。<br><br>
+                                <strong>镜号 02 | 特写</strong><br>
+                                林远星的眼睛倒映着天空，眼神中混合着紧张与期待。<br><br>
+                                <strong>镜号 03 | 仰拍</strong><br>
+                                火箭点火升空，火焰喷涌，镜头从地面仰视跟随上升轨迹。
+                            </div>
+                            <div class="proto-mini-cards">
+                                <div class="proto-mini-card">🎬</div>
+                                <div class="proto-mini-card">📐</div>
+                                <div class="proto-mini-card">🎨</div>
+                                <div class="proto-mini-card">💫</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 底部素材栏 -->
+                    <div class="proto-assets-bar">
+                        <span class="assets-label">素材库</span>
+                        <div class="assets-grid">
+                            <div class="asset-thumb">
+                                <span class="asset-icon">🖼️</span>
+                                <span class="asset-name">主角设定</span>
+                            </div>
+                            <div class="asset-thumb">
+                                <span class="asset-icon">🖼️</span>
+                                <span class="asset-name">飞船外观</span>
+                            </div>
+                            <div class="asset-thumb">
+                                <span class="asset-icon">🖼️</span>
+                                <span class="asset-name">太空场景</span>
+                            </div>
+                            <div class="asset-thumb">
+                                <span class="asset-icon">📄</span>
+                                <span class="asset-name">大纲文档</span>
+                            </div>
+                            <div class="asset-thumb">
+                                <span class="asset-icon">🎬</span>
+                                <span class="asset-name">分镜表</span>
+                            </div>
+                            <div class="asset-thumb">
+                                <span class="asset-icon">🎵</span>
+                                <span class="asset-name">配乐参考</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- 第七部分：目标用户 -->
+    <section id="users">
+        <div class="section-container">
+            <h2 class="section-title">目标用户</h2>
+            <p class="section-subtitle">为这些创作者量身打造的 AI 创作助手</p>
+            <div class="users-grid">
+                <div class="user-card">
+                    <div class="user-avatar">📱</div>
+                    <h3>短视频创作者</h3>
+                    <p>需要快速产出优质内容的短视频博主，用 AI 加速从选题到脚本的创作流程。</p>
+                </div>
+                <div class="user-card">
+                    <div class="user-avatar">🎓</div>
+                    <h3>学生创作团队</h3>
+                    <p>参与影视比赛、毕业设计的学生团队，降低专业门槛，高效完成作品策划。</p>
+                </div>
+                <div class="user-card">
+                    <div class="user-avatar">📢</div>
+                    <h3>自媒体运营者</h3>
+                    <p>需要持续输出高质量图文视频内容的自媒体人，提升内容生产效率和品质。</p>
+                </div>
+                <div class="user-card">
+                    <div class="user-avatar">🎬</div>
+                    <h3>独立影视/动画爱好者</h3>
+                    <p>有创作热情但缺乏专业经验的个人创作者，获得专业级的创作辅助工具。</p>
+                </div>
+                <div class="user-card">
+                    <div class="user-avatar">🏢</div>
+                    <h3>小型创意工作室</h3>
+                    <p>需要快速响应客户需求的小型团队，用 AI 提升提案能力和交付效率。</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- 第八部分：价值与意义 -->
+    <section id="value">
+        <div class="section-container">
+            <h2 class="section-title">价值与意义</h2>
+            <p class="section-subtitle">Woohoo Studio 为用户创造的四维价值</p>
+            <div class="value-grid">
+                <div class="value-card">
+                    <div class="value-icon" style="background: rgba(0, 212, 255, 0.12);">⚡</div>
+                    <h3>效率价值</h3>
+                    <p>减少在多工具之间的切换成本，将「创意到方案」的时间从数天压缩到数小时。一站式工作台让创作流更加顺畅，大幅提升产出速度。</p>
+                </div>
+                <div class="value-card">
+                    <div class="value-icon" style="background: rgba(139, 92, 246, 0.12);">✨</div>
+                    <h3>创作价值</h3>
+                    <p>降低剧本写作、分镜设计、角色设定等专业门槛。即使没有影视专业背景，也能借助 AI 智能体产出结构完整、细节丰富的创作方案。</p>
+                </div>
+                <div class="value-card">
+                    <div class="value-icon" style="background: rgba(16, 185, 129, 0.12);">🤝</div>
+                    <h3>协作价值</h3>
+                    <p>让团队成员围绕同一个项目工作区协作推进，素材集中管理、版本清晰可控、进度实时可见。告别文件满天飞、信息不对称的协作困境。</p>
+                </div>
+                <div class="value-card">
+                    <div class="value-icon" style="background: rgba(236, 72, 153, 0.12);">💰</div>
+                    <h3>商业价值</h3>
+                    <p>适用于内容生产、教育项目、创意提案、短视频制作、动画企划等多种商业场景。帮助创作者更快地将创意转化为可交付的商业成果。</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- 第九部分：总结 -->
+    <section id="summary">
+        <div class="section-container">
+            <div class="summary-content">
+                <p class="summary-quote">
+                    Woohoo Studio 希望让每一位普通创作者，都能拥有一个属于自己的 AI 创作团队——把那些模糊飘渺的想法，变成结构完整、素材清晰、可以直接继续制作的成熟方案。
+                </p>
+                <div class="summary-highlight">
+                    <span class="highlight-item">从想法到作品</span>
+                    <span class="highlight-item">多智能体协作</span>
+                    <span class="highlight-item">全流程覆盖</span>
+                    <span class="highlight-item">降低创作门槛</span>
+                    <span class="highlight-item">提升交付效率</span>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+        <p>Woohoo Studio — AI 多智能体视频创作工作台 | TRAE AI 创造力大赛 · 学习工作赛道</p>
+        <p style="margin-top: 0.5rem; font-size: 0.8125rem;">本页面为创意方案展示页，用于大赛报名评审</p>
+    </footer>
+
+    <!-- JavaScript 交互逻辑 -->
+    <script>
+        /**
+         * 页面初始化与交互控制
+         * 包含滚动动画、导航锚点、面板切换等功能
+         */
+
+        /** 滚动触发入场动画 */
+        function initScrollAnimations() {
+            const observerOptions = {
+                threshold: 0.1,
+                rootMargin: '0px 0px -50px 0px'
+            };
+
+            const observer = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        entry.target.classList.add('visible');
+                    }
+                });
+            }, observerOptions);
+
+            // 为所有 section 添加观察（排除 hero 区）
+            document.querySelectorAll('section:not(#hero)').forEach(section => {
+                observer.observe(section);
+            });
+        }
+
+        /** 导航平滑滚动 */
+        function initSmoothScroll() {
+            document.querySelectorAll('.navbar-nav a').forEach(anchor => {
+                anchor.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    const targetId = this.getAttribute('href');
+                    const targetElement = document.querySelector(targetId);
+                    if (targetElement) {
+                        const navHeight = document.querySelector('.navbar').offsetHeight;
+                        const targetPosition = targetElement.offsetTop - navHeight - 20;
+                        window.scrollTo({
+                            top: targetPosition,
+                            behavior: 'smooth'
+                        });
+                    }
+                });
+            });
+        }
+
+        /**
+         * 切换产品原型的顶部标签
+         * @param {HTMLElement} clickedTab - 被点击的标签按钮
+         * @param {string} tabName - 标签名称标识
+         */
+        function switchPrototypeTab(clickedTab, tabName) {
+            // 更新标签激活状态
+            document.querySelectorAll('.prototype-tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            clickedTab.classList.add('active');
+
+            // 这里可以根据 tabName 切换不同的视图模式
+            // 当前为演示目的，保持不变
+            console.log('切换至:', tabName);
+        }
+
+        /**
+         * 切换产品原型右侧面板的内容标签
+         * @param {HTMLElement} clickedTab - 被点击的面板标签
+         * @param {string} panelId - 面板内容块的 ID
+         */
+        function switchPanelTab(clickedTab, panelId) {
+            // 更新标签激活状态
+            document.querySelectorAll('.proto-panel-tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            clickedTab.classList.add('active');
+
+            // 切换对应的内容块显示
+            document.querySelectorAll('.proto-content-block').forEach(block => {
+                block.classList.remove('active');
+            });
+
+            const targetBlock = document.getElementById('panel-' + panelId);
+            if (targetBlock) {
+                targetBlock.classList.add('active');
+            }
+        }
+
+        /** 功能卡片的鼠标跟踪光效 */
+        function initCardGlowEffect() {
+            document.querySelectorAll('.feature-card').forEach(card => {
+                card.addEventListener('mousemove', (e) => {
+                    const rect = card.getBoundingClientRect();
+                    const x = ((e.clientX - rect.left) / rect.width) * 100;
+                    const y = ((e.clientY - rect.top) / rect.height) * 100;
+                    card.style.setProperty('--mouse-x', x + '%');
+                    card.style.setProperty('--mouse-y', y + '%');
+                });
+            });
+        }
+
+        /** 导航栏滚动时的样式变化 */
+        function initNavbarScrollEffect() {
+            const navbar = document.querySelector('.navbar');
+            let lastScrollY = 0;
+
+            window.addEventListener('scroll', () => {
+                const currentScrollY = window.scrollY;
+
+                if (currentScrollY > 100) {
+                    navbar.style.background = 'rgba(10, 14, 26, 0.95)';
+                    navbar.style.boxShadow = '0 4px 20px rgba(0, 0, 0, 0.3)';
+                } else {
+                    navbar.style.background = 'rgba(10, 14, 26, 0.85)';
+                    navbar.style.boxShadow = 'none';
+                }
+
+                lastScrollY = currentScrollY;
+            });
+        }
+
+        /** 页面加载完成后初始化所有功能 */
+        document.addEventListener('DOMContentLoaded', () => {
+            initScrollAnimations();
+            initSmoothScroll();
+            initCardGlowEffect();
+            initNavbarScrollEffect();
+
+            console.log('Woohoo Studio 创意方案展示页已加载 ✨');
+        });
+    </script>
+</body>
+</html>

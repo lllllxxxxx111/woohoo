@@ -15,7 +15,6 @@
  * 运行中保护（req #4）：apply/rollback 不修改任何 status='running' 的步骤；orchestrator 只 dispatch queued/retrying 且 ai_task_id IS NULL 的步骤，
  *    所以运行中任务已经 mark_step_running 持有 ai_task_id，不会被重新 dispatch，也不会被 patch 修改静默篡改。
  */
-
 use axum::{
     extract::{Extension, Path, State},
     Json,
@@ -109,13 +108,11 @@ pub async fn apply_optimization(
 
     let run = get_run_by_id(&state.db, &user_id.0, &run_id).await?;
 
-    let optimization = load_optimization_for_user(&state.db, &user_id.0, &run_id, &optimization_id)
-        .await?;
+    let optimization =
+        load_optimization_for_user(&state.db, &user_id.0, &run_id, &optimization_id).await?;
 
     if optimization.project_id != run.project_id {
-        return Err(AppError::Forbidden(
-            "优化建议不属于当前流程的项目".into(),
-        ));
+        return Err(AppError::Forbidden("优化建议不属于当前流程的项目".into()));
     }
 
     // 幂等：已 applied 且未回滚 → 直接返回
@@ -265,13 +262,11 @@ pub async fn rollback_optimization(
         .unwrap_or_else(|| "user_initiated".to_string());
 
     let run = get_run_by_id(&state.db, &user_id.0, &run_id).await?;
-    let optimization = load_optimization_for_user(&state.db, &user_id.0, &run_id, &optimization_id)
-        .await?;
+    let optimization =
+        load_optimization_for_user(&state.db, &user_id.0, &run_id, &optimization_id).await?;
 
     if optimization.project_id != run.project_id {
-        return Err(AppError::Forbidden(
-            "优化建议不属于当前流程的项目".into(),
-        ));
+        return Err(AppError::Forbidden("优化建议不属于当前流程的项目".into()));
     }
 
     if optimization.decision != "applied" {
@@ -346,8 +341,8 @@ pub async fn get_optimization_diff(
     Path((run_id, optimization_id)): Path<(String, String)>,
 ) -> AppResult<Json<OptimizationVersionDiff>> {
     let _run = get_run_by_id(&state.db, &user_id.0, &run_id).await?;
-    let optimization = load_optimization_for_user(&state.db, &user_id.0, &run_id, &optimization_id)
-        .await?;
+    let optimization =
+        load_optimization_for_user(&state.db, &user_id.0, &run_id, &optimization_id).await?;
 
     Ok(Json(OptimizationVersionDiff {
         optimization_id: optimization.id,
@@ -381,13 +376,11 @@ pub async fn get_effect_comparison(
     Path((run_id, optimization_id)): Path<(String, String)>,
 ) -> AppResult<Json<OptimizationEffectComparison>> {
     let run = get_run_by_id(&state.db, &user_id.0, &run_id).await?;
-    let optimization = load_optimization_for_user(&state.db, &user_id.0, &run_id, &optimization_id)
-        .await?;
+    let optimization =
+        load_optimization_for_user(&state.db, &user_id.0, &run_id, &optimization_id).await?;
 
     if optimization.project_id != run.project_id {
-        return Err(AppError::Forbidden(
-            "优化建议不属于当前流程的项目".into(),
-        ));
+        return Err(AppError::Forbidden("优化建议不属于当前流程的项目".into()));
     }
 
     let applied_at = optimization.applied_at.as_deref().unwrap_or("");
@@ -456,13 +449,11 @@ pub async fn get_rollback_recommendation(
     Path((run_id, optimization_id)): Path<(String, String)>,
 ) -> AppResult<Json<RollbackRecommendation>> {
     let run = get_run_by_id(&state.db, &user_id.0, &run_id).await?;
-    let optimization = load_optimization_for_user(&state.db, &user_id.0, &run_id, &optimization_id)
-        .await?;
+    let optimization =
+        load_optimization_for_user(&state.db, &user_id.0, &run_id, &optimization_id).await?;
 
     if optimization.project_id != run.project_id {
-        return Err(AppError::Forbidden(
-            "优化建议不属于当前流程的项目".into(),
-        ));
+        return Err(AppError::Forbidden("优化建议不属于当前流程的项目".into()));
     }
     if optimization.decision != "applied" || optimization.rolled_back_at.is_some() {
         return Ok(Json(RollbackRecommendation {
@@ -897,18 +888,13 @@ async fn load_optimization_for_user(
 /**
  * 校验项目归属当前用户（req #7）
  */
-async fn verify_project_owner(
-    pool: &SqlitePool,
-    user_id: &str,
-    project_id: &str,
-) -> AppResult<()> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM projects WHERE id = ? AND user_id = ?",
-    )
-    .bind(project_id)
-    .bind(user_id)
-    .fetch_one(pool)
-    .await?;
+async fn verify_project_owner(pool: &SqlitePool, user_id: &str, project_id: &str) -> AppResult<()> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE id = ? AND user_id = ?")
+            .bind(project_id)
+            .bind(user_id)
+            .fetch_one(pool)
+            .await?;
     if count == 0 {
         return Err(AppError::NotFound("项目不存在或无权访问".into()));
     }
@@ -963,8 +949,16 @@ async fn collect_effect_metrics(
            )
            {since_clause}
            {until_clause}",
-        since_clause = if since.is_some() { "AND u.created_at >= ?" } else { "" },
-        until_clause = if until.is_some() { "AND u.created_at < ?" } else { "" },
+        since_clause = if since.is_some() {
+            "AND u.created_at >= ?"
+        } else {
+            ""
+        },
+        until_clause = if until.is_some() {
+            "AND u.created_at < ?"
+        } else {
+            ""
+        },
     );
 
     let mut q = sqlx::query(&usage_sql)
@@ -1070,21 +1064,11 @@ fn build_effect_note(baseline: &EffectMetricGroup, optimized: &EffectMetricGroup
     }
 
     if let (Some(b), Some(o)) = (baseline.total_tokens, optimized.total_tokens) {
-        notes.push(format!(
-            "Token 总量 {} → {}（{:+}）",
-            b,
-            o,
-            o - b
-        ));
+        notes.push(format!("Token 总量 {} → {}（{:+}）", b, o, o - b));
     }
 
     if let (Some(b), Some(o)) = (baseline.avg_review_score, optimized.avg_review_score) {
-        notes.push(format!(
-            "平均评分 {:.3} → {:.3}（{:+.3}）",
-            b,
-            o,
-            o - b
-        ));
+        notes.push(format!("平均评分 {:.3} → {:.3}（{:+.3}）", b, o, o - b));
     }
 
     notes.join("；")
@@ -1099,14 +1083,9 @@ mod tests {
 
     /// 构造测试用 SQLite 连接池（带完整 schema）
     async fn create_test_pool() -> SqlitePool {
-        let db_path = std::env::temp_dir().join(format!(
-            "woohoo-prompt-opt-{}.sqlite",
-            Uuid::new_v4()
-        ));
-        let database_url = format!(
-            "sqlite://{}",
-            db_path.to_string_lossy().replace('\\', "/")
-        );
+        let db_path =
+            std::env::temp_dir().join(format!("woohoo-prompt-opt-{}.sqlite", Uuid::new_v4()));
+        let database_url = format!("sqlite://{}", db_path.to_string_lossy().replace('\\', "/"));
         let pool = init_db(&database_url, 10).await;
         // 保留 db_path，由 OS temp 自动回收
         pool
@@ -1120,13 +1099,15 @@ mod tests {
         conversation_id: &str,
         run_id: &str,
     ) {
-        sqlx::query("INSERT OR IGNORE INTO users (id, username, email, password_hash) VALUES (?, ?, ?, '')")
-            .bind(user_id)
-            .bind(format!("user-{}", user_id))
-            .bind(format!("{}@test.local", user_id))
-            .execute(pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT OR IGNORE INTO users (id, username, email, password_hash) VALUES (?, ?, ?, '')",
+        )
+        .bind(user_id)
+        .bind(format!("user-{}", user_id))
+        .bind(format!("{}@test.local", user_id))
+        .execute(pool)
+        .await
+        .unwrap();
 
         sqlx::query("INSERT OR IGNORE INTO projects (id, user_id, name, created_at, updated_at) VALUES (?, ?, 'Test', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')")
             .bind(project_id)
@@ -1190,7 +1171,15 @@ mod tests {
     async fn apply_suggested_optimization_assigns_version() {
         let pool = create_test_pool().await;
         seed_user_project_run(&pool, "user-1", "project-1", "conv-1", "run-1").await;
-        seed_step_and_optimization(&pool, "run-1", "step-1", "outline_design", "opt-1", "suggested").await;
+        seed_step_and_optimization(
+            &pool,
+            "run-1",
+            "step-1",
+            "outline_design",
+            "opt-1",
+            "suggested",
+        )
+        .await;
 
         let request_id = RequestId {
             _value: "req-test-1".to_string(),
@@ -1220,21 +1209,43 @@ mod tests {
     async fn apply_is_idempotent_for_already_applied() {
         let pool = create_test_pool().await;
         seed_user_project_run(&pool, "user-1", "project-1", "conv-1", "run-1").await;
-        seed_step_and_optimization(&pool, "run-1", "step-1", "outline_design", "opt-1", "suggested").await;
+        seed_step_and_optimization(
+            &pool,
+            "run-1",
+            "step-1",
+            "outline_design",
+            "opt-1",
+            "suggested",
+        )
+        .await;
 
         let request_id = RequestId {
             _value: "req-test-2".to_string(),
         };
 
-        let first = apply_optimization_inner(&pool, "user-1", &request_id, "run-1", "opt-1", Some("project"))
-            .await
-            .unwrap();
+        let first = apply_optimization_inner(
+            &pool,
+            "user-1",
+            &request_id,
+            "run-1",
+            "opt-1",
+            Some("project"),
+        )
+        .await
+        .unwrap();
         assert_eq!(first.version, 1);
 
         // 第二次应用：应直接返回既有记录，不分配新版本号
-        let second = apply_optimization_inner(&pool, "user-1", &request_id, "run-1", "opt-1", Some("project"))
-            .await
-            .unwrap();
+        let second = apply_optimization_inner(
+            &pool,
+            "user-1",
+            &request_id,
+            "run-1",
+            "opt-1",
+            Some("project"),
+        )
+        .await
+        .unwrap();
         assert_eq!(second.id, first.id);
         assert_eq!(second.version, 1);
     }
@@ -1244,19 +1255,41 @@ mod tests {
     async fn rollback_applied_optimization_marks_rolled_back() {
         let pool = create_test_pool().await;
         seed_user_project_run(&pool, "user-1", "project-1", "conv-1", "run-1").await;
-        seed_step_and_optimization(&pool, "run-1", "step-1", "outline_design", "opt-1", "suggested").await;
+        seed_step_and_optimization(
+            &pool,
+            "run-1",
+            "step-1",
+            "outline_design",
+            "opt-1",
+            "suggested",
+        )
+        .await;
 
         let request_id = RequestId {
             _value: "req-test-3".to_string(),
         };
 
-        let _applied = apply_optimization_inner(&pool, "user-1", &request_id, "run-1", "opt-1", Some("project"))
-            .await
-            .unwrap();
+        let _applied = apply_optimization_inner(
+            &pool,
+            "user-1",
+            &request_id,
+            "run-1",
+            "opt-1",
+            Some("project"),
+        )
+        .await
+        .unwrap();
 
-        let rolled = rollback_optimization_inner(&pool, "user-1", &request_id, "run-1", "opt-1", Some("test reason"))
-            .await
-            .expect("rollback should succeed");
+        let rolled = rollback_optimization_inner(
+            &pool,
+            "user-1",
+            &request_id,
+            "run-1",
+            "opt-1",
+            Some("test reason"),
+        )
+        .await
+        .expect("rollback should succeed");
 
         assert_eq!(rolled.decision, "rolled_back");
         assert_eq!(rolled.rolled_back_reason.as_deref(), Some("test reason"));
@@ -1330,7 +1363,15 @@ mod tests {
     async fn cross_user_access_is_forbidden() {
         let pool = create_test_pool().await;
         seed_user_project_run(&pool, "user-1", "project-1", "conv-1", "run-1").await;
-        seed_step_and_optimization(&pool, "run-1", "step-1", "outline_design", "opt-1", "suggested").await;
+        seed_step_and_optimization(
+            &pool,
+            "run-1",
+            "step-1",
+            "outline_design",
+            "opt-1",
+            "suggested",
+        )
+        .await;
 
         // 创建另一个用户
         seed_user_project_run(&pool, "user-2", "project-2", "conv-2", "run-2").await;
@@ -1340,7 +1381,15 @@ mod tests {
         };
 
         // user-2 尝试访问 user-1 的 run-1 → 应失败（NotFound）
-        let result = apply_optimization_inner(&pool, "user-2", &request_id, "run-1", "opt-1", Some("project")).await;
+        let result = apply_optimization_inner(
+            &pool,
+            "user-2",
+            &request_id,
+            "run-1",
+            "opt-1",
+            Some("project"),
+        )
+        .await;
         assert!(result.is_err(), "跨用户访问应被拒绝");
     }
 
@@ -1349,14 +1398,29 @@ mod tests {
     async fn effect_comparison_marks_insufficient_samples() {
         let pool = create_test_pool().await;
         seed_user_project_run(&pool, "user-1", "project-1", "conv-1", "run-1").await;
-        seed_step_and_optimization(&pool, "run-1", "step-1", "outline_design", "opt-1", "suggested").await;
+        seed_step_and_optimization(
+            &pool,
+            "run-1",
+            "step-1",
+            "outline_design",
+            "opt-1",
+            "suggested",
+        )
+        .await;
 
         let request_id = RequestId {
             _value: "req-test-6".to_string(),
         };
-        let _applied = apply_optimization_inner(&pool, "user-1", &request_id, "run-1", "opt-1", Some("project"))
-            .await
-            .unwrap();
+        let _applied = apply_optimization_inner(
+            &pool,
+            "user-1",
+            &request_id,
+            "run-1",
+            "opt-1",
+            Some("project"),
+        )
+        .await
+        .unwrap();
 
         let effect = get_effect_comparison_inner(&pool, "user-1", "run-1", "opt-1")
             .await
@@ -1371,14 +1435,29 @@ mod tests {
     async fn rollback_recommendation_no_recommendation_without_failures() {
         let pool = create_test_pool().await;
         seed_user_project_run(&pool, "user-1", "project-1", "conv-1", "run-1").await;
-        seed_step_and_optimization(&pool, "run-1", "step-1", "outline_design", "opt-1", "suggested").await;
+        seed_step_and_optimization(
+            &pool,
+            "run-1",
+            "step-1",
+            "outline_design",
+            "opt-1",
+            "suggested",
+        )
+        .await;
 
         let request_id = RequestId {
             _value: "req-test-7".to_string(),
         };
-        let _applied = apply_optimization_inner(&pool, "user-1", &request_id, "run-1", "opt-1", Some("project"))
-            .await
-            .unwrap();
+        let _applied = apply_optimization_inner(
+            &pool,
+            "user-1",
+            &request_id,
+            "run-1",
+            "opt-1",
+            Some("project"),
+        )
+        .await
+        .unwrap();
 
         let rec = get_rollback_recommendation_inner(&pool, "user-1", "run-1", "opt-1")
             .await
@@ -1391,14 +1470,29 @@ mod tests {
     async fn rollback_recommendation_triggers_on_failures() {
         let pool = create_test_pool().await;
         seed_user_project_run(&pool, "user-1", "project-1", "conv-1", "run-1").await;
-        seed_step_and_optimization(&pool, "run-1", "step-1", "outline_design", "opt-1", "suggested").await;
+        seed_step_and_optimization(
+            &pool,
+            "run-1",
+            "step-1",
+            "outline_design",
+            "opt-1",
+            "suggested",
+        )
+        .await;
 
         let request_id = RequestId {
             _value: "req-test-8".to_string(),
         };
-        let applied = apply_optimization_inner(&pool, "user-1", &request_id, "run-1", "opt-1", Some("project"))
-            .await
-            .unwrap();
+        let applied = apply_optimization_inner(
+            &pool,
+            "user-1",
+            &request_id,
+            "run-1",
+            "opt-1",
+            Some("project"),
+        )
+        .await
+        .unwrap();
 
         // 注入 2 条失败 ai_usage_events
         for i in 0..2 {
@@ -1423,14 +1517,29 @@ mod tests {
     async fn load_patch_returns_none_after_rollback() {
         let pool = create_test_pool().await;
         seed_user_project_run(&pool, "user-1", "project-1", "conv-1", "run-1").await;
-        seed_step_and_optimization(&pool, "run-1", "step-1", "outline_design", "opt-1", "suggested").await;
+        seed_step_and_optimization(
+            &pool,
+            "run-1",
+            "step-1",
+            "outline_design",
+            "opt-1",
+            "suggested",
+        )
+        .await;
 
         let request_id = RequestId {
             _value: "req-test-9".to_string(),
         };
-        let _applied = apply_optimization_inner(&pool, "user-1", &request_id, "run-1", "opt-1", Some("project"))
-            .await
-            .unwrap();
+        let _applied = apply_optimization_inner(
+            &pool,
+            "user-1",
+            &request_id,
+            "run-1",
+            "opt-1",
+            Some("project"),
+        )
+        .await
+        .unwrap();
 
         // 应用后应有 patch
         let patch = load_applied_optimization_patch(&pool, "project-1", "outline_design")
@@ -1439,9 +1548,16 @@ mod tests {
         assert!(patch.is_some());
 
         // 回滚后应返回 None
-        let _rolled = rollback_optimization_inner(&pool, "user-1", &request_id, "run-1", "opt-1", Some("rollback"))
-            .await
-            .unwrap();
+        let _rolled = rollback_optimization_inner(
+            &pool,
+            "user-1",
+            &request_id,
+            "run-1",
+            "opt-1",
+            Some("rollback"),
+        )
+        .await
+        .unwrap();
 
         let patch_after = load_applied_optimization_patch(&pool, "project-1", "outline_design")
             .await
@@ -1467,12 +1583,11 @@ mod tests {
         }
 
         let run = get_run_by_id(pool, user_id, run_id).await?;
-        let optimization = load_optimization_for_user(pool, user_id, run_id, optimization_id).await?;
+        let optimization =
+            load_optimization_for_user(pool, user_id, run_id, optimization_id).await?;
 
         if optimization.project_id != run.project_id {
-            return Err(AppError::Forbidden(
-                "优化建议不属于当前流程的项目".into(),
-            ));
+            return Err(AppError::Forbidden("优化建议不属于当前流程的项目".into()));
         }
 
         if optimization.decision == "applied" && optimization.rolled_back_at.is_none() {
@@ -1481,15 +1596,17 @@ mod tests {
 
         if optimization.decision != "suggested" {
             return Err(AppError::Validation(
-                format!("当前建议状态为 {}，仅 suggested 可应用", optimization.decision).into(),
+                format!(
+                    "当前建议状态为 {}，仅 suggested 可应用",
+                    optimization.decision
+                )
+                .into(),
             ));
         }
 
         let step_key = optimization.step_key.clone().unwrap_or_default();
         if step_key.is_empty() {
-            return Err(AppError::Validation(
-                "优化建议缺少 step_key".into(),
-            ));
+            return Err(AppError::Validation("优化建议缺少 step_key".into()));
         }
 
         let next_version: i64 = sqlx::query_scalar::<_, i64>(
@@ -1576,22 +1693,23 @@ mod tests {
     ) -> AppResult<PipelinePromptOptimization> {
         let reason = reason.unwrap_or("user_initiated").to_string();
         let run = get_run_by_id(pool, user_id, run_id).await?;
-        let optimization = load_optimization_for_user(pool, user_id, run_id, optimization_id).await?;
+        let optimization =
+            load_optimization_for_user(pool, user_id, run_id, optimization_id).await?;
 
         if optimization.project_id != run.project_id {
-            return Err(AppError::Forbidden(
-                "优化建议不属于当前流程的项目".into(),
-            ));
+            return Err(AppError::Forbidden("优化建议不属于当前流程的项目".into()));
         }
         if optimization.decision != "applied" {
             return Err(AppError::Validation(
-                format!("当前建议状态为 {}，仅 applied 可回滚", optimization.decision).into(),
+                format!(
+                    "当前建议状态为 {}，仅 applied 可回滚",
+                    optimization.decision
+                )
+                .into(),
             ));
         }
         if optimization.rolled_back_at.is_some() {
-            return Err(AppError::Validation(
-                "该优化建议已经被回滚".into(),
-            ));
+            return Err(AppError::Validation("该优化建议已经被回滚".into()));
         }
 
         let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -1625,34 +1743,44 @@ mod tests {
         optimization_id: &str,
     ) -> AppResult<OptimizationEffectComparison> {
         let run = get_run_by_id(pool, user_id, run_id).await?;
-        let optimization = load_optimization_for_user(pool, user_id, run_id, optimization_id).await?;
+        let optimization =
+            load_optimization_for_user(pool, user_id, run_id, optimization_id).await?;
 
         if optimization.project_id != run.project_id {
-            return Err(AppError::Forbidden(
-                "优化建议不属于当前流程的项目".into(),
-            ));
+            return Err(AppError::Forbidden("优化建议不属于当前流程的项目".into()));
         }
 
         let applied_at = optimization.applied_at.as_deref().unwrap_or("");
         let step_key = optimization.step_key.clone().unwrap_or_default();
 
-        let baseline = collect_effect_metrics(pool, user_id, &run.project_id, &step_key, None, Some(applied_at))
-            .await?;
-        let optimized = collect_effect_metrics(pool, user_id, &run.project_id, &step_key, Some(applied_at), None)
-            .await?;
+        let baseline = collect_effect_metrics(
+            pool,
+            user_id,
+            &run.project_id,
+            &step_key,
+            None,
+            Some(applied_at),
+        )
+        .await?;
+        let optimized = collect_effect_metrics(
+            pool,
+            user_id,
+            &run.project_id,
+            &step_key,
+            Some(applied_at),
+            None,
+        )
+        .await?;
 
-        let sample_sufficient =
-            baseline.sample_count >= EFFECT_MIN_SAMPLE && optimized.sample_count >= EFFECT_MIN_SAMPLE;
+        let sample_sufficient = baseline.sample_count >= EFFECT_MIN_SAMPLE
+            && optimized.sample_count >= EFFECT_MIN_SAMPLE;
 
         let note = if sample_sufficient {
             build_effect_note(&baseline, &optimized)
         } else {
             format!(
                 "样本不足：baseline 需 >= {} 条（当前 {}），optimized 需 >= {} 条（当前 {}）",
-                EFFECT_MIN_SAMPLE,
-                baseline.sample_count,
-                EFFECT_MIN_SAMPLE,
-                optimized.sample_count
+                EFFECT_MIN_SAMPLE, baseline.sample_count, EFFECT_MIN_SAMPLE, optimized.sample_count
             )
         };
 
@@ -1675,12 +1803,11 @@ mod tests {
         optimization_id: &str,
     ) -> AppResult<RollbackRecommendation> {
         let run = get_run_by_id(pool, user_id, run_id).await?;
-        let optimization = load_optimization_for_user(pool, user_id, run_id, optimization_id).await?;
+        let optimization =
+            load_optimization_for_user(pool, user_id, run_id, optimization_id).await?;
 
         if optimization.project_id != run.project_id {
-            return Err(AppError::Forbidden(
-                "优化建议不属于当前流程的项目".into(),
-            ));
+            return Err(AppError::Forbidden("优化建议不属于当前流程的项目".into()));
         }
         if optimization.decision != "applied" || optimization.rolled_back_at.is_some() {
             return Ok(RollbackRecommendation {
@@ -1688,7 +1815,10 @@ mod tests {
                 version: optimization.version,
                 step_key: optimization.step_key.clone(),
                 recommend_rollback: false,
-                reasons: vec![format!("当前状态为 {}，无需回滚建议", optimization.decision)],
+                reasons: vec![format!(
+                    "当前状态为 {}，无需回滚建议",
+                    optimization.decision
+                )],
                 recent_failure_count: 0,
                 recent_manual_review_count: 0,
             });
@@ -1697,10 +1827,24 @@ mod tests {
         let applied_at = optimization.applied_at.as_deref().unwrap_or("");
         let step_key = optimization.step_key.clone().unwrap_or_default();
 
-        let baseline = collect_effect_metrics(pool, user_id, &run.project_id, &step_key, None, Some(applied_at))
-            .await?;
-        let optimized = collect_effect_metrics(pool, user_id, &run.project_id, &step_key, Some(applied_at), None)
-            .await?;
+        let baseline = collect_effect_metrics(
+            pool,
+            user_id,
+            &run.project_id,
+            &step_key,
+            None,
+            Some(applied_at),
+        )
+        .await?;
+        let optimized = collect_effect_metrics(
+            pool,
+            user_id,
+            &run.project_id,
+            &step_key,
+            Some(applied_at),
+            None,
+        )
+        .await?;
 
         let mut reasons = Vec::new();
         if optimized.failed_count >= ROLLBACK_RECENT_FAILURE_THRESHOLD {
@@ -1751,9 +1895,7 @@ mod tests {
         verify_project_owner(pool, user_id, project_id).await?;
 
         if req.enabled && !req.risk_acknowledged {
-            return Err(AppError::Validation(
-                "启用自动应用前必须先确认风险".into(),
-            ));
+            return Err(AppError::Validation("启用自动应用前必须先确认风险".into()));
         }
 
         let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);

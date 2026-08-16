@@ -82,10 +82,15 @@ pub fn parse_master_key(value: &str) -> AppResult<AesKey> {
 
     let mut key = [0u8; KEY_LEN];
     for (i, byte) in trimmed.as_bytes().chunks(2).enumerate() {
-        let hex_str = std::str::from_utf8(byte)
-            .map_err(|_| AppError::Internal(format!("{} 包含非 ASCII 字符", ENV_API_KEY_MASTER_KEY)))?;
-        let byte_val = u8::from_str_radix(hex_str, 16)
-            .map_err(|_| AppError::Internal(format!("{} 包含非 hex 字符: {}", ENV_API_KEY_MASTER_KEY, hex_str)))?;
+        let hex_str = std::str::from_utf8(byte).map_err(|_| {
+            AppError::Internal(format!("{} 包含非 ASCII 字符", ENV_API_KEY_MASTER_KEY))
+        })?;
+        let byte_val = u8::from_str_radix(hex_str, 16).map_err(|_| {
+            AppError::Internal(format!(
+                "{} 包含非 hex 字符: {}",
+                ENV_API_KEY_MASTER_KEY, hex_str
+            ))
+        })?;
         key[i] = byte_val;
     }
     Ok(key)
@@ -142,10 +147,7 @@ pub fn init_from_env() -> Result<(), String> {
                 init_global_master_key(Some(key));
                 Ok(())
             }
-            Err(error) => Err(format!(
-                "{} 配置非法: {}",
-                ENV_API_KEY_MASTER_KEY, error
-            )),
+            Err(error) => Err(format!("{} 配置非法: {}", ENV_API_KEY_MASTER_KEY, error)),
         },
         Err(_) => {
             init_global_master_key(None);
@@ -172,16 +174,12 @@ pub fn current_master_key() -> AppResult<AesKey> {
     }
 
     // 读取全局密钥
-    GLOBAL_KEY
-        .get()
-        .copied()
-        .flatten()
-        .ok_or_else(|| {
-            AppError::Internal(format!(
-                "{} 未配置：无法加解密 API Key。请在环境变量中设置 64 字符 hex 编码的 32 字节主密钥",
-                ENV_API_KEY_MASTER_KEY
-            ))
-        })
+    GLOBAL_KEY.get().copied().flatten().ok_or_else(|| {
+        AppError::Internal(format!(
+            "{} 未配置：无法加解密 API Key。请在环境变量中设置 64 字符 hex 编码的 32 字节主密钥",
+            ENV_API_KEY_MASTER_KEY
+        ))
+    })
 }
 
 /// 判断主密钥是否已配置
@@ -293,9 +291,8 @@ pub fn decrypt(ciphertext: &str) -> AppResult<String> {
             ))
         })?;
 
-    String::from_utf8(plaintext).map_err(|err| {
-        AppError::Internal(format!("API Key 解密后明文不是有效 UTF-8: {}", err))
-    })
+    String::from_utf8(plaintext)
+        .map_err(|err| AppError::Internal(format!("API Key 解密后明文不是有效 UTF-8: {}", err)))
 }
 
 /// 自动识别明文/密文并返回明文（向后兼容）
@@ -341,10 +338,7 @@ pub fn decrypt_endpoint_api_key(endpoint: &AiEndpoint) -> AppResult<String> {
 /// @param pool 数据库连接池
 /// @param endpoint AI 端点实体
 /// @returns Ok(()) 成功（跳过或已迁移）；Err 表示迁移失败
-pub async fn migrate_endpoint_if_needed(
-    pool: &SqlitePool,
-    endpoint: &AiEndpoint,
-) -> AppResult<()> {
+pub async fn migrate_endpoint_if_needed(pool: &SqlitePool, endpoint: &AiEndpoint) -> AppResult<()> {
     let current = endpoint.api_key.trim();
     if current.is_empty() {
         return Ok(());
@@ -470,7 +464,10 @@ pub async fn migrate_all_endpoints(pool: &SqlitePool) -> AppResult<()> {
     }
 
     if migrated > 0 {
-        tracing::info!("已批量迁移 {} 个 AI endpoint 的 API Key 为加密格式", migrated);
+        tracing::info!(
+            "已批量迁移 {} 个 AI endpoint 的 API Key 为加密格式",
+            migrated
+        );
     }
 
     Ok(())
@@ -847,13 +844,12 @@ mod integration_tests {
                 .unwrap();
 
             // 读取并解密
-            let endpoint = sqlx::query_as::<_, AiEndpoint>(
-                "SELECT * FROM ai_endpoints WHERE id = ?",
-            )
-            .bind("ep-2")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+            let endpoint =
+                sqlx::query_as::<_, AiEndpoint>("SELECT * FROM ai_endpoints WHERE id = ?")
+                    .bind("ep-2")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
 
             let decrypted = decrypt_endpoint_api_key(&endpoint).unwrap();
             assert_eq!(decrypted, key_b, "should decrypt to new key, not old");
@@ -872,13 +868,12 @@ mod integration_tests {
             let encrypted = encrypt(plaintext).unwrap();
             insert_endpoint(&pool, "ep-3", &encrypted).await;
 
-            let endpoint = sqlx::query_as::<_, AiEndpoint>(
-                "SELECT * FROM ai_endpoints WHERE id = ?",
-            )
-            .bind("ep-3")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+            let endpoint =
+                sqlx::query_as::<_, AiEndpoint>("SELECT * FROM ai_endpoints WHERE id = ?")
+                    .bind("ep-3")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
 
             // 转换为 view（模拟 API 响应）
             let view: AiEndpointView = endpoint.into();
@@ -915,13 +910,12 @@ mod integration_tests {
             assert!(!is_encrypted(&before));
 
             // 读取 endpoint 并执行迁移
-            let endpoint = sqlx::query_as::<_, AiEndpoint>(
-                "SELECT * FROM ai_endpoints WHERE id = ?",
-            )
-            .bind("ep-4")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+            let endpoint =
+                sqlx::query_as::<_, AiEndpoint>("SELECT * FROM ai_endpoints WHERE id = ?")
+                    .bind("ep-4")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
 
             migrate_endpoint_if_needed(&pool, &endpoint).await.unwrap();
 
@@ -931,13 +925,12 @@ mod integration_tests {
             assert_ne!(after, plaintext);
 
             // 验证解密后能还原明文
-            let endpoint_after = sqlx::query_as::<_, AiEndpoint>(
-                "SELECT * FROM ai_endpoints WHERE id = ?",
-            )
-            .bind("ep-4")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+            let endpoint_after =
+                sqlx::query_as::<_, AiEndpoint>("SELECT * FROM ai_endpoints WHERE id = ?")
+                    .bind("ep-4")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
             let decrypted = decrypt_endpoint_api_key(&endpoint_after).unwrap();
             assert_eq!(decrypted, plaintext);
         })
@@ -955,13 +948,12 @@ mod integration_tests {
             let encrypted = encrypt(plaintext).unwrap();
             insert_endpoint(&pool, "ep-5", &encrypted).await;
 
-            let endpoint = sqlx::query_as::<_, AiEndpoint>(
-                "SELECT * FROM ai_endpoints WHERE id = ?",
-            )
-            .bind("ep-5")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+            let endpoint =
+                sqlx::query_as::<_, AiEndpoint>("SELECT * FROM ai_endpoints WHERE id = ?")
+                    .bind("ep-5")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
 
             // 切换到错误密钥
             set_test_master_key(Some(TEST_WRONG_KEY));
@@ -1007,7 +999,10 @@ mod integration_tests {
             let pool = setup_pool().await;
             // 不插入任何 endpoint
             let result = assert_production_safe_with_db_and(&pool, true).await;
-            assert!(result.is_ok(), "production without endpoints should allow startup");
+            assert!(
+                result.is_ok(),
+                "production without endpoints should allow startup"
+            );
         })
         .await;
     }
@@ -1019,7 +1014,10 @@ mod integration_tests {
             let pool = setup_pool().await;
             insert_endpoint(&pool, "ep-6c", "enc:v1:dGVzdA==:dGVzdA==").await;
             let result = assert_production_safe_with_db_and(&pool, true).await;
-            assert!(result.is_ok(), "production with master key should allow startup");
+            assert!(
+                result.is_ok(),
+                "production with master key should allow startup"
+            );
         })
         .await;
     }
@@ -1048,13 +1046,12 @@ mod integration_tests {
             insert_endpoint(&pool, "ep-7", &encrypted).await;
 
             // 验证初始可解密
-            let endpoint = sqlx::query_as::<_, AiEndpoint>(
-                "SELECT * FROM ai_endpoints WHERE id = ?",
-            )
-            .bind("ep-7")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+            let endpoint =
+                sqlx::query_as::<_, AiEndpoint>("SELECT * FROM ai_endpoints WHERE id = ?")
+                    .bind("ep-7")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
             let decrypted = decrypt_endpoint_api_key(&endpoint).unwrap();
             assert_eq!(decrypted, plaintext);
 
@@ -1070,13 +1067,12 @@ mod integration_tests {
             assert!(stored.is_empty(), "api_key should be empty after clear");
 
             // 验证解密返回空字符串（不是旧明文）
-            let endpoint_after = sqlx::query_as::<_, AiEndpoint>(
-                "SELECT * FROM ai_endpoints WHERE id = ?",
-            )
-            .bind("ep-7")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+            let endpoint_after =
+                sqlx::query_as::<_, AiEndpoint>("SELECT * FROM ai_endpoints WHERE id = ?")
+                    .bind("ep-7")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
             let decrypted_after = decrypt_endpoint_api_key(&endpoint_after).unwrap();
             assert!(decrypted_after.is_empty(), "decrypted should be empty");
             assert_ne!(decrypted_after, plaintext, "old key must not be usable");

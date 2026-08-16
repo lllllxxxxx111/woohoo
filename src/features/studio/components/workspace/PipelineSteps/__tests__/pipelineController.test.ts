@@ -31,7 +31,6 @@ import {
 } from '../usePipelineRunController';
 import {
   PIPELINE_DISPLAY_PRESETS,
-  PIPELINE_ERROR_CODE_PRESETS,
   deriveDisplayState,
   getDisplayPreset,
   getErrorCodePreset,

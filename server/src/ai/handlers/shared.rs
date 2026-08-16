@@ -287,10 +287,7 @@ pub(crate) async fn get_default_endpoint(state: &AppState, user_id: &str) -> App
 ///
 /// - 已是密文或空：原样返回
 /// - 旧明文：调用 migrate_endpoint_if_needed 加密后重新读取
-async fn refresh_after_migrate(
-    pool: &SqlitePool,
-    endpoint: AiEndpoint,
-) -> AppResult<AiEndpoint> {
+async fn refresh_after_migrate(pool: &SqlitePool, endpoint: AiEndpoint) -> AppResult<AiEndpoint> {
     if endpoint.api_key.trim().is_empty() || api_key_crypto::is_encrypted(&endpoint.api_key) {
         return Ok(endpoint);
     }

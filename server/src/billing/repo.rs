@@ -595,10 +595,7 @@ mod tests {
             "woohoo-billing-concurrency-{}.sqlite",
             Uuid::new_v4()
         ));
-        let database_url = format!(
-            "sqlite://{}",
-            db_path.to_string_lossy().replace('\\', "/")
-        );
+        let database_url = format!("sqlite://{}", db_path.to_string_lossy().replace('\\', "/"));
         init_db(&database_url, 10).await
     }
 
@@ -760,8 +757,16 @@ mod tests {
 
         let count_a = count_spent_for_ref(&pool, ref_id_a).await;
         let count_b = count_spent_for_ref(&pool, ref_id_b).await;
-        assert_eq!(count_a, 1, "ref_id_a 应有 1 条 spent 记录，实际 {}", count_a);
-        assert_eq!(count_b, 1, "ref_id_b 应有 1 条 spent 记录，实际 {}", count_b);
+        assert_eq!(
+            count_a, 1,
+            "ref_id_a 应有 1 条 spent 记录，实际 {}",
+            count_a
+        );
+        assert_eq!(
+            count_b, 1,
+            "ref_id_b 应有 1 条 spent 记录，实际 {}",
+            count_b
+        );
 
         // 验证余额正好减少 2 * cost
         let credits = get_user_credits(&pool, user_id).await.unwrap();
@@ -1135,8 +1140,16 @@ mod tests {
         let refund = refund_records[0];
 
         // 验证：金额匹配
-        assert!((spent.amount - cost).abs() < 0.001, "spent.amount 应为 {}", cost);
-        assert!((refund.amount - cost).abs() < 0.001, "refund.amount 应为 {}", cost);
+        assert!(
+            (spent.amount - cost).abs() < 0.001,
+            "spent.amount 应为 {}",
+            cost
+        );
+        assert!(
+            (refund.amount - cost).abs() < 0.001,
+            "refund.amount 应为 {}",
+            cost
+        );
 
         // 验证：ref_type 匹配
         assert_eq!(

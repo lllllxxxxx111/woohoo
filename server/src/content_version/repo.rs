@@ -3,7 +3,7 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
 
 use super::model::{
-    CommitError, CommitInput, CommitOutcome, ConcurrencyToken, ContentVersionRow, ContentType,
+    CommitError, CommitInput, CommitOutcome, ConcurrencyToken, ContentType, ContentVersionRow,
     VersionConflict,
 };
 use crate::error::AppError;
@@ -17,9 +17,9 @@ impl CommitError {
                     "内容已被更新到 v{}，你的修改基于旧版本，未写入。请加载最新版本后重试。",
                     conflict.current_version
                 );
-                let detail = serde_json::to_value(&conflict).unwrap_or_else(|_| {
-                    serde_json::json!({ "currentVersion": conflict.current_version })
-                });
+                let detail = serde_json::to_value(&conflict).unwrap_or_else(
+                    |_| serde_json::json!({ "currentVersion": conflict.current_version }),
+                );
                 AppError::VersionConflict { message, detail }
             }
             CommitError::Database(error) => AppError::Sqlx(error),
@@ -155,7 +155,10 @@ pub async fn commit_version_tx(
         if is_unique_violation(&error) {
             // 并发写入竞态：其他事务已经推进版本号，重新读取并报告冲突
             let latest = latest_version_tx(tx, &input.project_id, input.content_type).await?;
-            let latest_version = latest.as_ref().map(|row| row.version).unwrap_or(new_version);
+            let latest_version = latest
+                .as_ref()
+                .map(|row| row.version)
+                .unwrap_or(new_version);
             return Err(CommitError::Conflict(VersionConflict {
                 base_version: match input.expected_base {
                     ConcurrencyToken::BaseVersion(base) => Some(base),
@@ -431,7 +434,13 @@ mod tests {
 
         let first = commit_version(
             &pool,
-            &input("p1", ContentType::Script, "A", ConcurrencyToken::BaseVersion(0), "manual"),
+            &input(
+                "p1",
+                ContentType::Script,
+                "A",
+                ConcurrencyToken::BaseVersion(0),
+                "manual",
+            ),
         )
         .await
         .expect("commit v1");
@@ -439,7 +448,13 @@ mod tests {
 
         let second = commit_version(
             &pool,
-            &input("p1", ContentType::Script, "B", ConcurrencyToken::BaseVersion(1), "manual"),
+            &input(
+                "p1",
+                ContentType::Script,
+                "B",
+                ConcurrencyToken::BaseVersion(1),
+                "manual",
+            ),
         )
         .await
         .expect("commit v2");
@@ -447,7 +462,13 @@ mod tests {
 
         let third = commit_version(
             &pool,
-            &input("p1", ContentType::Script, "C", ConcurrencyToken::BaseVersion(2), "ai"),
+            &input(
+                "p1",
+                ContentType::Script,
+                "C",
+                ConcurrencyToken::BaseVersion(2),
+                "ai",
+            ),
         )
         .await
         .expect("commit v3");
@@ -466,7 +487,13 @@ mod tests {
 
         commit_version(
             &pool,
-            &input("p1", ContentType::Script, "A", ConcurrencyToken::BaseVersion(0), "manual"),
+            &input(
+                "p1",
+                ContentType::Script,
+                "A",
+                ConcurrencyToken::BaseVersion(0),
+                "manual",
+            ),
         )
         .await
         .expect("commit v1");
@@ -474,7 +501,13 @@ mod tests {
         // 客户端仍基于 v0 提交，但当前已是 v1 → 冲突
         let stale = commit_version(
             &pool,
-            &input("p1", ContentType::Script, "X", ConcurrencyToken::BaseVersion(0), "manual"),
+            &input(
+                "p1",
+                ContentType::Script,
+                "X",
+                ConcurrencyToken::BaseVersion(0),
+                "manual",
+            ),
         )
         .await;
 
@@ -500,14 +533,26 @@ mod tests {
 
         commit_version(
             &pool,
-            &input("p1", ContentType::Script, "同一内容", ConcurrencyToken::BaseVersion(0), "manual"),
+            &input(
+                "p1",
+                ContentType::Script,
+                "同一内容",
+                ConcurrencyToken::BaseVersion(0),
+                "manual",
+            ),
         )
         .await
         .expect("commit v1");
 
         let retry = commit_version(
             &pool,
-            &input("p1", ContentType::Script, "同一内容", ConcurrencyToken::BaseVersion(0), "manual"),
+            &input(
+                "p1",
+                ContentType::Script,
+                "同一内容",
+                ConcurrencyToken::BaseVersion(0),
+                "manual",
+            ),
         )
         .await
         .expect("idempotent retry");
@@ -523,7 +568,13 @@ mod tests {
 
         let first = commit_version(
             &pool,
-            &input("p1", ContentType::Script, "相同内容", ConcurrencyToken::BaseVersion(0), "manual"),
+            &input(
+                "p1",
+                ContentType::Script,
+                "相同内容",
+                ConcurrencyToken::BaseVersion(0),
+                "manual",
+            ),
         )
         .await
         .expect("commit v1");
@@ -533,7 +584,13 @@ mod tests {
         // 重复保存相同内容 → 去重，不新增版本
         let duplicate = commit_version(
             &pool,
-            &input("p1", ContentType::Script, "相同内容", ConcurrencyToken::BaseVersion(1), "manual"),
+            &input(
+                "p1",
+                ContentType::Script,
+                "相同内容",
+                ConcurrencyToken::BaseVersion(1),
+                "manual",
+            ),
         )
         .await
         .expect("dedup commit");
@@ -554,7 +611,13 @@ mod tests {
         // v1 = A, v2 = B
         let v1 = commit_version(
             &pool,
-            &input("p1", ContentType::Script, "A", ConcurrencyToken::BaseVersion(0), "manual"),
+            &input(
+                "p1",
+                ContentType::Script,
+                "A",
+                ConcurrencyToken::BaseVersion(0),
+                "manual",
+            ),
         )
         .await
         .expect("commit v1");
@@ -562,7 +625,13 @@ mod tests {
 
         commit_version(
             &pool,
-            &input("p1", ContentType::Script, "B", ConcurrencyToken::BaseVersion(1), "manual"),
+            &input(
+                "p1",
+                ContentType::Script,
+                "B",
+                ConcurrencyToken::BaseVersion(1),
+                "manual",
+            ),
         )
         .await
         .expect("commit v2");
@@ -570,7 +639,13 @@ mod tests {
         // 恢复 A：追加一个新版本（source=restore），而不是改写 v1
         let restored = commit_version(
             &pool,
-            &input("p1", ContentType::Script, "A", ConcurrencyToken::None, "restore"),
+            &input(
+                "p1",
+                ContentType::Script,
+                "A",
+                ConcurrencyToken::None,
+                "restore",
+            ),
         )
         .await
         .expect("restore commit");
@@ -602,7 +677,13 @@ mod tests {
 
         commit_version(
             &pool,
-            &input("p1", ContentType::Script, "P1 content", ConcurrencyToken::BaseVersion(0), "manual"),
+            &input(
+                "p1",
+                ContentType::Script,
+                "P1 content",
+                ConcurrencyToken::BaseVersion(0),
+                "manual",
+            ),
         )
         .await
         .expect("commit p1 v1");
@@ -626,7 +707,13 @@ mod tests {
         // p2 从版本 0 独立递增，不受 p1 影响
         let p2_v1 = commit_version(
             &pool,
-            &input("p2", ContentType::Script, "P2 content", ConcurrencyToken::BaseVersion(0), "manual"),
+            &input(
+                "p2",
+                ContentType::Script,
+                "P2 content",
+                ConcurrencyToken::BaseVersion(0),
+                "manual",
+            ),
         )
         .await
         .expect("commit p2 v1");
@@ -641,7 +728,13 @@ mod tests {
         // 首次保存空内容：base=0，无当前版本 → 成功创建 v1
         let first = commit_version(
             &pool,
-            &input("p1", ContentType::Script, "", ConcurrencyToken::BaseVersion(0), "manual"),
+            &input(
+                "p1",
+                ContentType::Script,
+                "",
+                ConcurrencyToken::BaseVersion(0),
+                "manual",
+            ),
         )
         .await
         .expect("first empty save");
@@ -651,7 +744,13 @@ mod tests {
         // 再次保存空内容 → 去重
         let duplicate = commit_version(
             &pool,
-            &input("p1", ContentType::Script, "", ConcurrencyToken::BaseVersion(1), "manual"),
+            &input(
+                "p1",
+                ContentType::Script,
+                "",
+                ConcurrencyToken::BaseVersion(1),
+                "manual",
+            ),
         )
         .await
         .expect("second empty save");
@@ -666,7 +765,13 @@ mod tests {
         // 旧客户端不携带 baseVersion（ConcurrencyToken::None）→ 按当前版本继续写入
         let first = commit_version(
             &pool,
-            &input("p1", ContentType::Script, "A", ConcurrencyToken::None, "manual"),
+            &input(
+                "p1",
+                ContentType::Script,
+                "A",
+                ConcurrencyToken::None,
+                "manual",
+            ),
         )
         .await
         .expect("no-token commit v1");
@@ -674,7 +779,13 @@ mod tests {
 
         let second = commit_version(
             &pool,
-            &input("p1", ContentType::Script, "B", ConcurrencyToken::None, "manual"),
+            &input(
+                "p1",
+                ContentType::Script,
+                "B",
+                ConcurrencyToken::None,
+                "manual",
+            ),
         )
         .await
         .expect("no-token commit v2");
@@ -688,7 +799,13 @@ mod tests {
 
         commit_version(
             &pool,
-            &input("p1", ContentType::Script, "script-A", ConcurrencyToken::BaseVersion(0), "manual"),
+            &input(
+                "p1",
+                ContentType::Script,
+                "script-A",
+                ConcurrencyToken::BaseVersion(0),
+                "manual",
+            ),
         )
         .await
         .expect("commit script v1");
@@ -819,7 +936,13 @@ mod tests {
 
         commit_version(
             &pool,
-            &input("p2", ContentType::Script, "A", ConcurrencyToken::BaseVersion(0), "manual"),
+            &input(
+                "p2",
+                ContentType::Script,
+                "A",
+                ConcurrencyToken::BaseVersion(0),
+                "manual",
+            ),
         )
         .await
         .expect("commit p2 script");

@@ -232,9 +232,8 @@ pub(crate) async fn enqueue_video_generation(
             )
         }
     } else {
-        env::var("VIDEO_API_URL").unwrap_or_else(|_| {
-            format!("{}/v1/video/generations", base_url.trim_end_matches('/'))
-        })
+        env::var("VIDEO_API_URL")
+            .unwrap_or_else(|_| format!("{}/v1/video/generations", base_url.trim_end_matches('/')))
     };
 
     let task_req = CreateVideoGenerationReq {
@@ -663,14 +662,9 @@ mod tests {
 
     /// 构造测试用 SQLite 连接池（带完整 schema，通过 init_db 自动迁移）
     async fn create_test_pool() -> SqlitePool {
-        let db_path = std::env::temp_dir().join(format!(
-            "woohoo-video-gen-perm-{}.sqlite",
-            Uuid::new_v4()
-        ));
-        let database_url = format!(
-            "sqlite://{}",
-            db_path.to_string_lossy().replace('\\', "/")
-        );
+        let db_path =
+            std::env::temp_dir().join(format!("woohoo-video-gen-perm-{}.sqlite", Uuid::new_v4()));
+        let database_url = format!("sqlite://{}", db_path.to_string_lossy().replace('\\', "/"));
         // init_db 会自动运行 schema migrations（含 017_video_gen）
         let pool = init_db(&database_url, 10).await;
         // 保留 db_path，由 OS temp 自动回收

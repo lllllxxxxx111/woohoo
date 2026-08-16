@@ -13,7 +13,6 @@ import {
   buildVerificationReport,
   runVerificationChecks,
   buildVerificationMarkdown,
-  formatBytes,
   getClientInfo,
   recordExportAudit,
   type AuditableManifest,
@@ -897,51 +896,6 @@ export async function buildAuditableManifest(
   };
 }
 
-/**
- * @deprecated Use buildAuditableManifest instead - kept for backward compatibility
- */
-function buildProjectManifest(project: Project, snapshot: ProjectSnapshot, assets: Asset[]) {
-  return {
-    exportedAt: new Date().toISOString(),
-    project: {
-      id: project.id,
-      name: project.name,
-      status: project.status,
-      phase: project.phase,
-      createdAt: project.createdAt,
-      workflow: project.workflow,
-    },
-    summary: {
-      scriptSections: snapshot.scriptSections.length,
-      chapters: snapshot.chapters.length,
-      characters: snapshot.characters.length,
-      scenes: snapshot.scenes.length,
-      shots: snapshot.finalCut.totalShots,
-      durationSeconds: snapshot.finalCut.totalDurationSeconds,
-      assets: assets.length,
-      chats: project.chatSessions.length,
-    },
-    chapters: snapshot.chapters,
-    characters: snapshot.characters.map((item) => ({
-      name: item.name,
-      summary: item.summary,
-      assetCount: item.assetCount,
-    })),
-    scenes: snapshot.scenes,
-    keyframes: snapshot.keyframes,
-    finalCut: snapshot.finalCut,
-    assets: assets.map((asset) => ({
-      id: asset.id,
-      name: asset.name,
-      type: asset.type,
-      url: asset.url,
-      versionLabel: asset.versionLabel,
-      createdAt: asset.createdAt,
-      updatedAt: asset.updatedAt,
-      metadata: asset.metadata ?? null,
-    })),
-  };
-}
 
 function buildCoreMarkdown(project: Project, snapshot: ProjectSnapshot, assets: Asset[]) {
   const lines = [

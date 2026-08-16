@@ -26,7 +26,6 @@ export const CharSceneView: React.FC = () => {
   const {
     currentRun,
     isSubmitting,
-    displayState,
     displayPreset,
     currentStep,
     launch,

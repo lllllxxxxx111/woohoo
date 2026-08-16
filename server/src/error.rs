@@ -150,7 +150,8 @@ impl IntoResponse for AppError {
                     "errorCode": "VERSION_CONFLICT",
                     "retryable": false
                 });
-                if let (Some(body_obj), Some(detail_obj)) = (body.as_object_mut(), detail.as_object())
+                if let (Some(body_obj), Some(detail_obj)) =
+                    (body.as_object_mut(), detail.as_object())
                 {
                     for (key, value) in detail_obj {
                         body_obj.insert(key.clone(), value.clone());
