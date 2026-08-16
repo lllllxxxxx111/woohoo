@@ -16,3 +16,16 @@ Thumbs.db
 .env.local
 .env.*.local
 eslintcache
+
+# 评估/演示产物与二进制大文件：本地产留档即可，绝不进版本库
+# （历史提交中的大对象需 git filter-repo 重写才能真正瘦身）
+.eval-artifacts/
+eval-results/
+trae-demo/
+.trae/
+.zcode/
+*.zip
+*.pdb
+*.png
+!src/**/*.png
+!docs/**/*.png

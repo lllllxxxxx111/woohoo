@@ -1,8 +1,0 @@
-dist
-node_modules
-data
-runtime-logs
-server/target
-src-tauri/target
-src-tauri/gen
-package-lock.json
