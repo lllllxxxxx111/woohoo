@@ -45,8 +45,12 @@ export function planChunks(
   fileSize: number,
   preferred: number = CHUNK_UPLOAD_CONSTRAINTS.defaultChunkSize,
 ): ChunkPlan {
-  if (!Number.isFinite(fileSize) || fileSize <= 0) {
+  if (!Number.isFinite(fileSize) || fileSize < 0) {
     throw new Error('文件大小无效');
+  }
+  if (fileSize === 0) {
+    // 0 字节文件：协议按单空分片处理，完成时以空文件的 SHA-256 校验。
+    return { chunkSize: CHUNK_UPLOAD_CONSTRAINTS.minChunkSize, totalChunks: 1 };
   }
   const { minChunkSize, maxChunkSize, maxTotalChunks } = CHUNK_UPLOAD_CONSTRAINTS;
   // 小文件不浪费：分片大小不超过文件本身，但仍受协议下限约束。
@@ -244,10 +248,15 @@ class UploadRequestError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = 'UploadRequestError';
   }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError';
 }
 
 function createClientToken(): string {
@@ -261,10 +270,14 @@ async function hashFileSha256(
   file: File,
   chunkSize: number,
   onProgress: (bytesHashed: number) => void,
+  shouldStop?: () => boolean,
 ): Promise<string> {
   const hasher = new Sha256();
   let offset = 0;
   while (offset < file.size) {
+    if (shouldStop?.()) {
+      throw new UploadAbortedError();
+    }
     const end = Math.min(offset + chunkSize, file.size);
     const buffer = await file.slice(offset, end).arrayBuffer();
     hasher.update(new Uint8Array(buffer));
@@ -344,6 +357,7 @@ export function startResumableUpload(
   let failedAttempts = 0;
   const inFlightLoaded = new Map<number, number>();
   const activeXhrs = new Set<XMLHttpRequest>();
+  const activeControllers = new Set<AbortController>();
   const pendingParts: number[] = [];
   const completedParts = new Set<number>();
   let plan: ChunkPlan;
@@ -351,6 +365,11 @@ export function startResumableUpload(
   let waitResolvers: Array<() => void> = [];
 
   function emit(phase: UploadPhase, message?: string): void {
+    // 终态（失败/完成/取消）之后只允许终态相位外发，防止迟到的进度回调
+    // 把已失败或已取消的上传在 UI 上“复活”。
+    if ((settled || aborted) && phase !== 'error' && phase !== 'completed' && phase !== 'aborted') {
+      return;
+    }
     const bytesInFlight = Array.from(inFlightLoaded.values()).reduce(
       (sum, value) => sum + value,
       0,
@@ -407,6 +426,10 @@ export function startResumableUpload(
     while (!paused && inFlightLoaded.size < concurrency) {
       const partNumber = pendingParts.shift();
       if (partNumber === undefined) break;
+      // 必须在启动协程前同步登记在途分片：协程要到 XHR 建立时（多个 await
+      // 之后）才写入 inFlightLoaded，若依赖那一步，并发限制会完全失效，
+      // 且 maybeFinish 会在同步循环结束后误判“无在途分片”而立刻失败。
+      inFlightLoaded.set(partNumber, 0);
       void uploadPartWithRetries(partNumber);
     }
     maybeFinish();
@@ -427,9 +450,16 @@ export function startResumableUpload(
   async function uploadPartWithRetries(partNumber: number): Promise<void> {
     let attempt = 0;
     while (true) {
-      if (aborted) return;
+      if (aborted || settled) {
+        // 上传已终态：停止重试并清掉在途登记，避免僵尸协程继续传分片。
+        inFlightLoaded.delete(partNumber);
+        return;
+      }
       await waitIfPaused();
-      if (aborted) return;
+      if (aborted || settled) {
+        inFlightLoaded.delete(partNumber);
+        return;
+      }
 
       attempt += 1;
       try {
@@ -443,6 +473,7 @@ export function startResumableUpload(
       } catch (error) {
         inFlightLoaded.delete(partNumber);
         if (aborted) return;
+        if (settled) return;
         if (error instanceof UploadAbortedError) {
           // 暂停导致的中断：分片回到队列，等待 resume。
           pendingParts.push(partNumber);
@@ -450,7 +481,10 @@ export function startResumableUpload(
           return;
         }
         const retryable = error instanceof Error && !!(error as { retryable?: boolean }).retryable;
-        if (!retryable || attempt >= maxPartAttempts) {
+        const isRateLimited = error instanceof UploadRequestError && error.status === 429;
+        // 限流窗口以分钟计，重试全部会落进同一窗口；给 429 更多的尝试预算。
+        const attemptBudget = isRateLimited ? Math.max(maxPartAttempts, 6) : maxPartAttempts;
+        if (!retryable || attempt >= attemptBudget) {
           pendingParts.push(partNumber);
           fail(error instanceof Error ? error : new Error('分片上传失败'));
           return;
@@ -468,8 +502,12 @@ export function startResumableUpload(
         }
         failedAttempts += 1;
         emit('uploading', `分片 ${partNumber} 第 ${attempt} 次重试`);
+        const retryAfterMs = error instanceof UploadRequestError ? error.retryAfterMs : undefined;
         const backoff = Math.min(15_000, 500 * 2 ** (attempt - 1)) + Math.random() * 200;
-        await new Promise((resolve) => setTimeout(resolve, backoff));
+        // 服务端限流会返回 Retry-After，等待时间以其为准（上限 60s）。
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(60_000, Math.max(backoff, retryAfterMs ?? 0))),
+        );
       }
     }
   }
@@ -491,6 +529,9 @@ export function startResumableUpload(
 
     const token = await ensureServerSession(false);
     const baseUrl = await getServerBaseUrl();
+    // 上面数个 await 期间上传可能已失败/取消/暂停：XHR 一旦 send 就无法撤回，
+    // 建连前必须再校验一次，杜绝终态后的僵尸请求。
+    if (aborted || paused || settled) throw new UploadAbortedError();
     const url = `${baseUrl}/api/projects/${encodeURIComponent(projectId)}/uploads/${encodeURIComponent(sessionId ?? '')}/parts/${partNumber}`;
 
     await new Promise<void>((resolve, reject) => {
@@ -507,6 +548,13 @@ export function startResumableUpload(
       xhr.setRequestHeader('Content-Type', 'application/octet-stream');
       xhr.setRequestHeader('X-Part-SHA256', partSha256);
       xhr.responseType = 'text';
+      // 连接黑洞（不断开的停滞 TCP）既不触发 onerror 也不触发 onabort，
+      // 必须有超时兜底：按分片大小预留 25KB/s 带宽余量，另加 30s 起步。
+      xhr.timeout = Math.min(180_000, 30_000 + Math.ceil(plan.chunkSize / 25_000) * 1_000);
+      xhr.ontimeout = () => {
+        cleanup();
+        reject(Object.assign(new Error(`分片 ${partNumber} 上传超时`), { retryable: true }));
+      };
 
       xhr.upload.onprogress = (event) => {
         if (event.lengthComputable) {
@@ -528,9 +576,17 @@ export function startResumableUpload(
         } catch {
           if (xhr.responseText) message = xhr.responseText;
         }
+        let retryAfterMs: number | undefined;
+        const retryAfterHeader = xhr.getResponseHeader('Retry-After');
+        if (retryAfterHeader) {
+          const seconds = Number.parseInt(retryAfterHeader, 10);
+          if (Number.isFinite(seconds) && seconds > 0) {
+            retryAfterMs = seconds * 1000;
+          }
+        }
         const retryableStatus = [408, 425, 429, 500, 502, 503, 504].includes(xhr.status);
         reject(
-          Object.assign(new UploadRequestError(message, xhr.status), {
+          Object.assign(new UploadRequestError(message, xhr.status, retryAfterMs), {
             retryable: xhr.status === 401 || retryableStatus,
           }),
         );
@@ -561,14 +617,35 @@ export function startResumableUpload(
   async function complete(): Promise<void> {
     if (aborted) return;
     emit('finalizing');
-    try {
-      const result = await apiJson<CompleteUploadResponse>(
-        `/api/projects/${encodeURIComponent(projectId)}/uploads/${encodeURIComponent(sessionId ?? '')}/complete`,
-        { method: 'POST' },
-      );
-      succeed(result.asset);
-    } catch (error) {
-      fail(error instanceof Error ? error : new Error('完成上传失败'));
+    const maxCompleteAttempts = 3;
+    for (let attempt = 1; attempt <= maxCompleteAttempts; attempt += 1) {
+      if (aborted) return;
+      // 服务端在本请求内完成整文件合并与全文件 SHA-256 校验，大文件会远超
+      // 通用 10s 请求超时。自带 signal 让 fetchServer 跳过默认超时；
+      // complete 幂等（服务端已完成时直接返回既有资产），可安全重试。
+      const controller = new AbortController();
+      activeControllers.add(controller);
+      try {
+        const result = await apiJson<CompleteUploadResponse>(
+          `/api/projects/${encodeURIComponent(projectId)}/uploads/${encodeURIComponent(sessionId ?? '')}/complete`,
+          { method: 'POST', signal: controller.signal },
+        );
+        succeed(result.asset);
+        return;
+      } catch (error) {
+        const canRetry =
+          attempt < maxCompleteAttempts &&
+          (isAbortError(error) ||
+            (error instanceof UploadRequestError &&
+              (error.status === 429 || error.status >= 500)));
+        if (!canRetry) {
+          fail(error instanceof Error ? error : new Error('完成上传失败'));
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1_000 * attempt));
+      } finally {
+        activeControllers.delete(controller);
+      }
     }
   }
 
@@ -577,10 +654,15 @@ export function startResumableUpload(
       plan = planChunks(file.size);
       bytesHashedValue = 0;
       emit('hashing');
-      fileSha256 = await hashFileSha256(file, plan.chunkSize, (hashed) => {
-        bytesHashedValue = hashed;
-        emit('hashing');
-      });
+      fileSha256 = await hashFileSha256(
+        file,
+        plan.chunkSize,
+        (hashed) => {
+          bytesHashedValue = hashed;
+          emit('hashing');
+        },
+        () => aborted,
+      );
 
       if (aborted) return;
 
@@ -611,6 +693,15 @@ export function startResumableUpload(
           state.totalChunks !== plan.totalChunks;
         if (resumeMismatch) {
           if (options.resumeFallbackToNewOnMismatch) {
+            // 指纹不符的旧会话已无续传价值，尽力取消，避免白白占用配额直到 TTL。
+            try {
+              await apiJson(
+                `/api/projects/${encodeURIComponent(projectId)}/uploads/${encodeURIComponent(state.sessionId)}`,
+                { method: 'DELETE' },
+              );
+            } catch {
+              // 取消失败不影响改走新会话；旧会话最终由服务端 TTL 清理。
+            }
             removeResumableUpload(state.sessionId);
             sessionId = null;
             state = null;
@@ -712,6 +803,7 @@ export function startResumableUpload(
       paused = false;
       wakeWaiters();
       activeXhrs.forEach((xhr) => xhr.abort());
+      activeControllers.forEach((controller) => controller.abort());
       const id = sessionId;
       if (id) {
         removeResumableUpload(id);

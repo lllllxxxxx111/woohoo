@@ -1032,6 +1032,17 @@ export const AssetLibrary: React.FC = () => {
         return;
       }
 
+      // 批次进行中不再接收新文件（拖拽区与文件选择都汇入这里），
+      // 避免双批次共享 isUploading 布尔时互相提前解锁关闭按钮。
+      if (isUploading) {
+        showToast({
+          type: 'warning',
+          title: '正在上传中',
+          message: '当前批次还未结束，请等待完成后再添加文件。',
+        });
+        return;
+      }
+
       if (!activeState.projectId) {
         showToast({
           type: 'warning',
@@ -1065,7 +1076,7 @@ export const AssetLibrary: React.FC = () => {
       };
 
       try {
-        await uploadAssets(
+        const savedAssets = await uploadAssets(
           activeState.projectId,
           files,
           (fileKey, progress, handle) => {
@@ -1077,8 +1088,10 @@ export const AssetLibrary: React.FC = () => {
                       ...file,
                       percent: progress.phase === 'hashing' ? 0 : progress.percent,
                       phase: progress.phase,
-                      message: describeUploadPhase(progress, false),
-                      paused: false,
+                      message: describeUploadPhase(progress, file.paused ?? false),
+                      // 保留行的暂停状态：进度回调里不带暂停语义，
+                      // 一律置 false 会覆盖 togglePauseUpload 的展示。
+                      paused: file.paused,
                     }
                   : file,
               ),
@@ -1089,17 +1102,19 @@ export const AssetLibrary: React.FC = () => {
 
         setUploadingFiles((prev) => {
           const done = new Set(queue.map((item) => item.id));
+          // 成功数量以 uploadAssets 实际返回的资产为准（含去重后落库的），
+          // 行相位只用来区分失败与取消，避免非终态行被误计为成功。
+          const succeeded = savedAssets.length;
           const failedOrCancelled = prev.filter(
             (file) => done.has(file.id) && (file.phase === 'error' || file.phase === 'aborted'),
           );
-          const succeeded = done.size - failedOrCancelled.length;
           if (succeeded > 0 && failedOrCancelled.length === 0) {
             showToast({
               type: 'success',
               title: '上传完成',
               message: `已保存 ${succeeded} 个资产到当前项目。`,
             });
-          } else if (failedOrCancelled.length > 0) {
+          } else if (failedOrCancelled.length > 0 || succeeded < queue.length) {
             showToast({
               type: succeeded > 0 ? 'warning' : 'error',
               title: succeeded > 0 ? '部分文件未上传' : '上传未完成',
@@ -1121,7 +1136,7 @@ export const AssetLibrary: React.FC = () => {
         setIsUploading(false);
       }
     },
-    [activeState.projectId, showToast, uploadAssets],
+    [activeState.projectId, showToast, uploadAssets, isUploading],
   );
 
   const togglePauseUpload = useCallback((file: UploadingFile) => {
