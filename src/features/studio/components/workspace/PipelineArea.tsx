@@ -1,6 +1,18 @@
-import React, { useState } from 'react';
-import { LayoutList, FileText, ListTree, Users, Layers, Film, Scissors } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import {
+  LayoutList,
+  FileText,
+  ListTree,
+  Users,
+  Layers,
+  Film,
+  Scissors,
+  Sparkles,
+} from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import styles from './PipelineArea.module.css';
+import { useAppStore } from '../../../../store';
 
 // Subcomponents for the pipeline
 import { OutlineView } from './PipelineSteps/OutlineView';
@@ -15,6 +27,30 @@ type Step = 'outline' | 'script' | 'chapters' | 'char_scene' | 'keyframes' | 'vi
 
 export const PipelineArea: React.FC = () => {
   const [activeStep, setActiveStep] = useState<Step>('outline');
+  const collaborationSession = useAppStore((state) => state.activeCollaborationSession);
+  const collaborationMessages = useAppStore((state) => state.activeCollaborationMessages);
+  const collaborationDeliverable = useMemo(() => {
+    if (
+      !collaborationSession ||
+      !['workspace_execution', 'completed'].includes(collaborationSession.state)
+    ) {
+      return null;
+    }
+
+    const statusMessages = collaborationMessages.filter(
+      (message) => message.messageKind === 'status' && message.content.trim(),
+    );
+    return (
+      statusMessages
+        .slice()
+        .reverse()
+        .find(
+          (message) =>
+            message.sourceAgentId &&
+            message.sourceAgentId === collaborationSession.orchestratorAgentId,
+        ) ?? statusMessages.at(-1)
+    );
+  }, [collaborationMessages, collaborationSession]);
 
   const steps: { id: Step; label: string; icon: React.ReactNode }[] = [
     { id: 'outline', label: '大纲生成', icon: <LayoutList size={16} /> },
@@ -64,6 +100,20 @@ export const PipelineArea: React.FC = () => {
           </React.Fragment>
         ))}
       </div>
+
+      {collaborationDeliverable && (
+        <details className={styles.collaborationDeliverable} open>
+          <summary className={styles.collaborationDeliverableHeader}>
+            <Sparkles size={16} />
+            多智能体协同交付
+          </summary>
+          <div className={styles.collaborationDeliverableBody}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {collaborationDeliverable.content}
+            </ReactMarkdown>
+          </div>
+        </details>
+      )}
 
       {/* Main Content Area */}
       <div className={styles.stepContent}>{renderCurrentStep()}</div>

@@ -15,6 +15,7 @@ struct TaskRow {
     output_kind: String,
     status: String,
     model: Option<String>,
+    result: Option<String>,
     error: Option<String>,
     created_at: i64,
     started_at: Option<i64>,
@@ -42,10 +43,10 @@ pub async fn persist_task(
     sqlx::query(
         "INSERT OR REPLACE INTO ai_tasks (
             id, user_id, content, agent_id, output_kind, status,
-            model, error, created_at, started_at, finished_at,
+            model, result, error, created_at, started_at, finished_at,
             attempt_index, is_redo, previous_failures, last_error,
             active_tasks, queued_tasks, project_id, conversation_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&task.id)
     .bind(user_id)
@@ -54,6 +55,7 @@ pub async fn persist_task(
     .bind(&task.output_kind.as_deref().unwrap_or("text"))
     .bind(&status_str)
     .bind(&task.model)
+    .bind(&task.result)
     .bind(&task.error.as_deref())
     .bind(task.created_at)
     .bind(task.started_at)
@@ -92,7 +94,7 @@ pub async fn delete_persisted_task(db: &SqlitePool, task_id: &str) -> Result<(),
  */
 pub async fn restore_tasks(db: &SqlitePool) -> Result<Vec<(AiTask, String)>, sqlx::Error> {
     let rows = sqlx::query_as::<_, TaskRow>(
-        "SELECT id, user_id, content, agent_id, output_kind, status, model, error,
+        "SELECT id, user_id, content, agent_id, output_kind, status, model, result, error,
                 created_at, started_at, finished_at, attempt_index, is_redo,
                 previous_failures, last_error, active_tasks, queued_tasks, project_id, conversation_id
          FROM ai_tasks
@@ -136,7 +138,7 @@ pub async fn restore_tasks(db: &SqlitePool) -> Result<Vec<(AiTask, String)>, sql
                 output_kind: Some(row.output_kind),
                 output_items: None,
                 status,
-                result: None,
+                result: row.result,
                 error: final_error,
                 attempt_index: row.attempt_index,
                 previous_attempts: 0,

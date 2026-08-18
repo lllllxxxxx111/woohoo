@@ -15,8 +15,12 @@ use crate::{
         usage::AiUsageOperation,
     },
     asset::{self, generated_document::GeneratedMarkdownDocument},
+    content_version::{
+        model::{CommitInput, ConcurrencyToken, ContentType},
+        repo as content_version_repo,
+    },
     error::AppError,
-    AppState,
+    script, AppState,
 };
 
 use super::prompt_optimizations::load_applied_optimization_patch;
@@ -827,6 +831,15 @@ async fn handle_design_completion(
     result: Option<String>,
 ) -> Result<bool> {
     let raw_content = result.filter(|value| !value.trim().is_empty());
+    let persisted_script = if let Some(content) = raw_content.as_deref() {
+        if is_pipeline_script_design(run, step) {
+            Some(persist_pipeline_script(state, run, step, content).await?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let persisted_asset = if let Some(content) = raw_content.as_deref() {
         match persist_pipeline_document_asset(state, run, step, task_id, content).await {
             Ok(asset) => Some(asset),
@@ -846,6 +859,18 @@ async fn handle_design_completion(
     let output_json = persisted_asset.as_ref().map(|asset| {
         build_pipeline_document_output_json(None, asset, classify_pipeline_document_kind(step))
     });
+    let output_json = if let Some((script_id, version)) = persisted_script.as_ref() {
+        let mut payload = output_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<Value>(value).ok())
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        payload.insert("scriptId".to_string(), json!(script_id));
+        payload.insert("contentVersion".to_string(), json!(version));
+        Some(Value::Object(payload).to_string())
+    } else {
+        output_json
+    };
     let content_preview = raw_content
         .as_deref()
         .map(build_compact_preview)
@@ -898,6 +923,44 @@ async fn handle_design_completion(
     )
     .await?;
     Ok(true)
+}
+
+fn is_pipeline_script_design(run: &PipelineRunRow, step: &PipelineStepRow) -> bool {
+    run.pipeline_type == "script" && step.step_key.eq_ignore_ascii_case("script_design")
+}
+
+async fn persist_pipeline_script(
+    state: &AppState,
+    run: &PipelineRunRow,
+    step: &PipelineStepRow,
+    content: &str,
+) -> Result<(String, i64)> {
+    let title = content
+        .lines()
+        .find_map(|line| line.strip_prefix("# ").map(str::trim))
+        .filter(|value| !value.is_empty())
+        .unwrap_or("完整剧本")
+        .to_string();
+    let mut tx = state.db.begin().await?;
+    let outcome = content_version_repo::commit_version_tx(
+        &mut tx,
+        &CommitInput {
+            project_id: run.project_id.clone(),
+            content_type: ContentType::Script,
+            content: content.to_string(),
+            title: Some(title.clone()),
+            source: "pipeline".to_string(),
+            created_by: Some(run.user_id.clone()),
+            note: Some(format!("流程 {} · {}", run.id, step.step_name)),
+            expected_base: ConcurrencyToken::None,
+        },
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!(error.into_app_error().to_string()))?;
+    let version = outcome.version_row().version;
+    let script = script::repo::write_current_tx(&mut tx, &run.project_id, &title, content).await?;
+    tx.commit().await?;
+    Ok((script.id, version))
 }
 
 fn build_pipeline_document_output_json(

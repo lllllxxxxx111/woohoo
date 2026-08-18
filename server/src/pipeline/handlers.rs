@@ -6,7 +6,7 @@ use axum::{
 };
 use chrono::{SecondsFormat, Utc};
 use serde::Deserialize;
-use sqlx::SqlitePool;
+use sqlx::{Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
 
 use crate::{
@@ -59,23 +59,47 @@ pub(crate) async fn create_pipeline_run_for_user(
     let idempotency_key = req
         .idempotency_key
         .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
 
-    let existing = sqlx::query_as::<_, (String,)>(
-        "SELECT id FROM pipeline_runs WHERE user_id = ? AND idempotency_key = ? AND status IN ('queued', 'running', 'paused')"
+    let project_exists =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM projects WHERE id = ? AND user_id = ?")
+            .bind(&req.project_id)
+            .bind(user_id)
+            .fetch_one(&mut *tx)
+            .await?
+            > 0;
+    if !project_exists {
+        return Err(AppError::NotFound("项目不存在或无权访问".into()));
+    }
+
+    let conversation_exists = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM conversations WHERE id = ? AND project_id = ? AND user_id = ?",
+    )
+    .bind(&req.conversation_id)
+    .bind(&req.project_id)
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await?
+        > 0;
+    if !conversation_exists {
+        return Err(AppError::NotFound("对话不存在或不属于当前项目".into()));
+    }
+
+    let existing = sqlx::query_as::<_, PipelineRun>(
+        "SELECT * FROM pipeline_runs
+         WHERE user_id = ? AND idempotency_key = ? AND status IN ('queued', 'running', 'paused')",
     )
     .bind(user_id)
     .bind(&idempotency_key)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
-
-    if let Some((existing_id,)) = existing {
-        let run = get_run_by_id(pool, user_id, &existing_id).await?;
+    if let Some(run) = existing {
+        tx.commit().await?;
         return Ok((StatusCode::CONFLICT, run));
     }
 
     let run_id = Uuid::new_v4().to_string();
     let total_steps = req.steps.len() as i64;
-
     let run = sqlx::query_as::<_, PipelineRun>(
         "INSERT INTO pipeline_runs (
             id, user_id, project_id, conversation_id,
@@ -92,7 +116,7 @@ pub(crate) async fn create_pipeline_run_for_user(
     .bind(&req.trigger_source)
     .bind(&idempotency_key)
     .bind(total_steps)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
 
     for step_req in &req.steps {
@@ -124,11 +148,11 @@ pub(crate) async fn create_pipeline_run_for_user(
         .bind(review_policy_json)
         .bind(max_retries)
         .bind(input_summary)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
-        log_pipeline_event(
-            pool,
+        log_pipeline_event_tx(
+            &mut tx,
             &run_id,
             None,
             "step_queued",
@@ -142,8 +166,8 @@ pub(crate) async fn create_pipeline_run_for_user(
         .await?;
     }
 
-    log_pipeline_event(
-        pool,
+    log_pipeline_event_tx(
+        &mut tx,
         &run_id,
         None,
         "created",
@@ -157,6 +181,7 @@ pub(crate) async fn create_pipeline_run_for_user(
     )
     .await?;
 
+    tx.commit().await?;
     Ok((StatusCode::CREATED, run))
 }
 
@@ -673,6 +698,30 @@ pub(crate) async fn log_pipeline_event(
     .bind(&payload_str)
     .bind(source)
     .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+async fn log_pipeline_event_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    run_id: &str,
+    step_id: Option<&str>,
+    event_type: &str,
+    payload: &serde_json::Value,
+    source: &str,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO pipeline_run_events (id, run_id, step_id, event_type, payload_json, source)
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(run_id)
+    .bind(step_id)
+    .bind(event_type)
+    .bind(payload.to_string())
+    .bind(source)
+    .execute(&mut **tx)
     .await?;
 
     Ok(())
@@ -1387,6 +1436,62 @@ mod tests {
                 .expect("second create should resolve to conflict");
         assert_eq!(status_second, axum::http::StatusCode::CONFLICT);
         assert_eq!(run_second.id, run_first.id, "should return existing run");
+
+        pool.close().await;
+        std::fs::remove_file(db_path).ok();
+    }
+
+    #[tokio::test]
+    async fn create_run_rejects_conversation_from_another_project_before_writing() {
+        let (pool, user_id, existing_run_id, db_path) = setup_test_run("queued").await;
+        let (project_id,): (String,) =
+            sqlx::query_as("SELECT project_id FROM pipeline_runs WHERE id = ?")
+                .bind(&existing_run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("failed to fetch project context");
+        let other_project_id = format!("project-{}", Uuid::new_v4());
+        let other_conversation_id = format!("conversation-{}", Uuid::new_v4());
+
+        sqlx::query("INSERT INTO projects (id, user_id, name) VALUES (?, ?, ?)")
+            .bind(&other_project_id)
+            .bind(&user_id)
+            .bind("另一个项目")
+            .execute(&pool)
+            .await
+            .expect("failed to insert second project");
+        sqlx::query(
+            "INSERT INTO conversations (id, project_id, user_id, title) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&other_conversation_id)
+        .bind(&other_project_id)
+        .bind(&user_id)
+        .bind("另一会话")
+        .execute(&pool)
+        .await
+        .expect("failed to insert second conversation");
+
+        let request = CreatePipelineRunReq {
+            project_id,
+            conversation_id: other_conversation_id,
+            pipeline_type: "outline".to_string(),
+            trigger_source: "manual".to_string(),
+            beta_enabled: true,
+            idempotency_key: Some(format!("invalid-context-{}", Uuid::new_v4())),
+            steps: vec![],
+        };
+        let error = create_pipeline_run_for_user(&pool, &user_id, request, false)
+            .await
+            .expect_err("conversation outside the selected project must be rejected");
+        assert!(matches!(error, AppError::NotFound(_)));
+
+        let run_count =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pipeline_runs WHERE user_id = ?")
+                .bind(&user_id)
+                .fetch_one(&pool)
+                .await
+                .expect("failed to count runs");
+        assert_eq!(run_count, 1);
 
         pool.close().await;
         std::fs::remove_file(db_path).ok();

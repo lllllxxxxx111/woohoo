@@ -125,6 +125,41 @@
   opacity: 0;
 }
 
+.collaborationDeliverable {
+  margin: 12px 20px 0;
+  border: 1px solid color-mix(in srgb, var(--bg-accent) 35%, var(--border-color));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-accent-light) 45%, var(--bg-secondary));
+  overflow: hidden;
+}
+
+.collaborationDeliverableHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  color: var(--text-primary);
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.collaborationDeliverableBody {
+  max-height: 280px;
+  overflow: auto;
+  padding: 0 16px 14px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+}
+
+.collaborationDeliverableBody > :first-child {
+  margin-top: 0;
+}
+
+.collaborationDeliverableBody > :last-child {
+  margin-bottom: 0;
+}
+
 @media (max-width: 920px) {
   .pipelineNav {
     justify-content: flex-start;

@@ -1,5 +1,14 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, Copy, LoaderCircle, PlayCircle, RefreshCw, Save, Sparkles } from 'lucide-react';
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Copy,
+  LoaderCircle,
+  PlayCircle,
+  RefreshCw,
+  Save,
+  Sparkles,
+} from 'lucide-react';
 import { useAppStore } from '../../../../store';
 import { useShallow } from 'zustand/react/shallow';
 
@@ -45,27 +54,44 @@ async function copyTextToClipboard(text: string): Promise<boolean> {
   }
 }
 
-export const ScriptEditor: React.FC = () => {
+export interface ScriptEditorProps {
+  /** 兼容旧流水线仅产出文档资产时，把当前可见剧本文本带入首次保存。 */
+  initialContent?: string;
+  onClose?: () => void;
+}
+
+export const ScriptEditor: React.FC<ScriptEditorProps> = ({ initialContent = '', onClose }) => {
   const { activeScript, activeState } = useAppStore(
     useShallow((state) => ({ activeScript: state.activeScript, activeState: state.activeState })),
   );
   const { saveScript, refreshWorkspace } = useAppActions();
   const { showToast } = useToast();
-  const [content, setContent] = useState(activeScript?.content || '');
+  const [content, setContent] = useState(activeScript?.content || initialContent);
   const [baseVersion, setBaseVersion] = useState<number>(activeScript?.version ?? 0);
   const [conflict, setConflict] = useState<SaveConflictState | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isAiWorking, setIsAiWorking] = useState(false);
 
   const activeScriptId = activeScript?.id;
+  const activeProjectId = activeState.projectId;
+  const savedContent = activeScript?.content || initialContent;
+  const hasUnsavedChanges = content !== savedContent;
 
   // 切换到另一个项目的剧本时重置本地状态（冲突期间不自动覆盖草稿）
   useEffect(() => {
-    setContent(activeScript?.content || '');
+    setContent(activeScript?.content || initialContent);
     setBaseVersion(activeScript?.version ?? 0);
     setConflict(null);
+    // 只在切换项目/剧本实体时重置；普通 workspace 刷新不能覆盖未保存草稿。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeScriptId]);
+  }, [activeProjectId, activeScriptId]);
+
+  // 旧流水线文档可能异步加载；仅在当前编辑区仍为空时补入，避免覆盖用户输入。
+  useEffect(() => {
+    if (!activeScript && initialContent) {
+      setContent((current) => current || initialContent);
+    }
+  }, [activeScript, initialContent]);
 
   const handleSave = async () => {
     if (!activeState.projectId) {
@@ -118,6 +144,16 @@ export const ScriptEditor: React.FC = () => {
     }
   };
 
+  const handleClose = useCallback(() => {
+    if (
+      hasUnsavedChanges &&
+      !window.confirm('当前剧本还有未保存的修改，返回预览会丢弃这些修改。确定继续吗？')
+    ) {
+      return;
+    }
+    onClose?.();
+  }, [hasUnsavedChanges, onClose]);
+
   /** 冲突时：加载服务器最新版（替换当前草稿前先确认并自动复制草稿兜底） */
   const handleLoadServerLatest = useCallback(async () => {
     if (!activeState.projectId) {
@@ -133,7 +169,11 @@ export const ScriptEditor: React.FC = () => {
     try {
       const latest = await getServerScript(activeState.projectId);
       // 草稿保护：仅当成功拿到服务器内容才替换草稿，失败时绝不丢弃草稿
-      const next = applyConflictResolution({ draft: content, conflict }, 'load_server_latest', latest ? latest.content : null);
+      const next = applyConflictResolution(
+        { draft: content, conflict },
+        'load_server_latest',
+        latest ? latest.content : null,
+      );
       setContent(next.draft);
       setConflict(next.conflict);
       if (latest && next.conflict === null) {
@@ -208,9 +248,17 @@ export const ScriptEditor: React.FC = () => {
         content: `请续写以下剧本内容，保持风格和人物一致：\n\n${lastParagraph}\n\n续写：`,
         outputKind: 'text',
       });
-      showToast({ type: 'success', title: '续写任务已提交', message: 'AI 正在为你的剧本生成续写内容。' });
+      showToast({
+        type: 'success',
+        title: '续写任务已提交',
+        message: 'AI 正在为你的剧本生成续写内容。',
+      });
     } catch (error) {
-      showToast({ type: 'error', title: '续写失败', message: error instanceof Error ? error.message : '提交失败' });
+      showToast({
+        type: 'error',
+        title: '续写失败',
+        message: error instanceof Error ? error.message : '提交失败',
+      });
     } finally {
       setIsAiWorking(false);
     }
@@ -235,13 +283,26 @@ export const ScriptEditor: React.FC = () => {
         conversationId: activeState.chatSessionId ?? '',
         steps: [
           { stepKey: 'script_parse', stepName: '剧本解析', stepOrder: 1, stepType: 'system' },
-          { stepKey: 'storyboard_generate', stepName: '分镜拆分', stepOrder: 2, stepType: 'design' },
+          {
+            stepKey: 'storyboard_generate',
+            stepName: '分镜拆分',
+            stepOrder: 2,
+            stepType: 'design',
+          },
           { stepKey: 'keyframe_extract', stepName: '关键帧提取', stepOrder: 3, stepType: 'design' },
         ],
       });
-      showToast({ type: 'success', title: '分镜生成任务已提交', message: 'Pipeline 正在运行，请在大纲视图中查看进度。' });
+      showToast({
+        type: 'success',
+        title: '分镜生成任务已提交',
+        message: 'Pipeline 正在运行，请在大纲视图中查看进度。',
+      });
     } catch (error) {
-      showToast({ type: 'error', title: '分镜生成失败', message: error instanceof Error ? error.message : '提交失败' });
+      showToast({
+        type: 'error',
+        title: '分镜生成失败',
+        message: error instanceof Error ? error.message : '提交失败',
+      });
     } finally {
       setIsAiWorking(false);
     }
@@ -257,7 +318,12 @@ export const ScriptEditor: React.FC = () => {
             onClick={() => void handleSmartContinue()}
             disabled={isAiWorking}
           >
-            {isAiWorking ? <LoaderCircle size={16} className={styles.iconSpin} /> : <Sparkles size={16} />} 智能续写
+            {isAiWorking ? (
+              <LoaderCircle size={16} className={styles.iconSpin} />
+            ) : (
+              <Sparkles size={16} />
+            )}{' '}
+            智能续写
           </button>
           <button
             className={styles.toolBtn}
@@ -265,15 +331,25 @@ export const ScriptEditor: React.FC = () => {
             onClick={() => void handleGenerateStoryboard()}
             disabled={isAiWorking}
           >
-            {isAiWorking ? <LoaderCircle size={16} className={styles.iconSpin} /> : <PlayCircle size={16} />} 生成分镜
+            {isAiWorking ? (
+              <LoaderCircle size={16} className={styles.iconSpin} />
+            ) : (
+              <PlayCircle size={16} />
+            )}{' '}
+            生成分镜
           </button>
+          {onClose ? (
+            <button className={styles.toolBtn} title="返回剧本预览" onClick={handleClose}>
+              <ArrowLeft size={16} /> 返回预览
+            </button>
+          ) : null}
           {activeState.projectId && (
             <ContentVersionHistory
               projectId={activeState.projectId}
               contentType="script"
               currentVersion={activeScript?.version}
               onRestored={() => void handleVersionRestored()}
-              hasUnsavedChanges={content !== (activeScript?.content || '')}
+              hasUnsavedChanges={hasUnsavedChanges}
               draftText={content}
             />
           )}
@@ -287,7 +363,8 @@ export const ScriptEditor: React.FC = () => {
         <div className={styles.conflictBanner}>
           <AlertTriangle size={16} />
           <span>
-            保存冲突：服务器剧本已更新到 v{conflict.currentVersion}，你的本地草稿尚未保存，已为你保留。
+            保存冲突：服务器剧本已更新到 v{conflict.currentVersion}
+            ，你的本地草稿尚未保存，已为你保留。
           </span>
           <div className={styles.conflictActions}>
             <button

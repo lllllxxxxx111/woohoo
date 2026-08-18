@@ -3,9 +3,11 @@ use axum::{
     response::sse::{Event, KeepAlive, Sse},
     Json,
 };
+use chrono::{SecondsFormat, Utc};
 use futures::stream::Stream;
 use serde_json::json;
 use std::convert::Infallible;
+use uuid::Uuid;
 
 use crate::ai::{
     client::StreamFallbackMode, config::AiChatReq, handlers::enqueue_ai_task_for_request,
@@ -56,6 +58,46 @@ pub async fn create_session(
     axum::extract::Extension(user_id): axum::extract::Extension<UserId>,
     Json(req): Json<CreateSessionReq>,
 ) -> Result<Json<CollaborationSession>, AppError> {
+    let project_exists =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM projects WHERE id = ? AND user_id = ?")
+            .bind(&req.project_id)
+            .bind(&user_id.0)
+            .fetch_one(&state.db)
+            .await?
+            > 0;
+    if !project_exists {
+        return Err(AppError::NotFound("项目不存在或无权访问".to_string()));
+    }
+
+    let conversation_exists = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM conversations WHERE id = ? AND project_id = ? AND user_id = ?",
+    )
+    .bind(&req.conversation_id)
+    .bind(&req.project_id)
+    .bind(&user_id.0)
+    .fetch_one(&state.db)
+    .await?
+        > 0;
+    if !conversation_exists {
+        return Err(AppError::NotFound("对话不存在或不属于当前项目".to_string()));
+    }
+
+    if let Some(orchestrator_agent_id) = req.orchestrator_agent_id.as_deref() {
+        let orchestrator_exists = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM agents WHERE id = ? AND user_id = ? AND is_active = 1",
+        )
+        .bind(orchestrator_agent_id)
+        .bind(&user_id.0)
+        .fetch_one(&state.db)
+        .await?
+            > 0;
+        if !orchestrator_exists {
+            return Err(AppError::BadRequest(
+                "主编智能体不存在、已停用或不属于当前用户".to_string(),
+            ));
+        }
+    }
+
     let session = repo::create_session(
         &state.db,
         &user_id.0,
@@ -173,6 +215,23 @@ pub async fn dispatch(
 ) -> Result<Json<DispatchResponse>, AppError> {
     verify_session_owner(&state, &session_id, &user_id).await?;
 
+    for assignment in &req.assignments {
+        let agent_exists = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM agents WHERE id = ? AND user_id = ? AND is_active = 1",
+        )
+        .bind(&assignment.agent_id)
+        .bind(&user_id.0)
+        .fetch_one(&state.db)
+        .await?
+            > 0;
+        if !agent_exists {
+            return Err(AppError::BadRequest(format!(
+                "智能体 {} 不存在、已停用或不属于当前用户",
+                assignment.agent_id
+            )));
+        }
+    }
+
     let items: Vec<DispatchItem> = req
         .assignments
         .into_iter()
@@ -253,9 +312,22 @@ pub(crate) async fn dispatch_ready_assignments(
 
         let dependency_context = dependency_output_context(&claimed, &messages);
         let input_context = claimed.input_json.as_deref().unwrap_or("无额外输入");
+        let role_instruction = match claimed.task_type.as_str() {
+            "review" => {
+                "你处于审核阶段。必须逐项核对上游成果，指出冲突、缺漏和风险，并给出明确修改建议。"
+            }
+            "synthesis" => {
+                "你是最终主编。必须吸收上游成果与审核意见，做出取舍并输出一份完整、统一、可直接交付的最终内容，不能只写摘要。"
+            }
+            _ => "你是领域专家。请输出具体、结构化、可供审核和汇总直接复用的专业成果。",
+        };
         let task_prompt = format!(
-            "你正在参与项目内多智能体协同。\n任务类型：{}\n任务目标：{}\n任务输入：{}{}\n请直接给出可供其他智能体继续工作的明确产出，不要反问用户。",
-            claimed.task_type, claimed.goal, input_context, dependency_context
+            "你正在参与项目内多智能体协同。\n任务类型：{}\n任务目标：{}\n任务输入：{}{}\n{}\n请直接给出明确产出，不要反问用户。",
+            claimed.task_type,
+            claimed.goal,
+            input_context,
+            dependency_context,
+            role_instruction
         );
         let req = AiChatReq {
             conversation_id: session.conversation_id.clone(),
@@ -1076,7 +1148,7 @@ fn evaluate_readiness(assignments: &[CollaborationAssignment]) -> ReadinessResul
 
     let incomplete = assignments
         .iter()
-        .filter(|assignment| !matches!(assignment.status.as_str(), "ready" | "done"))
+        .filter(|assignment| assignment.status != "done")
         .count();
     if incomplete > 0 {
         return ReadinessResult {
@@ -1156,83 +1228,234 @@ async fn create_pipeline_from_collaboration(
     session: &CollaborationSession,
     assignments: &[CollaborationAssignment],
 ) -> Result<String, AppError> {
-    let ready_assignments: Vec<&CollaborationAssignment> = assignments
+    let completed_assignments: Vec<&CollaborationAssignment> = assignments
         .iter()
-        .filter(|a| a.status == "ready" || a.status == "done")
+        .filter(|assignment| assignment.status == "done")
         .collect();
 
-    if ready_assignments.is_empty() {
+    if completed_assignments.is_empty() {
         return Err(AppError::BadRequest(
             "没有可创建工作区流程的协同任务".to_string(),
         ));
     }
 
-    let step_keys = ready_assignments
-        .iter()
-        .map(|assignment| {
-            (
-                assignment.agent_id.clone(),
-                format!("collab-{}", assignment.id),
-            )
+    let delivery_assignments: Vec<&CollaborationAssignment> = session
+        .orchestrator_agent_id
+        .as_deref()
+        .and_then(|orchestrator_id| {
+            completed_assignments
+                .iter()
+                .copied()
+                .find(|assignment| assignment.agent_id == orchestrator_id)
         })
-        .collect::<std::collections::HashMap<_, _>>();
-    let steps: Vec<crate::pipeline::model::CreatePipelineStepReq> = ready_assignments
-        .iter()
-        .enumerate()
-        .map(|(i, a)| crate::pipeline::model::CreatePipelineStepReq {
-            step_key: step_keys
-                .get(&a.agent_id)
-                .cloned()
-                .unwrap_or_else(|| format!("collab-{}", a.id)),
-            step_name: a.goal.clone(),
-            step_order: i as i64,
-            step_type: a.task_type.clone(),
-            depends_on: a
-                .depends_on_json
-                .as_ref()
-                .and_then(|v| serde_json::from_str::<Vec<String>>(v).ok())
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|agent_id| step_keys.get(&agent_id).cloned())
-                .collect(),
-            review_policy: None,
-            max_retries: Some(3),
-            prompt_template: Some(a.goal.clone()),
-        })
-        .collect();
+        .map(|assignment| vec![assignment])
+        .unwrap_or(completed_assignments);
 
-    let req = crate::pipeline::model::CreatePipelineRunReq {
-        project_id: session.project_id.clone(),
-        conversation_id: session.conversation_id.clone(),
-        pipeline_type: COLLABORATION_PIPELINE_TYPE.to_string(),
-        trigger_source: COLLABORATION_TRIGGER_SOURCE.to_string(),
-        beta_enabled: true,
-        idempotency_key: Some(format!("collab-{}", session.id)),
-        steps,
-    };
-
-    let (_, run) = crate::pipeline::handlers::create_pipeline_run_for_user(
-        &state.db,
-        &session.user_id,
-        req,
-        false,
-    )
-    .await?;
-    let run_id = run.id;
-    repo::update_session_pipeline_run_id(&state.db, &session.id, &run_id)
+    let messages = repo::list_messages(&state.db, &session.id)
         .await
         .map_err(|error| AppError::Internal(error.to_string()))?;
-    repo::update_session_state(
-        &state.db,
-        &session.id,
-        SessionState::WorkspaceExecution.as_str(),
+    let deliverables = delivery_assignments
+        .into_iter()
+        .map(|assignment| {
+            let content = messages
+                .iter()
+                .rev()
+                .find(|message| {
+                    message.source_agent_id.as_deref() == Some(assignment.agent_id.as_str())
+                        && message.message_kind == MessageKind::Status.as_str()
+                })
+                .map(|message| message.content.trim().to_string())
+                .filter(|content| !content.is_empty())
+                .ok_or_else(|| {
+                    AppError::Internal(format!("协同任务 {} 已完成但缺少可交付输出", assignment.id))
+                })?;
+            Ok((assignment, content))
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+
+    let idempotency_key = format!("collab-{}", session.id);
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    if let Some((existing_run_id,)) = sqlx::query_as::<_, (String,)>(
+        "SELECT id FROM pipeline_runs WHERE user_id = ? AND idempotency_key = ? ORDER BY created_at DESC LIMIT 1",
     )
-    .await
-    .map_err(|error| AppError::Internal(error.to_string()))?;
+    .bind(&session.user_id)
+    .bind(&idempotency_key)
+    .fetch_optional(&mut *tx)
+    .await?
+    {
+        sqlx::query(
+            "UPDATE collaboration_sessions
+             SET pipeline_run_id = ?, state = 'workspace_execution', updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(&existing_run_id)
+        .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true))
+        .bind(&session.id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        return Ok(existing_run_id);
+    }
+
+    let run_id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let total_steps = deliverables.len() as i64;
+    sqlx::query(
+        "INSERT INTO pipeline_runs (
+            id, user_id, project_id, conversation_id,
+            pipeline_type, trigger_source, status, idempotency_key,
+            total_steps, completed_steps, failed_steps,
+            started_at, finished_at, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, 0, ?, ?, ?, ?)",
+    )
+    .bind(&run_id)
+    .bind(&session.user_id)
+    .bind(&session.project_id)
+    .bind(&session.conversation_id)
+    .bind(COLLABORATION_PIPELINE_TYPE)
+    .bind(COLLABORATION_TRIGGER_SOURCE)
+    .bind(&idempotency_key)
+    .bind(total_steps)
+    .bind(total_steps)
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+
+    for (index, (assignment, content)) in deliverables.iter().enumerate() {
+        let step_id = Uuid::new_v4().to_string();
+        let output_id = Uuid::new_v4().to_string();
+        let step_key = format!("collab-{}", assignment.id);
+        let step_name = if assignment.task_type == "synthesis" {
+            "主编汇总交付"
+        } else {
+            assignment.goal.as_str()
+        };
+        let output_json = json!({
+            "format": "collaboration",
+            "source": "collaboration",
+            "sessionId": session.id,
+            "assignmentId": assignment.id,
+            "agentId": assignment.agent_id,
+            "taskType": assignment.task_type,
+            "content": content,
+        })
+        .to_string();
+
+        sqlx::query(
+            "INSERT INTO pipeline_run_steps (
+                id, run_id, step_key, step_name, step_order,
+                step_type, depends_on_json, max_retries, run_version,
+                input_summary, output_ref, status, duration_ms,
+                started_at, completed_at, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, '[]', 0, 1, ?, ?, 'completed', 0, ?, ?, ?, ?)",
+        )
+        .bind(&step_id)
+        .bind(&run_id)
+        .bind(&step_key)
+        .bind(step_name)
+        .bind(index as i64)
+        .bind(&assignment.task_type)
+        .bind(&assignment.goal)
+        .bind(&output_id)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO pipeline_step_outputs (
+                id, run_id, step_id, task_id, output_type,
+                output_json, raw_content, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, 'document', ?, ?, ?, ?)",
+        )
+        .bind(&output_id)
+        .bind(&run_id)
+        .bind(&step_id)
+        .bind(assignment.ai_task_id.as_deref())
+        .bind(&output_json)
+        .bind(content)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO pipeline_run_events (
+                id, run_id, step_id, event_type, payload_json, source, created_at
+             ) VALUES (?, ?, ?, 'step_completed', ?, 'system', ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&run_id)
+        .bind(&step_id)
+        .bind(
+            json!({
+                "source": "collaboration",
+                "sessionId": session.id,
+                "assignmentId": assignment.id,
+                "outputId": output_id,
+            })
+            .to_string(),
+        )
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    for (event_type, payload) in [
+        (
+            "created",
+            json!({
+                "pipelineType": COLLABORATION_PIPELINE_TYPE,
+                "triggerSource": COLLABORATION_TRIGGER_SOURCE,
+                "totalSteps": total_steps,
+                "sourceSessionId": session.id,
+            }),
+        ),
+        (
+            "completed",
+            json!({
+                "totalSteps": total_steps,
+                "completedSteps": total_steps,
+                "failedSteps": 0,
+                "sourceSessionId": session.id,
+            }),
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO pipeline_run_events (
+                id, run_id, step_id, event_type, payload_json, source, created_at
+             ) VALUES (?, ?, NULL, ?, ?, 'system', ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&run_id)
+        .bind(event_type)
+        .bind(payload.to_string())
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    sqlx::query(
+        "UPDATE collaboration_sessions
+         SET pipeline_run_id = ?, state = 'workspace_execution', updated_at = ?
+         WHERE id = ?",
+    )
+    .bind(&run_id)
+    .bind(&now)
+    .bind(&session.id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
     tracing::info!(
         session_id = %session.id,
         pipeline_run_id = %run_id,
-        "协同入场后自动创建 pipeline_run 成功"
+        "协同成果已作为已完成工作区产物写入 pipeline_run"
     );
     let payload = json!({
         "sessionId": session.id,

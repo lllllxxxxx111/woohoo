@@ -34,6 +34,7 @@ import { ProjectCreateModal } from './ProjectCreateModal';
 import { CollaborationStatus } from './CollaborationStatus';
 import { CollaborationAlert } from './CollaborationAlert';
 import { CollaborationMessage } from './CollaborationMessage';
+import { buildCollaborationPlan } from './collaborationPlan';
 import { BudgetWarningBar } from '../../../../components/Settings/BudgetWarningBar';
 import styles from './ChatArea.module.css';
 
@@ -325,26 +326,24 @@ export const ChatArea: React.FC = () => {
 
     setIsStartingCollaboration(true);
     try {
-      const session = await createCollaborationSession({
-        projectId: activeProject.id,
-        conversationId: activeState.chatSessionId,
-      });
-
-      useAppStore.getState().setCollaborationSession(session);
-
       const projectAgents = activeProject.agentRoster?.length
         ? agentContacts.filter((agent) =>
             activeProject.agentRoster?.some((rosterAgent) => rosterAgent.id === agent.id),
           )
         : agentContacts;
+      const plan = buildCollaborationPlan(projectAgents);
 
-      if (projectAgents.length > 0) {
+      const session = await createCollaborationSession({
+        projectId: activeProject.id,
+        conversationId: activeState.chatSessionId,
+        orchestratorAgentId: plan.orchestratorAgentId || undefined,
+      });
+
+      useAppStore.getState().setCollaborationSession(session);
+
+      if (plan.assignments.length > 0) {
         const dispatchResult = await dispatchCollaboration(session.id, {
-          assignments: projectAgents.map((agent) => ({
-            agentId: agent.id,
-            taskType: agent.role || 'general',
-            goal: agent.systemPrompt?.slice(0, 200) || `执行${agent.role || '通用'}任务`,
-          })),
+          assignments: plan.assignments,
         });
 
         useAppStore.getState().setCollaborationAssignments(dispatchResult.assignments);
@@ -358,7 +357,7 @@ export const ChatArea: React.FC = () => {
       showToast({
         type: 'success',
         title: '协同会话已启动',
-        message: `会话ID: ${session.id.slice(0, 8)}...，已分派 ${projectAgents.length} 个智能体`,
+        message: `已建立专家并行、审核、主编汇总的 ${plan.assignments.length} 个任务`,
       });
     } catch (error) {
       showToast({

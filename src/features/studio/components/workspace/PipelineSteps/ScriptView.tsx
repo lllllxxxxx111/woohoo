@@ -1,21 +1,15 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { AlignLeft, FileText, Play, PauseCircle, RotateCw, XCircle } from 'lucide-react';
+import { AlignLeft, FileText, Play, PauseCircle, Pencil, RotateCw, XCircle } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useShallow } from 'zustand/react/shallow';
 
 import { useAppStore } from '../../../../../store';
 import styles from './PipelineSteps.module.css';
-import {
-  usePipelineRunController,
-  type PipelineStepInput,
-} from './usePipelineRunController';
+import { usePipelineRunController, type PipelineStepInput } from './usePipelineRunController';
 import { getErrorCodePreset } from './pipelineStatusPresets';
-import {
-  createProjectSnapshot,
-  loadAssetText,
-  resolveInlineScriptText,
-} from '../workspaceMvp';
+import { createProjectSnapshot, loadAssetText, resolveInlineScriptText } from '../workspaceMvp';
+import { ScriptEditor } from '../ScriptEditor';
 
 /**
  * 构造剧本设计步骤的提示词
@@ -52,7 +46,8 @@ const buildScriptReviewPrompt = (): string =>
 export const ScriptView: React.FC = () => {
   const { activeProject, activeScript, activeStoryboard, activeAssets } = useAppStore(
     useShallow((state) => ({
-      activeProject: state.projects.find((project) => project.id === state.activeState.projectId) ?? null,
+      activeProject:
+        state.projects.find((project) => project.id === state.activeState.projectId) ?? null,
       activeScript: state.activeScript,
       activeStoryboard: state.activeStoryboard,
       activeAssets: state.activeAssets,
@@ -75,6 +70,7 @@ export const ScriptView: React.FC = () => {
 
   const [resolvedScriptText, setResolvedScriptText] = useState('');
   const [isLoadingDocument, setIsLoadingDocument] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
 
   const inlineScript = useMemo(() => {
     if (!activeProject) {
@@ -147,7 +143,10 @@ export const ScriptView: React.FC = () => {
     return Array.from(snapshot.scriptText.matchAll(/^([^\n#：:]{1,12})[：:]/gm)).length;
   }, [snapshot?.scriptText]);
 
-  const characterCount = useMemo(() => snapshot?.characters.length ?? 0, [snapshot?.characters.length]);
+  const characterCount = useMemo(
+    () => snapshot?.characters.length ?? 0,
+    [snapshot?.characters.length],
+  );
 
   /**
    * 提交剧本生成任务（req #1：剧本接入真实 pipeline design step）
@@ -219,9 +218,20 @@ export const ScriptView: React.FC = () => {
                     : '当前项目还没有可用剧本。'}
             </p>
           </div>
+          {!isEditing ? (
+            <button
+              type="button"
+              className={styles.btnSecondary}
+              onClick={() => setIsEditing(true)}
+            >
+              <Pencil size={14} /> 编辑剧本
+            </button>
+          ) : null}
         </div>
 
-        {isLoadingDocument ? (
+        {isEditing ? (
+          <ScriptEditor initialContent={snapshot.scriptText} onClose={() => setIsEditing(false)} />
+        ) : isLoadingDocument ? (
           <div className={styles.emptyMarkdownState}>
             <span>正在读取剧本文档…</span>
           </div>
@@ -350,7 +360,8 @@ export const ScriptView: React.FC = () => {
 
         <div className={styles.panelBlock}>
           <p className={styles.infoText}>
-            这一页直接消费项目里的真实剧本或剧本文档，并通过 Pipeline 真实任务提交剧本生成与审核，状态由后端 orchestrator 推进、SSE 回传。
+            这一页直接消费项目里的真实剧本或剧本文档，并通过 Pipeline
+            真实任务提交剧本生成与审核，状态由后端 orchestrator 推进、SSE 回传。
           </p>
         </div>
       </div>

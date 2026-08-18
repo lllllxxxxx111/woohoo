@@ -117,6 +117,8 @@ pub struct RecordAiUsageInput {
     pub input_chars: i64,
     pub output_chars: i64,
     pub request_fingerprint: String,
+    /// 唯一关联一次实际调用的账单引用。内容指纹用于分组和分析，不能作为扣费幂等键。
+    pub billing_ref_id: String,
     pub attempt_group_key: String,
     /**
      * 触发来源：用于区分正常发送、编辑后发送、撤回后重新发送

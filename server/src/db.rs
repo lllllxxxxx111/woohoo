@@ -198,6 +198,10 @@ pub(crate) async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<Strin
             "032_upload_parts_cleanup",
             include_str!("../migrations/032_upload_parts_cleanup.sql"),
         ),
+        (
+            "033_ai_tasks_result",
+            include_str!("../migrations/033_ai_tasks_result.sql"),
+        ),
     ] {
         if version == "020_asset_governance" {
             let tables = list_all_tables(pool)
@@ -236,6 +240,12 @@ pub(crate) async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<Strin
             // 旧版 update_spent_ref_id 竞态可能产生重复 (ref_type, ref_id) 的 spent 记录，
             // 导致 CREATE UNIQUE INDEX 失败。需要先清理重复行（保留最新一条）再建索引。
             if apply_migration_028_billing_ref_id_unique(pool).await? {
+                applied_versions.push(version.to_string());
+            }
+            continue;
+        }
+        if version == "033_ai_tasks_result" {
+            if apply_migration_033_ai_tasks_result(pool).await? {
                 applied_versions.push(version.to_string());
             }
             continue;
@@ -733,6 +743,32 @@ async fn apply_migration_028_billing_ref_id_unique(pool: &SqlitePool) -> Result<
         .execute(pool)
         .await?;
     result?;
+
+    record_schema_migration(pool, VERSION, "rust").await?;
+    Ok(true)
+}
+
+/// 为运行时任务补齐结果列。部分历史/测试数据库会错误地标记 008 已执行却没有
+/// ai_tasks 表；保留未执行状态，等待前置表恢复后下一次启动重试。
+async fn apply_migration_033_ai_tasks_result(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
+    const VERSION: &str = "033_ai_tasks_result";
+
+    if has_schema_migration(pool, VERSION).await? {
+        return Ok(false);
+    }
+
+    let tables = list_all_tables(pool).await?;
+    if !tables.iter().any(|table| table == "ai_tasks") {
+        tracing::warn!(version = VERSION, "ai_tasks 表不存在，延后任务结果列迁移");
+        return Ok(false);
+    }
+
+    let columns = list_table_columns(pool, "ai_tasks").await?;
+    if !columns.contains("result") {
+        sqlx::query("ALTER TABLE ai_tasks ADD COLUMN result TEXT")
+            .execute(pool)
+            .await?;
+    }
 
     record_schema_migration(pool, VERSION, "rust").await?;
     Ok(true)
@@ -2783,6 +2819,7 @@ mod tests {
                 "030_content_version_baseline".to_string(),
                 "031_chunked_uploads".to_string(),
                 "032_upload_parts_cleanup".to_string(),
+                "033_ai_tasks_result".to_string(),
             ]
         );
 
@@ -3108,9 +3145,16 @@ mod tests {
             .into_iter()
             .collect();
         assert!(tables.contains("ai_tasks"));
+        let columns = list_table_columns(&pool, "ai_tasks")
+            .await
+            .expect("failed to list ai_tasks columns");
+        assert!(columns.contains("result"));
         assert!(has_schema_migration(&pool, "008_ai_tasks_persistence")
             .await
             .expect("failed to query 008 migration"));
+        assert!(has_schema_migration(&pool, "033_ai_tasks_result")
+            .await
+            .expect("failed to query 033 migration"));
 
         cleanup_test_pool(pool, db_path).await;
     }

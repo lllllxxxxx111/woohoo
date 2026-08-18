@@ -693,6 +693,7 @@ pub(crate) fn build_direct_usage_record(
         input_chars,
         output_chars,
         request_fingerprint,
+        billing_ref_id: Uuid::new_v4().to_string(),
         attempt_group_key,
         trigger_source,
         error_message,
@@ -726,7 +727,7 @@ pub(crate) async fn record_usage_and_bill_safe(pool: &SqlitePool, record: Record
     let should_bill = credit_cost > 0.0;
     let user_id = record.user_id.clone();
     let reason = format!("ai_usage_{}", record.operation.as_str());
-    let ref_id = record.request_fingerprint.clone();
+    let ref_id = record.billing_ref_id.clone();
 
     match usage::record(pool, record).await {
         Ok(()) => {}
@@ -740,13 +741,13 @@ pub(crate) async fn record_usage_and_bill_safe(pool: &SqlitePool, record: Record
         return;
     }
 
-    if let Err(error) = crate::billing::repo::check_and_deduct(
+    if let Err(error) = crate::billing::repo::check_and_deduct_idempotent(
         pool,
         &user_id,
         credit_cost,
         &reason,
-        Some("ai_usage"),
-        Some(&ref_id),
+        "ai_usage",
+        &ref_id,
     )
     .await
     {
@@ -801,6 +802,7 @@ mod tests {
             input_chars: 0,
             output_chars: 0,
             request_fingerprint: "request".to_string(),
+            billing_ref_id: "billing-request".to_string(),
             attempt_group_key: "attempt".to_string(),
             trigger_source: None,
             error_message: None,
@@ -879,6 +881,15 @@ mod tests {
         .expect("failed to create credit_transactions table");
 
         sqlx::query(
+            "CREATE UNIQUE INDEX idx_credit_txn_spent_ref_unique
+             ON credit_transactions(ref_type, ref_id)
+             WHERE kind = 'spent' AND ref_id IS NOT NULL",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create spent reference unique index");
+
+        sqlx::query(
             "CREATE TABLE ai_usage_events (
                 id TEXT PRIMARY KEY NOT NULL,
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -921,6 +932,14 @@ mod tests {
         .await
         .expect("failed to insert test user");
 
+        sqlx::query(
+            "INSERT INTO users (id, username, email, password_hash)
+             VALUES ('second-user', 'second-user', 'second-user@example.test', 'test')",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to insert second test user");
+
         pool
     }
 
@@ -961,5 +980,30 @@ mod tests {
         .await
         .expect("failed to query spent transactions after failed usage");
         assert_eq!(spent_after_failed, 1.5);
+    }
+
+    #[tokio::test]
+    async fn usage_billing_charges_each_request_even_when_content_is_identical() {
+        let pool = setup_usage_billing_pool().await;
+
+        let first = usage_record(AiUsageOperation::Chat, AiUsageStatus::Success, 1_500);
+        let mut second = usage_record(AiUsageOperation::Chat, AiUsageStatus::Success, 1_500);
+        second.billing_ref_id = "billing-request-second".to_string();
+        let mut other_user = usage_record(AiUsageOperation::Chat, AiUsageStatus::Success, 1_500);
+        other_user.user_id = "second-user".to_string();
+        other_user.billing_ref_id = "billing-request-other-user".to_string();
+
+        record_usage_and_bill_safe(&pool, first).await;
+        record_usage_and_bill_safe(&pool, second).await;
+        record_usage_and_bill_safe(&pool, other_user).await;
+
+        let spent_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM credit_transactions
+             WHERE kind = 'spent' AND ref_type = 'ai_usage'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("failed to count spent transactions");
+        assert_eq!(spent_count, 3);
     }
 }
