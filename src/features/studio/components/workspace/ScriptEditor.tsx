@@ -61,8 +61,12 @@ export interface ScriptEditorProps {
 }
 
 export const ScriptEditor: React.FC<ScriptEditorProps> = ({ initialContent = '', onClose }) => {
-  const { activeScript, activeState } = useAppStore(
-    useShallow((state) => ({ activeScript: state.activeScript, activeState: state.activeState })),
+  const { activeScript, activeState, aiSettings } = useAppStore(
+    useShallow((state) => ({
+      activeScript: state.activeScript,
+      activeState: state.activeState,
+      aiSettings: state.aiSettings,
+    })),
   );
   const { saveScript, refreshWorkspace } = useAppActions();
   const { showToast } = useToast();
@@ -276,26 +280,41 @@ export const ScriptEditor: React.FC<ScriptEditorProps> = ({ initialContent = '',
       return;
     }
 
+    if (aiSettings.multiAgentBetaEnabled !== true) {
+      showToast({
+        type: 'warning',
+        title: '制作流程未开启',
+        message: '请先在设置中开启“多智能体制作流程”，再生成分镜。',
+      });
+      return;
+    }
+
     setIsAiWorking(true);
     try {
       await createPipelineRun({
         projectId: activeState.projectId,
         conversationId: activeState.chatSessionId ?? '',
+        pipelineType: 'script',
+        betaEnabled: true,
         steps: [
-          { stepKey: 'script_parse', stepName: '剧本解析', stepOrder: 1, stepType: 'system' },
           {
             stepKey: 'storyboard_generate',
             stepName: '分镜拆分',
-            stepOrder: 2,
+            stepOrder: 1,
             stepType: 'design',
+            promptTemplate: `请根据以下剧本生成分镜。
+只输出 JSON，不要 Markdown 或解释文字，格式必须是：
+{"lines":[{"sceneNumber":1,"description":"镜头画面描述","duration":5,"assetIds":[]}]}
+
+剧本：
+${content.trim()}`,
           },
-          { stepKey: 'keyframe_extract', stepName: '关键帧提取', stepOrder: 3, stepType: 'design' },
         ],
       });
       showToast({
         type: 'success',
         title: '分镜生成任务已提交',
-        message: 'Pipeline 正在运行，请在大纲视图中查看进度。',
+        message: '制作流程正在运行，请在剧本步骤页面查看进度。',
       });
     } catch (error) {
       showToast({
@@ -306,7 +325,13 @@ export const ScriptEditor: React.FC<ScriptEditorProps> = ({ initialContent = '',
     } finally {
       setIsAiWorking(false);
     }
-  }, [activeState.chatSessionId, activeState.projectId, content, showToast]);
+  }, [
+    activeState.chatSessionId,
+    activeState.projectId,
+    aiSettings.multiAgentBetaEnabled,
+    content,
+    showToast,
+  ]);
 
   return (
     <div className={styles.container}>

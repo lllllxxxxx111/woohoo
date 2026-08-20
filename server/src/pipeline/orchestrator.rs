@@ -16,7 +16,9 @@ use crate::{
     },
     asset::{self, generated_document::GeneratedMarkdownDocument},
     content_version::{
-        model::{CommitInput, ConcurrencyToken, ContentType},
+        model::{
+            CommitInput, ConcurrencyToken, ContentType, StoryboardSnapshot, StoryboardSnapshotLine,
+        },
         repo as content_version_repo,
     },
     error::AppError,
@@ -882,19 +884,20 @@ async fn handle_design_completion(
     } else {
         output_json
     };
-    let output_json = if let Some((storyboard_id, version, line_count)) = persisted_storyboard.as_ref() {
-        let mut payload = output_json
-            .as_deref()
-            .and_then(|value| serde_json::from_str::<Value>(value).ok())
-            .and_then(|value| value.as_object().cloned())
-            .unwrap_or_default();
-        payload.insert("storyboardId".to_string(), json!(storyboard_id));
-        payload.insert("contentVersion".to_string(), json!(version));
-        payload.insert("lineCount".to_string(), json!(line_count));
-        Some(Value::Object(payload).to_string())
-    } else {
-        output_json
-    };
+    let output_json =
+        if let Some((storyboard_id, version, line_count)) = persisted_storyboard.as_ref() {
+            let mut payload = output_json
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                .and_then(|value| value.as_object().cloned())
+                .unwrap_or_default();
+            payload.insert("storyboardId".to_string(), json!(storyboard_id));
+            payload.insert("contentVersion".to_string(), json!(version));
+            payload.insert("lineCount".to_string(), json!(line_count));
+            Some(Value::Object(payload).to_string())
+        } else {
+            output_json
+        };
     let content_preview = raw_content
         .as_deref()
         .map(build_compact_preview)
@@ -954,7 +957,8 @@ fn is_pipeline_script_design(run: &PipelineRunRow, step: &PipelineStepRow) -> bo
 }
 
 fn is_pipeline_storyboard_design(step: &PipelineStepRow) -> bool {
-    normalize_step_type(step) == "design" && step.step_key.to_ascii_lowercase().contains("storyboard")
+    normalize_step_type(step) == "design"
+        && step.step_key.to_ascii_lowercase().contains("storyboard")
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -975,12 +979,51 @@ struct PipelineStoryboardLinePayload {
 #[derive(Debug, serde::Deserialize)]
 #[serde(untagged)]
 enum PipelineStoryboardPayload {
-    Wrapped { lines: Vec<PipelineStoryboardLinePayload> },
+    Wrapped {
+        lines: Vec<PipelineStoryboardLinePayload>,
+    },
     Lines(Vec<PipelineStoryboardLinePayload>),
 }
 
 fn default_storyboard_duration() -> i64 {
     5
+}
+
+fn first_number_after_keyword(line: &str, keywords: &[&str]) -> Option<i64> {
+    let lower = line.to_ascii_lowercase();
+    keywords.iter().find_map(|keyword| {
+        let keyword_lower = keyword.to_ascii_lowercase();
+        let start = lower.find(&keyword_lower)? + keyword.len();
+        line[start..]
+            .split(|ch: char| !ch.is_ascii_digit())
+            .find(|part| !part.is_empty())
+            .and_then(|part| part.parse::<i64>().ok())
+    })
+}
+
+fn duration_from_heading(line: &str) -> Option<i64> {
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    for (index, (_, ch)) in chars.iter().enumerate() {
+        if !ch.is_ascii_digit() {
+            continue;
+        }
+        let start = chars[index].0;
+        let mut end = start;
+        while end < line.len()
+            && line[end..]
+                .chars()
+                .next()
+                .is_some_and(|value| value.is_ascii_digit())
+        {
+            end += line[end..].chars().next().unwrap().len_utf8();
+        }
+        let number = line[start..end].parse::<i64>().ok()?;
+        let suffix = line[end..].trim_start();
+        if suffix.starts_with("秒") || suffix.starts_with('s') || suffix.starts_with('S') {
+            return Some(number.max(1));
+        }
+    }
+    None
 }
 
 fn parse_pipeline_storyboard_lines(content: &str) -> Result<Vec<StoryboardLineInput>> {
@@ -1029,7 +1072,10 @@ fn parse_pipeline_storyboard_lines(content: &str) -> Result<Vec<StoryboardLineIn
     let mut current_description = String::new();
     let mut current_scene = 1_i64;
     let mut current_duration = default_storyboard_duration();
-    let flush = |lines: &mut Vec<StoryboardLineInput>, description: &mut String, scene: &mut i64, duration: &mut i64| {
+    let flush = |lines: &mut Vec<StoryboardLineInput>,
+                 description: &mut String,
+                 scene: &mut i64,
+                 duration: &mut i64| {
         let text = description.trim().to_string();
         if !text.is_empty() {
             lines.push(StoryboardLineInput {
@@ -1048,7 +1094,12 @@ fn parse_pipeline_storyboard_lines(content: &str) -> Result<Vec<StoryboardLineIn
     for raw_line in trimmed.lines() {
         let line = raw_line.trim();
         if line.is_empty() {
-            flush(&mut lines, &mut current_description, &mut current_scene, &mut current_duration);
+            flush(
+                &mut lines,
+                &mut current_description,
+                &mut current_scene,
+                &mut current_duration,
+            );
             continue;
         }
         let is_heading = line.starts_with('#')
@@ -1056,21 +1107,18 @@ fn parse_pipeline_storyboard_lines(content: &str) -> Result<Vec<StoryboardLineIn
             || line.starts_with("镜头")
             || line.to_ascii_lowercase().starts_with("scene");
         if is_heading && !current_description.is_empty() {
-            flush(&mut lines, &mut current_description, &mut current_scene, &mut current_duration);
+            flush(
+                &mut lines,
+                &mut current_description,
+                &mut current_scene,
+                &mut current_duration,
+            );
         }
         if is_heading {
-            if let Some(number) = line
-                .split(|ch: char| !ch.is_ascii_digit())
-                .find(|part| !part.is_empty())
-                .and_then(|part| part.parse::<i64>().ok())
-            {
+            if let Some(number) = first_number_after_keyword(line, &["镜头", "场景", "scene"]) {
                 current_scene = number.max(1);
             }
-            if let Some(seconds) = line
-                .split(|ch: char| !ch.is_ascii_digit())
-                .filter(|part| !part.is_empty())
-                .find_map(|part| part.parse::<i64>().ok())
-            {
+            if let Some(seconds) = duration_from_heading(line) {
                 current_duration = seconds.max(1);
             }
             continue;
@@ -1080,7 +1128,12 @@ fn parse_pipeline_storyboard_lines(content: &str) -> Result<Vec<StoryboardLineIn
         }
         current_description.push_str(line);
     }
-    flush(&mut lines, &mut current_description, &mut current_scene, &mut current_duration);
+    flush(
+        &mut lines,
+        &mut current_description,
+        &mut current_scene,
+        &mut current_duration,
+    );
 
     if lines.is_empty() {
         anyhow::bail!("无法从 AI 产出解析出分镜行")
@@ -1095,10 +1148,10 @@ async fn persist_pipeline_storyboard(
     content: &str,
 ) -> Result<(String, i64, usize)> {
     let lines = parse_pipeline_storyboard_lines(content)?;
-    let snapshot = content_version::model::StoryboardSnapshot {
+    let snapshot = StoryboardSnapshot {
         lines: lines
             .iter()
-            .map(|line| content_version::model::StoryboardSnapshotLine {
+            .map(|line| StoryboardSnapshotLine {
                 id: line.id.clone().unwrap_or_default(),
                 scene_number: line.scene_number,
                 description: line.description.clone(),
@@ -1125,7 +1178,8 @@ async fn persist_pipeline_storyboard(
     .await
     .map_err(|error| anyhow::anyhow!(error.into_app_error().to_string()))?;
     let version = outcome.version_row().version;
-    let storyboard = storyboard_repo::upsert_storyboard_tx(&mut tx, &run.project_id, &lines, false).await?;
+    let storyboard =
+        storyboard_repo::upsert_storyboard_tx(&mut tx, &run.project_id, &lines, false).await?;
     tx.commit().await?;
     Ok((storyboard.id, version, lines.len()))
 }
@@ -3134,4 +3188,35 @@ async fn insert_step_output(
     .await?;
 
     Ok(output_id)
+}
+
+#[cfg(test)]
+mod storyboard_parser_tests {
+    use super::parse_pipeline_storyboard_lines;
+
+    #[test]
+    fn parses_wrapped_json_payload() {
+        let payload = serde_json::json!({"lines": [{"sceneNumber": 2, "description": "夜晚街道", "duration": 7, "assetIds": []}]}).to_string();
+        let lines = parse_pipeline_storyboard_lines(&payload).expect("wrapped JSON should parse");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].scene_number, 2);
+        assert_eq!(lines[0].duration, 7);
+    }
+
+    #[test]
+    fn parses_markdown_scene_and_duration_separately() {
+        let lines = parse_pipeline_storyboard_lines("镜头 3（5 秒）\n主角推门进入房间")
+            .expect("markdown should parse");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].scene_number, 3);
+        assert_eq!(lines[0].duration, 5);
+    }
+
+    #[test]
+    fn markdown_without_duration_uses_default() {
+        let lines =
+            parse_pipeline_storyboard_lines("镜头 2\n主角回头").expect("markdown should parse");
+        assert_eq!(lines[0].scene_number, 2);
+        assert_eq!(lines[0].duration, 5);
+    }
 }
