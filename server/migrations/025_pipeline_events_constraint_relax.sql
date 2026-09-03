@@ -56,7 +56,7 @@ CREATE TABLE pipeline_run_events_new (
     payload_json    TEXT,
 
     source          TEXT NOT NULL DEFAULT 'system'
-                    CHECK (source IN ('system', 'user', 'scheduler', 'api')),
+                    CHECK (source IN ('system', 'user', 'scheduler', 'api', 'assistant')),
 
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );

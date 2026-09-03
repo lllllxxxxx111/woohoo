@@ -12,6 +12,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { useToast } from '../../../../context/useToast';
 import { useAppActions } from '../../../../context/useAppActions';
 import { AI_PROVIDER_PRESETS } from '../../../../lib/ai';
+import { defaultAgents } from '../../../../config/defaultAgents';
 import {
   listServerAgents,
   updateServerAgent,
@@ -135,6 +136,13 @@ export const ChatArea: React.FC = () => {
 
   const providerLabel = AI_PROVIDER_PRESETS[aiSettings.provider]?.label || 'AI 模型';
   const conversationKey = `${activeState.projectId || 'global'}:${activeState.chatSessionId || 'global'}`;
+  const welcomeAgent = useMemo(
+    () =>
+      agentContacts.find(
+        (agent) => typeof agent.name === 'string' && agent.name.trim().length > 0,
+      ) ?? defaultAgents[0],
+    [agentContacts],
+  );
 
   /** 消息分组 Hook */
   const messageGroupsState = useMessageGroups({
@@ -485,11 +493,13 @@ export const ChatArea: React.FC = () => {
                 icon={<Sparkles size={40} className={styles.emptyIcon} />}
                 description={
                   <div className={styles.emptyContent}>
-                    <Title heading={6}>开启智能创作之旅</Title>
+                    <Title heading={6}>
+                      {welcomeAgent ? `你好，我是${welcomeAgent.name}` : '开启智能创作之旅'}
+                    </Title>
                     <Text type="secondary">
                       {isAiConfigured
                         ? activeProject
-                          ? '在这里输入您的需求，或通过 @ 提及特定职能的智能体。系统将协助您完成从创意到落地的全过程。'
+                          ? `${welcomeAgent?.role ? `我负责${welcomeAgent.role}。` : ''}在这里输入您的需求，或通过 @ 提及特定职能的智能体。系统将协助您完成从创意到落地的全过程。`
                           : '当前是全局对话模式。发送消息后可继续全局沟通，或先创建项目进入项目化工作流。'
                         : '当前尚未检测到有效的大模型配置，请先点击此处或导航进入设置页面完成初始化。'}
                     </Text>

@@ -440,7 +440,7 @@ export function hydrateAiSettings(value?: Partial<AiSettings> | null): AiSetting
     ...value,
     provider,
     baseUrl: normalizeAiBaseUrl(provider, value?.baseUrl?.trim() || defaults.baseUrl),
-    model: value?.model?.trim() || defaults.model,
+    model: value?.model?.trim() ?? defaults.model,
     apiKey: value?.apiKey?.trim() || '',
     systemPrompt: value?.systemPrompt?.trim() || defaults.systemPrompt,
     temperature: typeof value?.temperature === 'number' ? value.temperature : defaults.temperature,

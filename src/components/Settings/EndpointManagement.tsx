@@ -259,13 +259,8 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
         baseUrl: normalizeAiBaseUrl(provider, values.baseUrl || ''),
         apiKey: rawApiKey || undefined,
       });
-      const currentModel = (values.model || '').trim();
-      const nextModels = uniqModels([currentModel, ...result.models]);
+      const nextModels = uniqModels(result.models);
       setModelOptions(nextModels);
-
-      if (!currentModel && nextModels[0]) {
-        form.setFieldValue('model', nextModels[0]);
-      }
 
       showToast({
         type: 'success',
@@ -299,6 +294,7 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
     form.setFieldsValue({
       ...AI_PROVIDER_PRESETS['openai'],
       provider: 'openai',
+      model: '',
       forceStreamFallback: true,
     });
     setVisible(true);
@@ -346,7 +342,7 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
       form.setFieldsValue({
         provider: provider,
         baseUrl: preset.baseUrl,
-        model: preset.model,
+        model: '',
       });
     }
   };
@@ -734,6 +730,7 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
             loading={loading}
             pagination={false}
             border={false}
+            scroll={{ x: 760 }}
             hover={true}
             style={{ background: 'transparent' }}
           />
@@ -783,51 +780,55 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
           </div>
 
           <div className={styles.formGrid}>
-            <Form.Item label="缺省首选模型" field="model">
-              <Space style={{ width: '100%' }}>
-                <Select
-                  allowCreate
-                  showSearch
-                  placeholder="例如: gpt-4o"
-                  style={{ flex: 1, minWidth: 0 }}
-                >
-                  {modelOptions.map((modelName) => (
-                    <Select.Option key={modelName} value={modelName}>
-                      {modelName}
-                    </Select.Option>
-                  ))}
-                </Select>
-                <Button loading={fetchingModels} onClick={handleFetchModels}>
-                  获取模型
-                </Button>
-              </Space>
+            <Form.Item
+              label="缺省首选模型（从列表选择或输入）"
+              field="model"
+              rules={[{ required: true, message: '请选择或输入默认模型' }]}
+            >
+              <Select
+                allowCreate
+                showSearch
+                placeholder="请先点击「获取模型」后选择"
+              >
+                {(modelOptions.length > 0 ? modelOptions : ['']).filter(Boolean).map((modelName) => (
+                  <Select.Option key={modelName} value={modelName}>
+                    {modelName}
+                  </Select.Option>
+                ))}
+              </Select>
             </Form.Item>
-            <Form.Item label="授权密钥" field="apiKey" extra={editingId ? '留空将保留原密钥不变' : ''}>
-              <Input
-                placeholder="sk-..."
-                type={apiKeyVisible ? 'text' : 'password'}
-                addAfter={
-                  <button
-                    type="button"
-                    onClick={() => setApiKeyVisible(!apiKeyVisible)}
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      cursor: 'pointer',
-                      border: 'none',
-                      background: 'transparent',
-                      padding: '4px',
-                      color: 'var(--color-text-3)',
-                    }}
-                    tabIndex={-1}
-                  >
-                    {apiKeyVisible ? <EyeOff size={14} /> : <Eye size={14} />}
-                  </button>
-                }
-              />
+            <Form.Item label=" " style={{ display: 'flex', alignItems: 'flex-end', paddingBottom: 4 }}>
+              <Button loading={fetchingModels} onClick={handleFetchModels} long>
+                获取模型列表
+              </Button>
             </Form.Item>
           </div>
+
+          <Form.Item label="授权密钥" field="apiKey" extra={editingId ? '留空将保留原密钥不变' : ''}>
+            <Input
+              placeholder="sk-..."
+              type={apiKeyVisible ? 'text' : 'password'}
+              addAfter={
+                <button
+                  type="button"
+                  onClick={() => setApiKeyVisible(!apiKeyVisible)}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    cursor: 'pointer',
+                    border: 'none',
+                    background: 'transparent',
+                    padding: '4px',
+                    color: 'var(--color-text-3)',
+                  }}
+                  tabIndex={-1}
+                >
+                  {apiKeyVisible ? <EyeOff size={14} /> : <Eye size={14} />}
+                </button>
+              }
+            />
+          </Form.Item>
           <div className={styles.fieldNote}>
             模型名会作为默认提示写入端点配置，但实际请求仍可由当前通道与任务参数决定。
           </div>

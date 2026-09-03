@@ -33,11 +33,19 @@ async fn ensure_user_credits_row(pool: &SqlitePool, user_id: &str) -> Result<()>
 pub async fn get_user_credits(pool: &SqlitePool, user_id: &str) -> Result<UserCredits> {
     ensure_user_credits_row(pool, user_id).await?;
 
-    sqlx::query_as::<_, UserCredits>("SELECT * FROM user_credits WHERE user_id = ?")
-        .bind(user_id)
-        .fetch_one(pool)
-        .await
-        .map_err(|error| anyhow!(error))
+    sqlx::query_as::<_, UserCredits>(
+        "SELECT id, user_id,
+                CAST(balance AS REAL) AS balance,
+                CAST(total_earned AS REAL) AS total_earned,
+                CAST(total_spent AS REAL) AS total_spent,
+                created_at
+         FROM user_credits
+         WHERE user_id = ?",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| anyhow!(error))
 }
 
 pub async fn check_and_deduct(
@@ -75,12 +83,13 @@ pub async fn check_and_deduct(
     .await?;
 
     if result.rows_affected() == 0 {
-        let current =
-            sqlx::query_scalar::<_, f64>("SELECT balance FROM user_credits WHERE user_id = ?")
-                .bind(user_id)
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap_or(0.0);
+        let current = sqlx::query_scalar::<_, f64>(
+            "SELECT CAST(balance AS REAL) FROM user_credits WHERE user_id = ?",
+        )
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap_or(0.0);
 
         tx.rollback().await?;
         return Err(anyhow!(
@@ -90,11 +99,12 @@ pub async fn check_and_deduct(
         ));
     }
 
-    let new_balance =
-        sqlx::query_scalar::<_, f64>("SELECT balance FROM user_credits WHERE user_id = ?")
-            .bind(user_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let new_balance = sqlx::query_scalar::<_, f64>(
+        "SELECT CAST(balance AS REAL) FROM user_credits WHERE user_id = ?",
+    )
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await?;
 
     let txn_id = Uuid::new_v4().to_string();
 
@@ -175,11 +185,12 @@ pub async fn refund_with_ref_type(
     .execute(&mut *tx)
     .await?;
 
-    let new_balance =
-        sqlx::query_scalar::<_, f64>("SELECT balance FROM user_credits WHERE user_id = ?")
-            .bind(user_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let new_balance = sqlx::query_scalar::<_, f64>(
+        "SELECT CAST(balance AS REAL) FROM user_credits WHERE user_id = ?",
+    )
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await?;
 
     let txn_id = Uuid::new_v4().to_string();
 
@@ -292,12 +303,13 @@ pub async fn check_and_deduct_idempotent(
     .await?;
 
     if result.rows_affected() == 0 {
-        let current =
-            sqlx::query_scalar::<_, f64>("SELECT balance FROM user_credits WHERE user_id = ?")
-                .bind(user_id)
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap_or(0.0);
+        let current = sqlx::query_scalar::<_, f64>(
+            "SELECT CAST(balance AS REAL) FROM user_credits WHERE user_id = ?",
+        )
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap_or(0.0);
 
         tx.rollback().await?;
         return Err(anyhow!(
@@ -307,11 +319,12 @@ pub async fn check_and_deduct_idempotent(
         ));
     }
 
-    let new_balance =
-        sqlx::query_scalar::<_, f64>("SELECT balance FROM user_credits WHERE user_id = ?")
-            .bind(user_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let new_balance = sqlx::query_scalar::<_, f64>(
+        "SELECT CAST(balance AS REAL) FROM user_credits WHERE user_id = ?",
+    )
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await?;
 
     let txn_id = Uuid::new_v4().to_string();
 
@@ -350,11 +363,12 @@ pub async fn check_and_deduct_idempotent(
                 ref_id = ref_id,
                 "扣费幂等命中：已存在相同 ref 的 spent 记录，跳过重复扣费"
             );
-            let balance =
-                sqlx::query_scalar::<_, f64>("SELECT balance FROM user_credits WHERE user_id = ?")
-                    .bind(user_id)
-                    .fetch_one(pool)
-                    .await?;
+            let balance = sqlx::query_scalar::<_, f64>(
+                "SELECT CAST(balance AS REAL) FROM user_credits WHERE user_id = ?",
+            )
+            .bind(user_id)
+            .fetch_one(pool)
+            .await?;
             Ok(balance)
         }
         Err(error) => {
@@ -410,11 +424,12 @@ pub async fn top_up(
     .execute(&mut *tx)
     .await?;
 
-    let new_balance =
-        sqlx::query_scalar::<_, f64>("SELECT balance FROM user_credits WHERE user_id = ?")
-            .bind(user_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let new_balance = sqlx::query_scalar::<_, f64>(
+        "SELECT CAST(balance AS REAL) FROM user_credits WHERE user_id = ?",
+    )
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await?;
 
     let txn_id = Uuid::new_v4().to_string();
 
@@ -468,7 +483,7 @@ pub async fn refund_outstanding_for_ref(
     }
 
     let amount = sqlx::query_scalar::<_, f64>(
-        "SELECT amount
+        "SELECT CAST(amount AS REAL)
          FROM credit_transactions
          WHERE user_id = ? AND kind = ? AND ref_type = ? AND ref_id = ?
          ORDER BY created_at DESC
@@ -507,11 +522,12 @@ pub async fn refund_outstanding_for_ref(
     .execute(&mut *tx)
     .await?;
 
-    let new_balance =
-        sqlx::query_scalar::<_, f64>("SELECT balance FROM user_credits WHERE user_id = ?")
-            .bind(user_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let new_balance = sqlx::query_scalar::<_, f64>(
+        "SELECT CAST(balance AS REAL) FROM user_credits WHERE user_id = ?",
+    )
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await?;
 
     let txn_id = Uuid::new_v4().to_string();
 
@@ -566,7 +582,14 @@ pub async fn list_transactions(
     offset: i64,
 ) -> Result<Vec<CreditTransaction>> {
     let txns = sqlx::query_as::<_, CreditTransaction>(
-        "SELECT * FROM credit_transactions WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        "SELECT id, user_id,
+                CAST(amount AS REAL) AS amount,
+                CAST(balance_after AS REAL) AS balance_after,
+                kind, reason, ref_type, ref_id, created_at
+         FROM credit_transactions
+         WHERE user_id = ?
+         ORDER BY created_at DESC
+         LIMIT ? OFFSET ?",
     )
     .bind(user_id)
     .bind(limit)
@@ -1231,6 +1254,52 @@ mod tests {
         );
 
         let _ = balance_after_deduct; // 已通过其他断言间接验证
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn reads_integer_stored_credit_values_as_f64() {
+        let pool = create_test_pool().await;
+        let user_id = "integer-credit-values-user";
+        seed_user(&pool, user_id).await;
+
+        // SQLite may store whole-number writes as INTEGER even for REAL columns.
+        sqlx::query(
+            "UPDATE user_credits
+             SET balance = 100, total_earned = 0, total_spent = 0
+             WHERE user_id = ?",
+        )
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .expect("failed to seed integer credit values");
+
+        sqlx::query(
+            "INSERT INTO credit_transactions
+             (id, user_id, amount, balance_after, kind, reason, created_at)
+             VALUES (?, ?, 5, 95, 'spent', 'integer value regression', ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(user_id)
+        .bind(now_rfc3339())
+        .execute(&pool)
+        .await
+        .expect("failed to seed integer transaction values");
+
+        let credits = get_user_credits(&pool, user_id)
+            .await
+            .expect("integer-stored credits should decode as f64");
+        assert_eq!(credits.balance, 100.0);
+        assert_eq!(credits.total_earned, 0.0);
+        assert_eq!(credits.total_spent, 0.0);
+
+        let transactions = list_transactions(&pool, user_id, 10, 0)
+            .await
+            .expect("integer-stored transactions should decode as f64");
+        assert_eq!(transactions.len(), 1);
+        assert_eq!(transactions[0].amount, 5.0);
+        assert_eq!(transactions[0].balance_after, 95.0);
 
         pool.close().await;
     }

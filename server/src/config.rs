@@ -143,4 +143,137 @@ impl AppConfig {
             cors_allowed_origins,
         }
     }
+
+    /// 校验启动所需的生产配置契约。
+    ///
+    /// 该检查必须在绑定监听端口前执行，避免服务以不可用或不安全的配置
+    /// 对外提供健康检查和 API。开发/Demo 环境保留本地便利默认值，但生产
+    /// 环境必须显式配置强 JWT、严格 CORS 和 API Key 加密主密钥。
+    pub fn validate_startup(
+        &self,
+        is_production: bool,
+        api_key_master_key_configured: bool,
+    ) -> Result<(), String> {
+        if !is_production {
+            return Ok(());
+        }
+
+        validate_production_security(
+            &self.jwt_secret,
+            &self.cors_allowed_origins,
+            api_key_master_key_configured,
+        )
+    }
+}
+
+fn validate_production_security(
+    jwt_secret: &str,
+    cors_allowed_origins: &[String],
+    api_key_master_key_configured: bool,
+) -> Result<(), String> {
+    const DANGER_PATTERNS: &[&str] = &[
+        "change-this-to-a-random-secret-key",
+        "your-secret-key",
+        "woohoo-demo-jwt-secret",
+        "secret",
+        "password",
+        "jwt_secret",
+    ];
+
+    if jwt_secret.len() < 32
+        || DANGER_PATTERNS
+            .iter()
+            .any(|pattern| jwt_secret.to_ascii_lowercase().contains(pattern))
+    {
+        return Err(format!(
+            "生产环境不允许使用弱 JWT_SECRET（当前长度 {}，要求至少 32 个字符的随机值）",
+            jwt_secret.len()
+        ));
+    }
+
+    if cors_allowed_origins.is_empty() {
+        return Err("生产环境必须设置 CORS_ALLOWED_ORIGINS，且至少包含一个前端 origin".into());
+    }
+
+    for origin in cors_allowed_origins {
+        let value = origin.trim();
+        if value == "*" {
+            return Err("生产环境 CORS_ALLOWED_ORIGINS 不允许使用通配符 *".into());
+        }
+
+        let parsed = url::Url::parse(value)
+            .map_err(|_| format!("生产环境 CORS_ALLOWED_ORIGINS 包含非法 origin：{}", value))?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host_str().is_none()
+            || parsed.username() != ""
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || !matches!(parsed.path(), "" | "/")
+        {
+            return Err(format!(
+                "生产环境 CORS_ALLOWED_ORIGINS 必须是 http(s) origin（不含路径、查询或凭据）：{}",
+                value
+            ));
+        }
+    }
+
+    if !api_key_master_key_configured {
+        return Err(
+            "生产环境必须设置 WOOHOO_API_KEY_ENCRYPTION_KEY（64 位 hex，即 32 字节 AES-256 密钥）"
+                .into(),
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_production_security;
+
+    fn valid_origins() -> Vec<String> {
+        vec!["https://app.example.com".to_string()]
+    }
+
+    #[test]
+    fn rejects_demo_jwt_in_production() {
+        let error = validate_production_security(
+            "woohoo-demo-jwt-secret-change-before-production-2026",
+            &valid_origins(),
+            true,
+        )
+        .expect_err("demo secret must be rejected");
+        assert!(error.contains("弱 JWT_SECRET"));
+    }
+
+    #[test]
+    fn rejects_wildcard_or_invalid_cors() {
+        let error = validate_production_security(
+            "a-strong-random-jwt-value-that-is-long-enough",
+            &["*".to_string()],
+            true,
+        )
+        .expect_err("wildcard CORS must be rejected");
+        assert!(error.contains("通配符"));
+
+        let error = validate_production_security(
+            "a-strong-random-jwt-value-that-is-long-enough",
+            &["https://app.example.com/path".to_string()],
+            true,
+        )
+        .expect_err("path CORS must be rejected");
+        assert!(error.contains("origin"));
+    }
+
+    #[test]
+    fn requires_api_key_master_key() {
+        let error = validate_production_security(
+            "a-strong-random-jwt-value-that-is-long-enough",
+            &valid_origins(),
+            false,
+        )
+        .expect_err("production must require the encryption key");
+        assert!(error.contains("WOOHOO_API_KEY_ENCRYPTION_KEY"));
+    }
 }

@@ -218,6 +218,10 @@ fn should_skip_rate_limit(request: &Request) -> bool {
 
     request.method() == Method::OPTIONS
         || path == "/health"
+        // 登录和注册已经挂载了更严格的认证专用限流器，
+        // 避免同一个请求再消耗通用 API 限额。
+        || (request.method() == Method::POST
+            && matches!(path, "/api/auth/login" | "/api/auth/register"))
         || is_generation_rate_limit_exempt(request.method(), path)
         // 分片 PUT 走 upload_rate_limit_middleware 的专用额度，
         // 不再计入通用 100 次/分钟（否则大文件合规上传也会被拦）。
@@ -372,6 +376,22 @@ mod tests {
         assert!(!should_skip_rate_limit(&request(
             Method::PUT,
             "/api/projects/p-1/uploads/s-1/parts"
+        )));
+    }
+
+    #[test]
+    fn skips_global_rate_limit_for_auth_endpoints() {
+        assert!(should_skip_rate_limit(&request(
+            Method::POST,
+            "/api/auth/login"
+        )));
+        assert!(should_skip_rate_limit(&request(
+            Method::POST,
+            "/api/auth/register"
+        )));
+        assert!(!should_skip_rate_limit(&request(
+            Method::GET,
+            "/api/auth/login"
         )));
     }
 }

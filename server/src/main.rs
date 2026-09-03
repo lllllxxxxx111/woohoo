@@ -93,6 +93,16 @@ async fn main() {
 
     // 加载配置
     let mut config = AppConfig::from_env();
+    let is_production = std::env::var("RUST_ENV")
+        .map(|value| value.eq_ignore_ascii_case("production"))
+        .unwrap_or(false);
+    if let Err(error) = config.validate_startup(
+        is_production,
+        ai::api_key_crypto::is_master_key_configured(),
+    ) {
+        tracing::error!("启动配置校验失败：{}", error);
+        panic!("启动配置校验失败：{}", error);
+    }
     tracing::info!("Starting Woohoo Server on {}:{}", config.host, config.port);
 
     let listener = bind_listener(&config).await;
@@ -166,16 +176,16 @@ async fn main() {
     pipeline::orchestrator::start_orchestrator_worker(state.clone());
     collaboration::worker::start_worker(state.clone());
 
-    let is_production = std::env::var("RUST_ENV")
-        .map(|value| value.eq_ignore_ascii_case("production"))
-        .unwrap_or(false);
-
     // CORS 配置 - 根据环境变量限制允许的来源
     let allowed_origins: Vec<HeaderValue> = config
         .cors_allowed_origins
         .iter()
         .filter_map(|origin| origin.parse::<HeaderValue>().ok())
         .collect();
+
+    if is_production && allowed_origins.len() != config.cors_allowed_origins.len() {
+        panic!("生产环境 CORS_ALLOWED_ORIGINS 包含无法解析的 origin");
+    }
 
     if allowed_origins.is_empty() && is_production {
         tracing::error!("CORS_ALLOWED_ORIGINS 未配置且处于生产模式，将拒绝所有跨域请求！");
@@ -260,52 +270,6 @@ async fn main() {
             .expose_headers([header::HeaderName::from_static("x-request-id")])
             .allow_credentials(true)
     };
-
-    // ─── 安全性验证 ──────────────────────────────
-    /**
-     * JWT Secret 安全检查
-     * 防止使用默认或弱密钥导致的安全风险
-     *
-     * 检查项：
-     * 1. 密钥长度是否足够（至少32字符）
-     * 2. 是否使用了示例文件中的默认值
-     * 3. 是否包含常见弱密码模式
-     */
-    const DANGER_PATTERNS: &[&str] = &[
-        "change-this-to-a-random-secret-key",
-        "your-secret-key",
-        "secret",
-        "password",
-        "jwt_secret",
-    ];
-
-    let is_weak_jwt_secret = config.jwt_secret.len() < 32
-        || DANGER_PATTERNS
-            .iter()
-            .any(|pattern| config.jwt_secret.to_lowercase().contains(pattern));
-
-    if is_weak_jwt_secret {
-        tracing::error!(
-            jwt_length = config.jwt_secret.len(),
-            "⚠️  警告: JWT_SECRET 可能过于简单或不安全！请设置至少32个字符的随机字符串"
-        );
-        tracing::error!("建议使用以下命令生成安全的JWT Secret:");
-        tracing::error!("  powershell -Command '[System.Guid]::NewGuid().ToString(\"N\")'");
-
-        if std::env::var("RUST_ENV").map_or(false, |v| v.to_lowercase() == "production") {
-            panic!(
-                "生产环境不允许使用弱JWT Secret！当前长度: {}，要求至少32字符\n\
-                 请设置环境变量 JWT_SECRET 为强随机值后重试。",
-                config.jwt_secret.len()
-            );
-        }
-        tracing::warn!("开发模式：将继续启动，但建议尽快更换为安全密钥");
-    } else {
-        tracing::info!(
-            jwt_length = config.jwt_secret.len(),
-            "✅ JWT Secret 配置通过安全检查"
-        );
-    }
 
     // ─── 路由 ────────────────────────────────────────
 

@@ -766,12 +766,44 @@ async fn handle_running_step(
     }
 
     let Some(task_id) = step.ai_task_id.as_deref() else {
-        mark_step_failed(&state.db, &run.id, &step.id, "步骤 running 但缺少 aiTaskId").await?;
+        let reason = "步骤 running 但缺少 aiTaskId，无法安全恢复；请重试该步骤或转人工处理";
+        if mark_step_failed(&state.db, &run.id, &step.id, reason).await? {
+            append_pipeline_event(
+                &state.db,
+                &run.id,
+                Some(&step.id),
+                "recovery_failed",
+                json!({
+                    "stepId": step.id,
+                    "reason": reason,
+                    "nextAction": "retry_step_or_manual_review",
+                }),
+                "system",
+            )
+            .await?;
+        }
         return Ok(true);
     };
 
     let Some(task) = load_task_snapshot(state, &run.user_id, task_id).await? else {
-        return Ok(false);
+        let reason = "服务重启后找不到关联的 AI 任务，无法安全续接；请重试该步骤或转人工处理";
+        if mark_step_failed(&state.db, &run.id, &step.id, reason).await? {
+            append_pipeline_event(
+                &state.db,
+                &run.id,
+                Some(&step.id),
+                "recovery_failed",
+                json!({
+                    "stepId": step.id,
+                    "taskId": task_id,
+                    "reason": reason,
+                    "nextAction": "retry_step_or_manual_review",
+                }),
+                "system",
+            )
+            .await?;
+        }
+        return Ok(true);
     };
 
     match task.status.as_str() {
@@ -812,7 +844,7 @@ async fn load_task_snapshot(
     .await?;
 
     Ok(persisted.map(|task| TaskSnapshot {
-        status: task.status,
+        status: normalize_persisted_task_status(&task.status).to_string(),
         result: task.result,
         error: task.error,
     }))
@@ -824,6 +856,21 @@ fn map_task_status(status: AiTaskStatus) -> &'static str {
         AiTaskStatus::Running => "running",
         AiTaskStatus::Completed => "completed",
         AiTaskStatus::Failed => "failed",
+    }
+}
+
+/// 兼容 ai_tasks 历史上使用的 JSON 字符串和裸字符串状态编码。
+fn normalize_persisted_task_status(raw: &str) -> &'static str {
+    if let Ok(status) = serde_json::from_str::<AiTaskStatus>(raw) {
+        return map_task_status(status);
+    }
+
+    match raw.trim().trim_matches('"').to_ascii_lowercase().as_str() {
+        "queued" => "queued",
+        "running" => "running",
+        "completed" => "completed",
+        "failed" | "cancelled" => "failed",
+        _ => "failed",
     }
 }
 
@@ -3064,7 +3111,7 @@ async fn mark_step_failed(
     run_id: &str,
     step_id: &str,
     reason: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let now = now_iso();
     let affected = sqlx::query(
         "UPDATE pipeline_run_steps
@@ -3074,7 +3121,7 @@ async fn mark_step_failed(
              completed_at = COALESCE(completed_at, ?),
              run_version = COALESCE(run_version, 1) + 1,
              updated_at = ?
-         WHERE id = ? AND run_id = ?",
+         WHERE id = ? AND run_id = ? AND status = 'running'",
     )
     .bind(reason)
     .bind(&now)
@@ -3100,7 +3147,7 @@ async fn mark_step_failed(
         )
         .await?;
     }
-    Ok(())
+    Ok(affected > 0)
 }
 
 async fn set_step_status(
@@ -3192,7 +3239,18 @@ async fn insert_step_output(
 
 #[cfg(test)]
 mod storyboard_parser_tests {
-    use super::parse_pipeline_storyboard_lines;
+    use super::{
+        mark_step_failed, normalize_persisted_task_status, parse_pipeline_storyboard_lines,
+    };
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    #[test]
+    fn normalizes_json_and_legacy_task_statuses() {
+        assert_eq!(normalize_persisted_task_status("\"queued\""), "queued");
+        assert_eq!(normalize_persisted_task_status("running"), "running");
+        assert_eq!(normalize_persisted_task_status("Completed"), "completed");
+        assert_eq!(normalize_persisted_task_status("cancelled"), "failed");
+    }
 
     #[test]
     fn parses_wrapped_json_payload() {
@@ -3218,5 +3276,118 @@ mod storyboard_parser_tests {
             parse_pipeline_storyboard_lines("镜头 2\n主角回头").expect("markdown should parse");
         assert_eq!(lines[0].scene_number, 2);
         assert_eq!(lines[0].duration, 5);
+    }
+
+    #[tokio::test]
+    async fn recovery_failure_event_is_idempotent_in_sqlite() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite test pool");
+        sqlx::query(
+            "CREATE TABLE pipeline_runs (
+                id TEXT PRIMARY KEY NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create pipeline_runs fixture");
+        sqlx::query(
+            "CREATE TABLE pipeline_run_steps (
+                id TEXT PRIMARY KEY NOT NULL,
+                run_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                last_error_at TEXT,
+                completed_at TEXT,
+                run_version INTEGER,
+                updated_at TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create pipeline_run_steps fixture");
+        sqlx::query(
+            "CREATE TABLE pipeline_run_events (
+                id TEXT PRIMARY KEY NOT NULL,
+                run_id TEXT NOT NULL,
+                step_id TEXT,
+                event_type TEXT NOT NULL,
+                payload_json TEXT,
+                source TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create pipeline_run_events fixture");
+        sqlx::query("INSERT INTO pipeline_runs (id) VALUES ('run-1')")
+            .execute(&pool)
+            .await
+            .expect("insert pipeline run fixture");
+        sqlx::query(
+            "INSERT INTO pipeline_run_steps (id, run_id, status, run_version)
+             VALUES ('step-1', 'run-1', 'running', 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert pipeline step fixture");
+
+        let reason = "服务重启后找不到关联的 AI 任务";
+        if mark_step_failed(&pool, "run-1", "step-1", reason)
+            .await
+            .expect("first recovery failure")
+        {
+            super::append_pipeline_event(
+                &pool,
+                "run-1",
+                Some("step-1"),
+                "recovery_failed",
+                serde_json::json!({"stepId": "step-1", "reason": reason}),
+                "system",
+            )
+            .await
+            .expect("append recovery event");
+        }
+        assert!(!mark_step_failed(&pool, "run-1", "step-1", reason)
+            .await
+            .expect("second recovery failure"));
+
+        let step: (String, String, i64) = sqlx::query_as(
+            "SELECT status, error_message, run_version
+             FROM pipeline_run_steps WHERE id = 'step-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("query failed step");
+        assert_eq!(step.0, "failed");
+        assert_eq!(step.1, reason);
+        assert_eq!(step.2, 2);
+
+        let events: Vec<(String, String)> = sqlx::query_as(
+            "SELECT event_type, payload_json
+             FROM pipeline_run_events WHERE run_id = 'run-1' ORDER BY rowid",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query recovery events");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0, "step_failed");
+        assert!(events[0].1.contains("step-1"));
+        assert_eq!(events[1].0, "recovery_failed");
+        assert!(events[1].1.contains("找不到关联"));
+
+        assert!(!mark_step_failed(&pool, "run-1", "step-1", reason)
+            .await
+            .expect("re-check recovery failure"));
+        let recovery_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pipeline_run_events
+             WHERE run_id = 'run-1' AND event_type = 'recovery_failed'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count recovery events");
+        assert_eq!(recovery_count, 1);
     }
 }

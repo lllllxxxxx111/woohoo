@@ -497,13 +497,13 @@ async fn build_conversation_messages(
     execution_stage: &str,
 ) -> AppResult<Vec<ChatMessage>> {
     let history = conversation::repo::list_message_history(pool, &context.conversation.id).await?;
-    let mut messages = Vec::new();
     let runtime_prompt = build_execution_prompt(context, history.len(), execution_stage);
 
+    // 会话缓存命中率优化：system prompt 仅保留相对稳定的身份与规则，
+    // 不拼接每次都会变化的执行快照，保证相邻请求可复用更长的稳定前缀。
     let system_prompt = [
         context.system_prompt.as_deref().map(str::trim),
         context.agent.as_ref().map(|item| item.system_prompt.trim()),
-        Some(runtime_prompt.as_str()),
     ]
     .into_iter()
     .flatten()
@@ -511,11 +511,46 @@ async fn build_conversation_messages(
     .collect::<Vec<_>>()
     .join("\n\n");
 
+    Ok(assemble_chat_messages(
+        context.conversation.id.clone(),
+        system_prompt,
+        history,
+        runtime_prompt,
+    ))
+}
+
+fn assemble_chat_messages(
+    conversation_id: String,
+    system_prompt: String,
+    mut history: Vec<conversation::model::MessageHistoryEntry>,
+    runtime_prompt: String,
+) -> Vec<ChatMessage> {
+    let mut messages = Vec::new();
+
     if !system_prompt.is_empty() {
         messages.push(ChatMessage {
             role: "system".to_string(),
             content: system_prompt,
         });
+    }
+
+    // 会话缓存命中率优化：
+    // 1) 历史消息按“前缀稳定”截取（保留最早轮次，只裁剪中间/较新轮次），
+    //    使相邻两次请求共享更长的消息前缀，提高供应商 prompt cache 命中率。
+    // 2) system prompt 只包含相对稳定的身份与规则；实时执行快照移到末尾，
+    //    避免每次请求都破坏可复用的上下文前缀。
+    let total_history = history.len();
+    if total_history > CHAT_HISTORY_PREFIX_KEEP + CHAT_HISTORY_RECENT_KEEP {
+        let drop_count = total_history - CHAT_HISTORY_RECENT_KEEP;
+        tracing::debug!(
+            conversation_id = %conversation_id,
+            total_history,
+            kept_prefix = CHAT_HISTORY_PREFIX_KEEP,
+            kept_recent = CHAT_HISTORY_RECENT_KEEP,
+            dropped_middle = drop_count - CHAT_HISTORY_PREFIX_KEEP,
+            "chat history truncated with stable prefix"
+        );
+        history.drain(CHAT_HISTORY_PREFIX_KEEP..drop_count);
     }
 
     for message in history {
@@ -529,8 +564,18 @@ async fn build_conversation_messages(
         });
     }
 
-    Ok(messages)
+    messages.push(ChatMessage {
+        role: "user".to_string(),
+        content: runtime_prompt,
+    });
+
+    messages
 }
+
+/// 裁剪会话历史时保留的最早轮次数量。
+const CHAT_HISTORY_PREFIX_KEEP: usize = 8;
+/// 裁剪会话历史时保留的最近消息数量。
+const CHAT_HISTORY_RECENT_KEEP: usize = 40;
 
 pub(super) async fn resolve_chat_context(
     state: &AppState,
@@ -561,9 +606,21 @@ pub(super) async fn resolve_chat_context(
     let model = req
         .model
         .as_deref()
-        .or(agent.as_ref().and_then(|item| item.model.as_deref()))
-        .or(endpoint.default_model.as_deref())
-        .unwrap_or("gpt-4o-mini")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(agent
+            .as_ref()
+            .and_then(|item| item.model.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty()))
+        .or(endpoint
+            .default_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()))
+        .ok_or_else(|| {
+            AppError::Validation("模型不能为空：请在请求、Agent 或端点配置中指定默认模型".into())
+        })?
         .to_string();
     let temperature = agent
         .as_ref()
@@ -986,6 +1043,7 @@ pub(super) fn build_execution_prompt(
         lines.push("优先直接完成任务，不要复述系统规则。".to_string());
     }
 
+    lines.push("以上项目状态、成员与资源信息是本次请求的实时快照，可能随任务执行变化；历史消息早于该快照时，以本快照为准。".to_string());
     lines.push("默认仍以当前项目做判断、分工和进度汇报；如果用户显式引用了其他项目资源，只能把它们当参考资料，不能误记为当前项目资产。".to_string());
     lines.push("如果当前项目缺角色，优先从“可复用”名单里选择合适智能体；确实没有合适候选时，再建议创建新的项目智能体。".to_string());
     lines.push(
@@ -1141,4 +1199,77 @@ fn split_workflow_guard_block(content: &str) -> (String, Option<WorkflowGuard>) 
     .to_string();
 
     (visible, Some(parsed))
+}
+
+#[cfg(test)]
+mod chat_history_tests {
+    use crate::conversation::model::MessageHistoryEntry;
+
+    use super::{assemble_chat_messages, CHAT_HISTORY_PREFIX_KEEP, CHAT_HISTORY_RECENT_KEEP};
+
+    fn history_entry(role: &str, index: usize) -> MessageHistoryEntry {
+        MessageHistoryEntry {
+            role: role.to_string(),
+            content: format!("message-{index}"),
+        }
+    }
+
+    #[test]
+    fn short_session_keeps_full_history() {
+        let history = (0..10).map(|index| history_entry("user", index)).collect();
+        let messages = assemble_chat_messages(
+            "conversation-1".to_string(),
+            "stable system".to_string(),
+            history,
+            "runtime snapshot".to_string(),
+        );
+
+        assert_eq!(messages.len(), 12);
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(messages[0].content, "stable system");
+        for (offset, message) in messages[1..11].iter().enumerate() {
+            assert_eq!(message.content, format!("message-{offset}"));
+        }
+        assert_eq!(messages.last().unwrap().role, "user");
+        assert_eq!(messages.last().unwrap().content, "runtime snapshot");
+    }
+
+    #[test]
+    fn long_session_truncates_with_stable_prefix_and_recent_window() {
+        let total = CHAT_HISTORY_PREFIX_KEEP + CHAT_HISTORY_RECENT_KEEP + 20;
+        let history = (0..total)
+            .map(|index| {
+                if index % 2 == 0 {
+                    history_entry("user", index)
+                } else {
+                    history_entry("assistant", index)
+                }
+            })
+            .collect();
+        let messages = assemble_chat_messages(
+            "conversation-1".to_string(),
+            String::new(),
+            history,
+            "runtime snapshot".to_string(),
+        );
+
+        assert_eq!(
+            messages.len(),
+            CHAT_HISTORY_PREFIX_KEEP + CHAT_HISTORY_RECENT_KEEP + 1
+        );
+        for (offset, message) in messages[..CHAT_HISTORY_PREFIX_KEEP].iter().enumerate() {
+            assert_eq!(message.content, format!("message-{offset}"));
+        }
+        for (offset, message) in messages
+            [CHAT_HISTORY_PREFIX_KEEP..CHAT_HISTORY_PREFIX_KEEP + CHAT_HISTORY_RECENT_KEEP]
+            .iter()
+            .enumerate()
+        {
+            let original_index = total - CHAT_HISTORY_RECENT_KEEP + offset;
+            assert_eq!(message.content, format!("message-{original_index}"));
+        }
+        let runtime_message = messages.last().unwrap();
+        assert_eq!(runtime_message.role, "user");
+        assert_eq!(runtime_message.content, "runtime snapshot");
+    }
 }

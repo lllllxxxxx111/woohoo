@@ -261,8 +261,12 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   /** 稳定化项目级智能体列表引用，避免子组件频繁重渲染 */
   const projectScopedAgents = useMemo(
     () =>
-      activeProject?.agentRoster ?? (allAgentContacts.length ? allAgentContacts : defaultAgents),
-    [activeProject?.agentRoster, allAgentContacts],
+      activeProject?.agentRoster?.length
+        ? activeProject.agentRoster
+        : allAgentContacts.length
+          ? allAgentContacts
+          : defaultAgents,
+    [activeProject?.agentRoster, allAgentContacts, defaultAgents],
   );
   const activeChat =
     activeState.projectId && activeState.chatSessionId

@@ -188,7 +188,7 @@ function getImageGenerationModel(endpoint?: ServerAiEndpoint | null) {
   const capabilityModel = endpoint?.capabilities
     ?.find((capability) => capability.capability === 'image_generation' && capability.enabled)
     ?.model?.trim();
-  return capabilityModel || endpoint?.defaultModel?.trim() || DEFAULT_IMAGE_MODEL;
+  return capabilityModel || DEFAULT_IMAGE_MODEL;
 }
 
 function getEndpointModelOptions(endpoint?: ServerAiEndpoint | null) {
@@ -197,7 +197,6 @@ function getEndpointModelOptions(endpoint?: ServerAiEndpoint | null) {
     ...(endpoint?.capabilities || [])
       .filter((capability) => capability.enabled)
       .map((capability) => capability.model || ''),
-    endpoint?.defaultModel || '',
   ]);
 }
 
@@ -604,7 +603,9 @@ export const ImageGenerationPanel: React.FC = () => {
       .map((endpoint) => getImageGenerationModel(endpoint))
       .filter(Boolean);
     setModel((currentModel) =>
-      !currentModel || MODEL_OPTIONS.includes(currentModel) || endpointDefaults.includes(currentModel)
+      !currentModel ||
+      MODEL_OPTIONS.includes(currentModel) ||
+      endpointDefaults.includes(currentModel)
         ? defaultModel
         : currentModel,
     );

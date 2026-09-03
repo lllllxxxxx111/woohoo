@@ -269,17 +269,38 @@ fn select_capability_model(
             && capability_model.is_some()
             && (requested_model.is_none() || requested_is_endpoint_default);
 
-    if should_prefer_capability_model {
-        capability_model
+    if matches!(capability, "image_generation" | "video_generation") {
+        // 通道默认模型通常是聊天模型，不能作为生图/生视频模型的隐式回退。
+        // 能力模型优先；请求模型若不是通道默认值则视为用户明确选择；
+        // 否则使用能力专用的 fallback（例如 gpt-image-1）。
+        if should_prefer_capability_model {
+            return capability_model
+                .or(requested_model)
+                .or(fallback_model)
+                .or(endpoint_default_model);
+        }
+
+        let requested_is_endpoint_default = requested_model
+            .as_deref()
+            .zip(endpoint_default_model.as_deref())
+            .map(|(requested, endpoint_default)| requested.eq_ignore_ascii_case(endpoint_default))
+            .unwrap_or(false);
+
+        if !requested_is_endpoint_default {
+            return requested_model
+                .or(fallback_model)
+                .or(endpoint_default_model);
+        }
+
+        return fallback_model
             .or(requested_model)
-            .or(endpoint_default_model)
-            .or(fallback_model)
-    } else {
-        requested_model
-            .or(capability_model)
-            .or(endpoint_default_model)
-            .or(fallback_model)
+            .or(endpoint_default_model);
     }
+
+    requested_model
+        .or(capability_model)
+        .or(endpoint_default_model)
+        .or(fallback_model)
 }
 
 #[cfg(test)]
@@ -310,6 +331,19 @@ mod tests {
         );
 
         assert_eq!(selected.as_deref(), Some("dall-e-3"));
+    }
+
+    #[test]
+    fn image_generation_does_not_reuse_chat_endpoint_default() {
+        let selected = select_capability_model(
+            "image_generation",
+            Some("gpt-5.5"),
+            None,
+            Some("gpt-5.5"),
+            Some("gpt-image-1"),
+        );
+
+        assert_eq!(selected.as_deref(), Some("gpt-image-1"));
     }
 
     #[test]

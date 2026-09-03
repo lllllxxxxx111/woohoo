@@ -141,7 +141,7 @@ async fn spent_for_window(
 ) -> Result<(f64, String, String)> {
     let (start, end) = window_bounds(window_type)?;
     let spent = sqlx::query_scalar::<_, f64>(
-        "SELECT COALESCE(SUM(amount), 0)
+        "SELECT CAST(COALESCE(SUM(amount), 0) AS REAL)
          FROM credit_transactions
          WHERE user_id = ?
            AND kind = ?

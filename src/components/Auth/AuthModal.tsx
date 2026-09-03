@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Form, Input, Button, Tabs, Space, Typography, Message } from '@arco-design/web-react';
 import { User, Mail, Lock, ShieldCheck, Rocket } from 'lucide-react';
 import { loginUser, registerUser } from '../../lib/serverApi';
@@ -24,6 +24,7 @@ export const AuthModal: React.FC = () => {
     })),
   );
   const [loading, setLoading] = useState(false);
+  const isSubmittingRef = useRef(false);
   const [activeTab, setActiveTab] = useState('login');
   const [form] = Form.useForm();
 
@@ -31,6 +32,9 @@ export const AuthModal: React.FC = () => {
 
   /** 处理登录/注册表单提交 */
   const handleSubmit = async (values: AuthFormValues) => {
+    // Arco Form 的提交事件可能在 loading 状态更新前被连续触发。
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
     setLoading(true);
     try {
       if (activeTab === 'login') {
@@ -49,6 +53,7 @@ export const AuthModal: React.FC = () => {
     } catch (error) {
       Message.error(error instanceof Error ? error.message : '操作失败');
     } finally {
+      isSubmittingRef.current = false;
       setLoading(false);
     }
   };

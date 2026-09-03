@@ -951,7 +951,7 @@ mod tests {
         record_usage_and_bill_safe(&pool, success).await;
 
         let spent = sqlx::query_scalar::<_, f64>(
-            "SELECT COALESCE(SUM(amount), 0)
+            "SELECT CAST(COALESCE(SUM(amount), 0) AS REAL)
              FROM credit_transactions
              WHERE user_id = 'test-user' AND kind = 'spent' AND ref_type = 'ai_usage'",
         )
@@ -961,7 +961,7 @@ mod tests {
         assert_eq!(spent, 1.5);
 
         let balance = sqlx::query_scalar::<_, f64>(
-            "SELECT balance FROM user_credits WHERE user_id = 'test-user'",
+            "SELECT CAST(balance AS REAL) FROM user_credits WHERE user_id = 'test-user'",
         )
         .fetch_one(&pool)
         .await
@@ -972,7 +972,7 @@ mod tests {
         record_usage_and_bill_safe(&pool, failed).await;
 
         let spent_after_failed = sqlx::query_scalar::<_, f64>(
-            "SELECT COALESCE(SUM(amount), 0)
+            "SELECT CAST(COALESCE(SUM(amount), 0) AS REAL)
              FROM credit_transactions
              WHERE user_id = 'test-user' AND kind = 'spent' AND ref_type = 'ai_usage'",
         )

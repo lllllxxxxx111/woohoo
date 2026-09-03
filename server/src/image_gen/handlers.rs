@@ -121,6 +121,9 @@ pub(crate) async fn enqueue_image_generation(
         }
     })?;
 
+    // API Key 在数据库中以 enc:v1 密文保存，后台任务只能接收解密后的明文。
+    // 在扣费和创建任务前完成解密，避免密钥配置错误时产生不可用的扣费记录。
+    let api_key = crate::ai::api_key_crypto::decrypt_endpoint_api_key(&resolved.endpoint)?;
     let resolved_model = resolved.model.clone();
     let cost = calculate_cost(&resolved_model, size, n);
 
@@ -202,7 +205,6 @@ pub(crate) async fn enqueue_image_generation(
     }
 
     let base_url = resolved.endpoint.base_url.clone();
-    let api_key = resolved.endpoint.api_key.clone();
     let task_model = resolved_model.clone();
     let task_state = state.clone();
     let task_user_id = user_id.to_string();

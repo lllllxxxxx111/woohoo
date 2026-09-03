@@ -128,7 +128,7 @@ type ServerMeResponse = {
 };
 
 type WorkspaceBootstrapResponse = {
-  projects: Project[];
+  projects: ServerBootstrapProject[];
   assets: Asset[];
   scripts: Script[];
   storyboards: Storyboard[];
@@ -138,14 +138,40 @@ type WorkspaceBootstrapResponse = {
 type ServerProject = {
   id: string;
   name: string;
-  created_at: string;
+  created_at?: string;
+  createdAt?: string | number;
+  status?: string;
+  phase?: string;
+  chatSessions?: ServerBootstrapConversation[];
+  chat_sessions?: ServerBootstrapConversation[];
+  agentRoster?: AgentContact[];
+  agent_roster?: AgentContact[];
+  workflow?: ProjectWorkflowSummary;
+  assetsCount?: number;
+  assets_count?: number;
+};
+
+type ServerBootstrapProject = ServerProject & {
+  chatSessions: ServerBootstrapConversation[];
+  agentRoster: AgentContact[];
+  workflow: ProjectWorkflowSummary;
+  assetsCount: number;
 };
 
 type ServerConversation = {
   id: string;
-  project_id: string;
+  project_id?: string;
+  projectId?: string;
   title: string;
-  updated_at: string;
+  updated_at?: string;
+  updatedAt?: string | number;
+  messages?: ServerBootstrapMessage[];
+};
+
+type ServerBootstrapConversation = ServerConversation & {
+  projectId: string;
+  updatedAt: string | number;
+  messages: ServerBootstrapMessage[];
 };
 
 type RewindConversationResponse = {
@@ -159,12 +185,22 @@ type ServerMessage = {
   id: string;
   role: string;
   content: string;
-  created_at: string;
+  created_at?: string;
+  timestamp?: string | number;
   updated_at?: string;
   agent_id?: string | null;
+  agentId?: string | null;
   model_used?: string | null;
+  model?: string | null;
   msg_type?: string;
-  meta?: string | null;
+  type?: string;
+  meta?: Message['meta'] | string | null;
+};
+
+type ServerBootstrapMessage = ServerMessage & {
+  timestamp: string | number;
+  type: string;
+  meta?: Message['meta'] | string | null;
 };
 
 type ServerAsset = {
@@ -1039,16 +1075,18 @@ function inferMessageStatus(
 }
 
 function mapProject(project: ServerProject): Project {
+  const chatSessions = project.chatSessions ?? project.chat_sessions ?? [];
+  const agentRoster = project.agentRoster ?? project.agent_roster ?? [];
   return {
     id: project.id,
     name: project.name,
-    status: 'draft',
-    phase: 'ideation',
-    chatSessions: [],
-    agentRoster: [],
-    workflow: emptyWorkflowSummary(),
-    assetsCount: 0,
-    createdAt: parseTimestamp(project.created_at),
+    status: project.status ?? 'draft',
+    phase: project.phase ?? 'ideation',
+    chatSessions: chatSessions.map(mapConversation),
+    agentRoster,
+    workflow: project.workflow ?? emptyWorkflowSummary(),
+    assetsCount: project.assetsCount ?? project.assets_count ?? 0,
+    createdAt: parseTimestamp(project.createdAt ?? project.created_at),
   };
 }
 
@@ -1079,27 +1117,32 @@ function emptyWorkflowSummary(): ProjectWorkflowSummary {
 }
 
 function mapConversation(conversation: ServerConversation): ChatSession {
+  const projectId = conversation.projectId ?? conversation.project_id;
+  const updatedAt = conversation.updatedAt ?? conversation.updated_at;
   return {
     id: conversation.id,
-    projectId: conversation.project_id,
+    projectId,
     title: conversation.title,
-    messages: [],
-    updatedAt: parseTimestamp(conversation.updated_at),
+    messages: (conversation.messages ?? []).map(mapMessage),
+    updatedAt: parseTimestamp(updatedAt),
   };
 }
 
 function mapMessage(message: ServerMessage): Message {
   const role = message.role === 'assistant' ? 'ai' : (message.role as Message['role']);
-  const meta = parseMeta(message.meta);
+  const meta =
+    typeof message.meta === 'string' || message.meta == null
+      ? parseMeta(message.meta)
+      : message.meta;
   return {
     id: message.id,
     role,
     content: message.content,
-    timestamp: parseTimestamp(message.created_at),
-    agentId: message.agent_id || undefined,
-    model: message.model_used || undefined,
+    timestamp: parseTimestamp(message.timestamp ?? message.created_at),
+    agentId: (message.agentId ?? message.agent_id) || undefined,
+    model: (message.model ?? message.model_used) || undefined,
     status: inferMessageStatus(role, message.content, meta),
-    type: (message.msg_type as Message['type']) || 'text',
+    type: ((message.type ?? message.msg_type) as Message['type']) || 'text',
     meta,
   };
 }
@@ -1504,9 +1547,13 @@ export async function bootstrapWorkspace(forceRefresh = false) {
     invalidateApiCache(CACHE_KEYS.workspaceBootstrap);
   }
 
-  return readCachedApi(CACHE_KEYS.workspaceBootstrap, CACHE_TTLS.workspaceBootstrap, () =>
-    requestApi<WorkspaceBootstrapResponse>('/api/workspace/bootstrap'),
-  );
+  return readCachedApi(CACHE_KEYS.workspaceBootstrap, CACHE_TTLS.workspaceBootstrap, async () => {
+    const response = await requestApi<WorkspaceBootstrapResponse>('/api/workspace/bootstrap');
+    return {
+      ...response,
+      projects: response.projects.map(mapProject),
+    };
+  });
 }
 
 export function applyWorkspaceBootstrap(workspace: WorkspaceBootstrapResponse) {

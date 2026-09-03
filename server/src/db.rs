@@ -54,13 +54,14 @@ pub async fn init_db(database_url: &str, ai_max_concurrent_tasks: usize) -> Sqli
      * 数据库连接池优化配置
      *
      * 改进项：
-     * - min_connections: 从1提升到2，减少冷启动延迟
+     * - min_connections: 保持单条预热连接，避免 SQLite 测试/单实例启动时
+     *   为每个池同时创建多条连接造成资源竞争
      * - acquire_timeout: 连接获取超时3秒，避免无限等待
      * - idle_timeout: 空闲连接10秒后回收，释放资源
      * - max_lifetime: 连接最大存活时间30分钟，防止长连接问题
      */
     let pool = SqlitePoolOptions::new()
-        .min_connections(2)
+        .min_connections(1)
         .max_connections(max_connections)
         .acquire_timeout(Duration::from_secs(3))
         .idle_timeout(Duration::from_secs(10))
@@ -69,7 +70,7 @@ pub async fn init_db(database_url: &str, ai_max_concurrent_tasks: usize) -> Sqli
         .await
         .expect("Failed to connect to SQLite");
 
-    tracing::info!(min_connections = 2, max_connections, "数据库连接池已初始化");
+    tracing::info!(min_connections = 1, max_connections, "数据库连接池已初始化");
 
     let applied_migrations = run_schema_migrations(&pool)
         .await
@@ -202,6 +203,7 @@ pub(crate) async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<Strin
             "033_ai_tasks_result",
             include_str!("../migrations/033_ai_tasks_result.sql"),
         ),
+        ("034_pipeline_events_source_assistant", ""),
     ] {
         if version == "020_asset_governance" {
             let tables = list_all_tables(pool)
@@ -246,6 +248,12 @@ pub(crate) async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<Strin
         }
         if version == "033_ai_tasks_result" {
             if apply_migration_033_ai_tasks_result(pool).await? {
+                applied_versions.push(version.to_string());
+            }
+            continue;
+        }
+        if version == "034_pipeline_events_source_assistant" {
+            if apply_migration_034_pipeline_events_source_assistant(pool).await? {
                 applied_versions.push(version.to_string());
             }
             continue;
@@ -446,7 +454,7 @@ CREATE TABLE IF NOT EXISTS pipeline_run_events (
     event_type      TEXT NOT NULL,
     payload_json    TEXT,
     source          TEXT NOT NULL DEFAULT 'system'
-                    CHECK (source IN ('system', 'user', 'scheduler', 'api')),
+                    CHECK (source IN ('system', 'user', 'scheduler', 'api', 'assistant')),
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_pipeline_run_events_run ON pipeline_run_events(run_id, created_at DESC);
@@ -770,6 +778,85 @@ async fn apply_migration_033_ai_tasks_result(pool: &SqlitePool) -> Result<bool, 
             .await?;
     }
 
+    record_schema_migration(pool, VERSION, "rust").await?;
+    Ok(true)
+}
+
+async fn apply_migration_034_pipeline_events_source_assistant(
+    pool: &SqlitePool,
+) -> Result<bool, sqlx::Error> {
+    const VERSION: &str = "034_pipeline_events_source_assistant";
+
+    if has_schema_migration(pool, VERSION).await? {
+        return Ok(false);
+    }
+
+    let tables: HashSet<String> = list_all_tables(pool).await?.into_iter().collect();
+    if !tables.contains("pipeline_run_events") {
+        tracing::info!(
+            version = VERSION,
+            "pipeline_run_events 不存在，跳过 source 约束放宽（025 fresh-create 分支将建宽松表）"
+        );
+        return Ok(false);
+    }
+
+    // 检测旧版 025 建的表是否仍带不含 assistant 的 source CHECK 白名单。
+    let create_sql: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'pipeline_run_events'",
+    )
+    .fetch_optional(pool)
+    .await?;
+    let Some(create_sql) = create_sql else {
+        tracing::warn!(
+            version = VERSION,
+            "无法读取 pipeline_run_events 建表语句，跳过"
+        );
+        return Ok(false);
+    };
+
+    let normalized_sql = create_sql.to_ascii_lowercase();
+    let source_definition = normalized_sql
+        .split_once("source")
+        .and_then(|(_, suffix)| suffix.split_once("created_at").map(|(source, _)| source));
+    let needs_rebuild = source_definition
+        .is_some_and(|source| source.contains("check") && !source.contains("'assistant'"));
+    if !needs_rebuild {
+        // 无 source CHECK，或白名单已包含 assistant，无需重建。
+        record_schema_migration(pool, VERSION, "rust").await?;
+        return Ok(false);
+    }
+
+    // 旧版 025 建的表仍带不含 assistant 的 source CHECK，需要重建表。
+    tracing::info!(
+        version = VERSION,
+        "pipeline_run_events 仍带旧 source CHECK 白名单（缺少 'assistant'），重建表放宽约束"
+    );
+    sqlx::raw_sql(
+        "BEGIN IMMEDIATE;
+         DROP TABLE IF EXISTS pipeline_run_events_new;
+         CREATE TABLE pipeline_run_events_new (
+             id              TEXT PRIMARY KEY NOT NULL,
+             run_id          TEXT NOT NULL REFERENCES pipeline_runs(id) ON DELETE CASCADE,
+             step_id         TEXT,
+             event_type      TEXT NOT NULL,
+             payload_json    TEXT,
+             source          TEXT NOT NULL DEFAULT 'system'
+                             CHECK (source IN ('system', 'user', 'scheduler', 'api', 'assistant')),
+             created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+         );
+         INSERT INTO pipeline_run_events_new (id, run_id, step_id, event_type, payload_json, source, created_at)
+         SELECT id, run_id, step_id, event_type, payload_json, source, created_at
+         FROM pipeline_run_events;
+         DROP TABLE pipeline_run_events;
+         ALTER TABLE pipeline_run_events_new RENAME TO pipeline_run_events;
+         CREATE INDEX IF NOT EXISTS idx_pipeline_run_events_run ON pipeline_run_events(run_id, created_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_pipeline_run_events_type ON pipeline_run_events(run_id, event_type, created_at DESC);
+         COMMIT;",
+    )
+    .execute(pool)
+    .await?;
+
+    ensure_idx_pipeline_runs_project_type_status(pool).await?;
     record_schema_migration(pool, VERSION, "rust").await?;
     Ok(true)
 }
@@ -2820,6 +2907,7 @@ mod tests {
                 "031_chunked_uploads".to_string(),
                 "032_upload_parts_cleanup".to_string(),
                 "033_ai_tasks_result".to_string(),
+                "034_pipeline_events_source_assistant".to_string(),
             ]
         );
 

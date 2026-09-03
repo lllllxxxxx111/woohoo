@@ -41,3 +41,19 @@ jobs:
       # 存量约有 125 个 clippy 警告，先以报告形式跑，清零后改为 -D warnings
       - run: cargo clippy --all-targets
       - run: cargo test
+
+  compose:
+    name: Compose (development / demo / production config)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate development compose
+        run: docker compose -f docker-compose.yml config --quiet
+      - name: Validate demo compose
+        run: docker compose -f docker-compose.demo.yml config --quiet
+      - name: Validate production compose
+        env:
+          JWT_SECRET: ci-validation-jwt-secret
+          WOOHOO_API_KEY_ENCRYPTION_KEY: ci-validation-encryption-key
+          CORS_ALLOWED_ORIGINS: https://ci.example.invalid
+        run: docker compose -f docker-compose.production.yml config --quiet
