@@ -228,6 +228,7 @@ pub struct AiUsageSeriesPoint {
     pub avg_latency_ms: i64,
     pub total_tokens: i64,
     pub output_items: i64,
+    pub prompt_tokens: i64,
     pub cached_prompt_tokens: i64,
     pub cached_token_records: i64,
 }
@@ -366,6 +367,7 @@ struct SeriesRow {
     avg_latency_ms: Option<f64>,
     total_tokens: i64,
     output_items: i64,
+    prompt_tokens: i64,
     cached_prompt_tokens: i64,
     cached_token_records: i64,
 }
@@ -893,6 +895,7 @@ async fn fetch_series(
              AVG(latency_ms) AS avg_latency_ms,
              COALESCE(SUM(total_tokens), 0) AS total_tokens,
              COALESCE(SUM(output_items), 0) AS output_items,
+             COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
              COALESCE(SUM(cached_prompt_tokens), 0) AS cached_prompt_tokens,
              COUNT(cached_prompt_tokens) AS cached_token_records
          FROM ai_usage_events u
@@ -947,6 +950,7 @@ async fn fetch_series(
             avg_latency_ms: row.avg_latency_ms.unwrap_or_default().round() as i64,
             total_tokens: row.total_tokens,
             output_items: row.output_items,
+            prompt_tokens: row.prompt_tokens,
             cached_prompt_tokens: row.cached_prompt_tokens,
             cached_token_records: row.cached_token_records,
         })
@@ -1405,5 +1409,135 @@ mod cache_metrics_tests {
     #[test]
     fn ratio_is_none_with_zero_prompt_tokens() {
         assert_eq!(cache_hit_ratio(0, 2, 0), None);
+    }
+}
+
+#[cfg(test)]
+mod series_aggregation_tests {
+    use super::{fetch_series, normalize_query, AiUsageQuery, NormalizedUsageQuery};
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use sqlx::SqlitePool;
+    use std::path::PathBuf;
+    use std::str::FromStr;
+
+    /// 与 001_init + 035 一致的 ai_usage_events 最小建表（无外键，聚合测试够用）。
+    const SERIES_SCHEMA: &str = "
+        CREATE TABLE ai_usage_events (
+            id TEXT PRIMARY KEY NOT NULL,
+            user_id TEXT NOT NULL,
+            project_id TEXT,
+            conversation_id TEXT,
+            agent_id TEXT,
+            endpoint_id TEXT,
+            api_key_fingerprint TEXT NOT NULL DEFAULT '',
+            provider TEXT NOT NULL,
+            model TEXT,
+            operation TEXT NOT NULL,
+            status TEXT NOT NULL,
+            resource_kind TEXT NOT NULL DEFAULT 'text',
+            output_items INTEGER NOT NULL DEFAULT 0,
+            latency_ms INTEGER NOT NULL DEFAULT 0,
+            prompt_tokens INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            token_source TEXT NOT NULL DEFAULT 'unavailable',
+            input_chars INTEGER NOT NULL DEFAULT 0,
+            output_chars INTEGER NOT NULL DEFAULT 0,
+            request_fingerprint TEXT NOT NULL DEFAULT '',
+            attempt_group_key TEXT NOT NULL DEFAULT '',
+            attempt_index INTEGER NOT NULL DEFAULT 1,
+            is_redo INTEGER NOT NULL DEFAULT 0,
+            trigger_source TEXT,
+            error_message TEXT,
+            cached_prompt_tokens INTEGER,
+            prompt_prefix_hit_ratio REAL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )";
+
+    async fn create_series_pool(prefix: &str) -> (SqlitePool, PathBuf) {
+        let db_path =
+            std::env::temp_dir().join(format!("{}-{}.sqlite", prefix, uuid::Uuid::new_v4()));
+        let database_url = format!("sqlite://{}", db_path.to_string_lossy().replace('\\', "/"));
+        let options = SqliteConnectOptions::from_str(&database_url)
+            .expect("invalid sqlite url")
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("connect test sqlite");
+        sqlx::query(SERIES_SCHEMA)
+            .execute(&pool)
+            .await
+            .expect("create ai_usage_events");
+        (pool, db_path)
+    }
+
+    async fn insert_event(
+        pool: &SqlitePool,
+        id: &str,
+        created_at: &str,
+        prompt_tokens: i64,
+        cached_prompt_tokens: Option<i64>,
+    ) {
+        sqlx::query(
+            "INSERT INTO ai_usage_events
+                (id, user_id, provider, operation, status, prompt_tokens, total_tokens, cached_prompt_tokens, created_at)
+             VALUES (?, 'user-1', 'openai', 'chat', 'success', ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(prompt_tokens)
+        .bind(prompt_tokens)
+        .bind(cached_prompt_tokens)
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .expect("insert event");
+    }
+
+    fn day_query() -> NormalizedUsageQuery {
+        normalize_query(AiUsageQuery {
+            days: Some(0),
+            bucket: Some("day".into()),
+            ..Default::default()
+        })
+        .expect("normalize query")
+    }
+
+    #[tokio::test]
+    async fn fetch_series_aggregates_prompt_tokens_per_bucket() {
+        let (pool, db_path) = create_series_pool("woohoo-series-test").await;
+
+        insert_event(&pool, "e1", "2026-09-01T10:00:00Z", 100, Some(80)).await;
+        insert_event(&pool, "e2", "2026-09-01T11:00:00Z", 100, None).await;
+        insert_event(&pool, "e3", "2026-09-02T10:00:00Z", 200, None).await;
+
+        let points = fetch_series(&pool, "user-1", &day_query())
+            .await
+            .expect("fetch series");
+
+        assert_eq!(points.len(), 2);
+
+        let day1 = points
+            .iter()
+            .find(|point| point.bucket_start.starts_with("2026-09-01"))
+            .expect("day1 bucket");
+        assert_eq!(
+            day1.prompt_tokens, 200,
+            "分母应包含未上报请求的 prompt tokens"
+        );
+        assert_eq!(day1.cached_prompt_tokens, 80);
+        assert_eq!(day1.cached_token_records, 1);
+
+        let day2 = points
+            .iter()
+            .find(|point| point.bucket_start.starts_with("2026-09-02"))
+            .expect("day2 bucket");
+        assert_eq!(day2.prompt_tokens, 200);
+        assert_eq!(day2.cached_prompt_tokens, 0);
+        assert_eq!(day2.cached_token_records, 0, "无上报记录 ≠ 命中率为 0");
+
+        pool.close().await;
+        std::fs::remove_file(&db_path).ok();
     }
 }

@@ -16,6 +16,7 @@ import {
   AiUsageBreakdownItem,
   AiUsageBucket,
   AiUsageRecord,
+  AiUsageSeriesPoint,
   AiUsageSummary,
   getUsageSummary,
   listImageCreditTransactions,
@@ -345,6 +346,116 @@ const ConversationCacheSection: React.FC<{ items: AiUsageBreakdownItem[] }> = ({
             {expanded ? '收起' : `查看更多共 ${items.length} 项`}
           </Button>
         )}
+      </div>
+    </div>
+  );
+};
+
+/** 趋势图最多渲染的桶数；超出时取最近 N 个并在标题注明，避免小时桶 × 长窗口撑爆 DOM */
+const TREND_MAX_BUCKETS = 60;
+
+/** 桶起始时间 → 短标签：day/week/month 显示 MM-DD，hour 显示 MM-DD HH时 */
+function formatBucketLabel(bucketStart: string, isHourBucket: boolean) {
+  if (bucketStart.length < 10) {
+    return bucketStart;
+  }
+  if (isHourBucket && bucketStart.length >= 13) {
+    return `${bucketStart.slice(5, 10)} ${bucketStart.slice(11, 13)}时`;
+  }
+  return bucketStart.slice(5, 10);
+}
+
+/** 会话缓存命中率趋势：纯 CSS 柱状图（无图表库依赖），无上报数据的桶显示灰色占位 */
+const CacheHitTrendChart: React.FC<{ series: AiUsageSeriesPoint[]; hourBucket: boolean }> = ({
+  series,
+  hourBucket,
+}) => {
+  const visible = series.slice(-TREND_MAX_BUCKETS);
+  const points = visible.map((point) => ({
+    bucketStart: point.bucketStart,
+    label: formatBucketLabel(point.bucketStart, hourBucket),
+    ratio:
+      point.cachedTokenRecords > 0 && point.promptTokens > 0
+        ? point.cachedPromptTokens / point.promptTokens
+        : null,
+    requests: point.requestCount,
+    cached: point.cachedPromptTokens,
+    prompt: point.promptTokens,
+    reported: point.cachedTokenRecords,
+  }));
+  // 标签过密时抽稀显示（首尾必留）
+  const labelStep = Math.max(1, Math.ceil(points.length / 10));
+
+  if (!points.length) {
+    return <Empty description="暂无趋势数据" style={{ padding: '20px 0' }} />;
+  }
+
+  return (
+    <div>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'flex-end',
+          gap: 2,
+          height: 160,
+          borderBottom: '1px solid var(--border-soft)',
+          padding: '0 2px',
+        }}
+      >
+        {points.map((point) => {
+          const heightPct = point.ratio === null ? 4 : Math.max(point.ratio * 100, 1.5);
+          const title =
+            point.ratio === null
+              ? `${point.label}：无供应商缓存上报（${point.requests} 次请求）`
+              : `${point.label}：命中率 ${(point.ratio * 100).toFixed(1)}%（命中 ${point.cached.toLocaleString()} / ${point.prompt.toLocaleString()} tokens，上报 ${point.reported} 次）`;
+          return (
+            <div
+              key={point.bucketStart}
+              title={title}
+              style={{
+                flex: 1,
+                height: '100%',
+                display: 'flex',
+                alignItems: 'flex-end',
+                minWidth: 3,
+              }}
+            >
+              <div
+                style={{
+                  width: '100%',
+                  height: `${heightPct}%`,
+                  background: point.ratio === null ? 'var(--border-soft)' : '#06b6d4',
+                  borderRadius: '2px 2px 0 0',
+                  opacity: point.ratio === null ? 0.8 : 0.85,
+                }}
+              />
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display: 'flex', gap: 2, padding: '4px 2px 0' }}>
+        {points.map((point, index) => (
+          <div
+            key={point.bucketStart}
+            style={{
+              flex: 1,
+              textAlign: 'center',
+              fontSize: 10,
+              color: 'var(--text-muted)',
+              minWidth: 0,
+              overflow: 'hidden',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {index % labelStep === 0 || index === points.length - 1 ? point.label : ''}
+          </div>
+        ))}
+      </div>
+      <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-muted)' }}>
+        {series.length > TREND_MAX_BUCKETS
+          ? `仅展示最近 ${TREND_MAX_BUCKETS} 个${hourBucket ? '小时' : '天'}桶（共 ${series.length} 个）；`
+          : ''}
+        灰色桶表示该时段无供应商缓存上报数据（≠ 命中率为 0）。
       </div>
     </div>
   );
@@ -814,6 +925,23 @@ export const UsageDashboard: React.FC = () => {
               ? `命中 ${currentSummary.totals.cachedPromptTokens.toLocaleString()} / ${currentSummary.totals.promptTokens.toLocaleString()} prompt tokens`
               : '供应商未上报缓存命中数据'
           }
+        />
+      </div>
+
+      <div className={styles.mainTableCard}>
+        <div className={styles.tableHeader}>
+          <h3>
+            缓存命中率趋势{' '}
+            <span
+              style={{ fontWeight: 400, fontSize: 13, color: 'var(--text-muted)', marginLeft: 12 }}
+            >
+              按当前时间桶聚合（供应商口径：缓存命中 / prompt tokens）
+            </span>
+          </h3>
+        </div>
+        <CacheHitTrendChart
+          series={currentSummary.series}
+          hourBucket={filters.bucket === 'hour'}
         />
       </div>
 

@@ -4,7 +4,8 @@
 
 | 版本 | 状态 | 说明 |
 | --- | --- | --- |
-| [v0.5](prd/conversation-cache-hit-rate/v0.5/conversation-cache-hit-rate-prd-v0.5.md) | 已实施 | 当前执行基线：流式 usage 透传——`stream_options.include_usage` + 流内 usage 解析 + 400/422 自动降级，流式记录升级为实际 usage（含缓存命中）。 |
+| [v0.6](prd/conversation-cache-hit-rate/v0.6/conversation-cache-hit-rate-prd-v0.6.md) | 已实施 | 当前执行基线：命中率趋势图——series 补 prompt_tokens 分母（含 DB 聚合测试）、Dashboard 纯 CSS 柱状趋势（60 桶上限、无数据桶灰色占位）。 |
+| [v0.5](prd/conversation-cache-hit-rate/v0.5/conversation-cache-hit-rate-prd-v0.5.md) | 已实施 | 流式 usage 透传——`stream_options.include_usage` + 流内 usage 解析 + 400/422 自动降级，流式记录升级为实际 usage（含缓存命中）。 |
 | [v0.4](prd/conversation-cache-hit-rate/v0.4/conversation-cache-hit-rate-prd-v0.4.md) | 已实施 | 命中率监控面板——总览命中率卡、会话命中率面板、breakdown 标注、流水前缀命中列（纯前端增量）。 |
 | [v0.3](prd/conversation-cache-hit-rate/v0.3/conversation-cache-hit-rate-prd-v0.3.md) | 已实施，待 staging 采集 | 命中率可观测——供应商缓存命中 tokens 解析入库、服务端前缀探针、Usage summary 聚合透出（数据采集层）。 |
 | [v0.2](prd/conversation-cache-hit-rate/v0.2/conversation-cache-hit-rate-prd-v0.2.md) | 已实施 | 截断参数与开关运行时可调（`AI_CHAT_HISTORY_*`），一键恢复旧行为。 |

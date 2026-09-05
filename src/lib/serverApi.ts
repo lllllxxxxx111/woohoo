@@ -402,6 +402,7 @@ export type AiUsageSeriesPoint = {
   avgLatencyMs: number;
   totalTokens: number;
   outputItems: number;
+  promptTokens: number;
   cachedPromptTokens: number;
   cachedTokenRecords: number;
 };
