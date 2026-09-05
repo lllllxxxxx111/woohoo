@@ -1,10 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Edit3, Film, Map, PauseCircle, Play, RotateCw, User, Video, XCircle } from 'lucide-react';
+import { Edit3, Film, Map as MapIcon, PauseCircle, Play, RotateCw, User, Video, XCircle } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 
 import { useAppStore } from '../../../../../store';
+import { useToast } from '../../../../../context/useToast';
+import type { Asset } from '../../../../../types';
 import {
   usePipelineRunController,
+  extractOutputAssetIds,
   type PipelineStepInput,
 } from './usePipelineRunController';
 import { getErrorCodePreset } from './pipelineStatusPresets';
@@ -53,6 +56,7 @@ export const VideoView: React.FC = () => {
   });
 
   const [prompts, setPrompts] = useState<Record<string, string>>({});
+  const { showToast } = useToast();
 
   const snapshot = useMemo(() => {
     if (!activeProject) {
@@ -80,6 +84,39 @@ export const VideoView: React.FC = () => {
   }, [snapshot]);
 
   /**
+   * 把已完成 video_gen 步骤的产出 asset 映射回镜头卡片：
+   * run 按 stepKey `video_shot_{shot.id}` 建步骤，输出 outputJson 携带 assetId，
+   * 从 activeAssets 解析出可播放的 url。没有对应产出时回退到占位图标。
+   */
+  const shotVideoAssets = useMemo(() => {
+    const map = new Map<string, Asset>();
+    if (!currentRun || !snapshot) {
+      return map;
+    }
+    const stepsByKey = new Map(currentRun.steps.map((step) => [step.stepKey, step]));
+    const outputsByStep = new Map<string, typeof currentRun.outputs>();
+    currentRun.outputs.forEach((output) => {
+      const list = outputsByStep.get(output.stepId) ?? [];
+      list.push(output);
+      outputsByStep.set(output.stepId, list);
+    });
+    snapshot.videoShots.forEach((shot) => {
+      const step = stepsByKey.get(`video_shot_${shot.id}`);
+      if (!step || step.status !== 'completed') {
+        return;
+      }
+      const assetIds = extractOutputAssetIds(outputsByStep.get(step.id) ?? []);
+      const asset = assetIds
+        .map((id) => activeAssets.find((item) => item.id === id))
+        .find((item): item is Asset => Boolean(item));
+      if (asset) {
+        map.set(shot.id, asset);
+      }
+    });
+    return map;
+  }, [currentRun, snapshot, activeAssets]);
+
+  /**
    * 提交视频生成任务到 pipeline video_gen step（req #1：真实 video_gen step）
    *
    * reviewPolicy 与后端 parse_video_gen_params 契约对齐：
@@ -93,6 +130,11 @@ export const VideoView: React.FC = () => {
    */
   const handleGen = (shot: DerivedVideoShot, prompt: string) => {
     if (!prompt.trim()) {
+      showToast({
+        type: 'warning',
+        title: '提示词为空',
+        message: '请先填写该镜头的生成提示词，再执行视频生成。',
+      });
       return;
     }
     const steps: PipelineStepInput[] = [
@@ -184,13 +226,22 @@ export const VideoView: React.FC = () => {
           snapshot.videoShots.map((shot) => (
             <div key={shot.id} className={styles.entityCard}>
               <div className={styles.videoPreview}>
-                <Video size={32} className={styles.placeholderIcon} />
+                {shotVideoAssets.get(shot.id) ? (
+                  <video
+                    className={styles.videoPlayer}
+                    src={shotVideoAssets.get(shot.id)!.url}
+                    controls
+                    preload="metadata"
+                  />
+                ) : (
+                  <Video size={32} className={styles.placeholderIcon} />
+                )}
                 <span className={styles.timeTag}>{shot.durationSeconds.toFixed(1)}s</span>
               </div>
               <div className={styles.videoDetails}>
                 <div className={styles.metadataTags}>
                   <span className={styles.tagUser}>
-                    <Map size={12} /> {shot.location}
+                    <MapIcon size={12} /> {shot.location}
                   </span>
                   {shot.characters.map((character) => (
                     <span key={`${shot.id}-${character}`} className={styles.tagUser}>

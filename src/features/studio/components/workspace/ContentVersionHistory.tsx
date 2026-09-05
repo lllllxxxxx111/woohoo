@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Modal } from '@arco-design/web-react';
 import { History, RefreshCw, X } from 'lucide-react';
 import {
   getContentVersion,
@@ -277,21 +278,8 @@ export const ContentVersionHistory: React.FC<ContentVersionHistoryProps> = ({
     [projectId, contentType, currentVersion, versions, showToast],
   );
 
-  const handleRestore = useCallback(
+  const performRestore = useCallback(
     async (version: number) => {
-      // 恢复会用历史内容替换编辑器内容，未保存的草稿若不处理会直接丢失。
-      if (hasUnsavedChanges) {
-        let draftCopied = false;
-        if (shouldPromptCopyDraft(draftText)) {
-          draftCopied = await copyTextToClipboard(draftText);
-        }
-        const message = draftCopied
-          ? `当前有未保存的修改，恢复 v${version} 会用历史内容替换它们（草稿已复制到剪贴板）。确定继续吗？`
-          : `当前有未保存的修改，恢复 v${version} 会用历史内容替换它们且无法撤销。建议先手动复制草稿。确定继续吗？`;
-        if (!window.confirm(message)) {
-          return;
-        }
-      }
       setBusy(true);
       try {
         // 携带已知当前版本做乐观并发校验：他人（或另一窗口）已保存更新时
@@ -336,12 +324,35 @@ export const ContentVersionHistory: React.FC<ContentVersionHistoryProps> = ({
       contentType,
       currentVersion,
       versions,
-      hasUnsavedChanges,
-      draftText,
       showToast,
       loadVersions,
       onRestored,
     ],
+  );
+
+  const handleRestore = useCallback(
+    async (version: number) => {
+      // 恢复会用历史内容替换编辑器内容，未保存的草稿若不处理会直接丢失。
+      if (!hasUnsavedChanges) {
+        await performRestore(version);
+        return;
+      }
+      let draftCopied = false;
+      if (shouldPromptCopyDraft(draftText)) {
+        draftCopied = await copyTextToClipboard(draftText);
+      }
+      const message = draftCopied
+        ? `当前有未保存的修改，恢复 v${version} 会用历史内容替换它们（草稿已复制到剪贴板）。确定继续吗？`
+        : `当前有未保存的修改，恢复 v${version} 会用历史内容替换它们且无法撤销。建议先手动复制草稿。确定继续吗？`;
+      Modal.confirm({
+        title: '恢复历史版本',
+        content: message,
+        okText: '丢弃修改并恢复',
+        cancelText: '取消',
+        onOk: () => performRestore(version),
+      });
+    },
+    [hasUnsavedChanges, draftText, performRestore],
   );
 
   const renderDiff = () => {

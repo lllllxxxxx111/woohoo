@@ -1,5 +1,6 @@
 /** useMessageActions - 消息操作逻辑 Hook，管理消息编辑、撤回、删除、复制、发送、项目创建等操作 */
 import { useDeferredValue, useEffect, useState, useMemo, useCallback } from 'react';
+import { Modal } from '@arco-design/web-react';
 import { useAppStore } from '../../../../../store';
 import { useToast } from '../../../../../context/useToast';
 import { useAppActions } from '../../../../../context/useAppActions';
@@ -225,24 +226,30 @@ export function useMessageActions(params: UseMessageActionsParams): UseMessageAc
   /** 处理撤回用户消息，删除该条及后续消息并回滚资源状态 */
   const handleRevokeMessage = useCallback(async (message: Message) => {
     if (message.role !== 'user' || !activeProject || !activeChat) return;
-    const confirmed = window.confirm('撤回后将删除该条及后续消息，并回滚对应资源状态，确认继续吗？');
-    if (!confirmed) return;
-    setRewindingMessageId(message.id);
-    try {
-      await rewindChatToMessage(activeProject.id, activeChat.id, message.id, true);
-      const messageResourceRefs = extractMessageResourceRefs(message);
-      const messageAttachments = extractMessageAttachments(message);
-      setEditingMessage(null);
-      setInputValue(message.content || '');
-      setDraftResourceRefs(messageResourceRefs);
-      setPendingAttachments(messageAttachments);
-      setIsRewindSend(true);
-      showToast({ type: 'success', title: '已撤回', message: '会话内容已回退，该条消息已回填到输入框' });
-    } catch (error) {
-      showToast({ type: 'error', title: '撤回失败', message: error instanceof Error ? error.message : '无法撤回该消息' });
-    } finally {
-      setRewindingMessageId(null);
-    }
+    Modal.confirm({
+      title: '撤回消息',
+      content: '撤回后将删除该条及后续消息，并回滚对应资源状态，确认继续吗？',
+      okText: '撤回',
+      cancelText: '取消',
+      onOk: async () => {
+        setRewindingMessageId(message.id);
+        try {
+          await rewindChatToMessage(activeProject.id, activeChat.id, message.id, true);
+          const messageResourceRefs = extractMessageResourceRefs(message);
+          const messageAttachments = extractMessageAttachments(message);
+          setEditingMessage(null);
+          setInputValue(message.content || '');
+          setDraftResourceRefs(messageResourceRefs);
+          setPendingAttachments(messageAttachments);
+          setIsRewindSend(true);
+          showToast({ type: 'success', title: '已撤回', message: '会话内容已回退，该条消息已回填到输入框' });
+        } catch (error) {
+          showToast({ type: 'error', title: '撤回失败', message: error instanceof Error ? error.message : '无法撤回该消息' });
+        } finally {
+          setRewindingMessageId(null);
+        }
+      },
+    });
   }, [activeProject, activeChat, rewindChatToMessage, showToast]);
 
   /** 处理删除指定消息 */

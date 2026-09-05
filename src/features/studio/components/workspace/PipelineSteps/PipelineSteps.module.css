@@ -1303,6 +1303,14 @@
   color: var(--text-muted);
 }
 
+/* 已完成 video_gen 步骤的成片预览：铺满 16:9 预览区 */
+.videoPlayer {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background-color: rgba(0, 0, 0, 0.85);
+}
+
 .timeTag {
   position: absolute;
   top: 8px;

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { Modal } from '@arco-design/web-react';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -149,48 +150,58 @@ export const ScriptEditor: React.FC<ScriptEditorProps> = ({ initialContent = '',
   };
 
   const handleClose = useCallback(() => {
-    if (
-      hasUnsavedChanges &&
-      !window.confirm('当前剧本还有未保存的修改，返回预览会丢弃这些修改。确定继续吗？')
-    ) {
+    if (!hasUnsavedChanges) {
+      onClose?.();
       return;
     }
-    onClose?.();
+    Modal.confirm({
+      title: '放弃未保存的修改？',
+      content: '当前剧本还有未保存的修改，返回预览会丢弃这些修改。',
+      okText: '丢弃并返回',
+      cancelText: '继续编辑',
+      onOk: () => onClose?.(),
+    });
   }, [hasUnsavedChanges, onClose]);
 
   /** 冲突时：加载服务器最新版（替换当前草稿前先确认并自动复制草稿兜底） */
   const handleLoadServerLatest = useCallback(async () => {
-    if (!activeState.projectId) {
+    const projectId = activeState.projectId;
+    if (!projectId) {
       return;
     }
     const draftCopied = shouldPromptCopyDraft(content) ? await copyTextToClipboard(content) : false;
     const message = draftCopied
       ? '将丢弃当前草稿并加载服务器最新版（草稿已复制到剪贴板）。确定继续吗？'
       : '将丢弃当前草稿并加载服务器最新版，该操作无法撤销。确定继续吗？';
-    if (!window.confirm(message)) {
-      return;
-    }
-    try {
-      const latest = await getServerScript(activeState.projectId);
-      // 草稿保护：仅当成功拿到服务器内容才替换草稿，失败时绝不丢弃草稿
-      const next = applyConflictResolution(
-        { draft: content, conflict },
-        'load_server_latest',
-        latest ? latest.content : null,
-      );
-      setContent(next.draft);
-      setConflict(next.conflict);
-      if (latest && next.conflict === null) {
-        setBaseVersion(latest.version ?? 0);
-      }
-      void refreshWorkspace('script conflict resolution');
-    } catch (error) {
-      showToast({
-        type: 'error',
-        title: '加载失败',
-        message: error instanceof Error ? error.message : '无法加载服务器最新版本',
-      });
-    }
+    Modal.confirm({
+      title: '加载服务器最新版',
+      content: message,
+      okText: '丢弃草稿并加载',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const latest = await getServerScript(projectId);
+          // 草稿保护：仅当成功拿到服务器内容才替换草稿，失败时绝不丢弃草稿
+          const next = applyConflictResolution(
+            { draft: content, conflict },
+            'load_server_latest',
+            latest ? latest.content : null,
+          );
+          setContent(next.draft);
+          setConflict(next.conflict);
+          if (latest && next.conflict === null) {
+            setBaseVersion(latest.version ?? 0);
+          }
+          void refreshWorkspace('script conflict resolution');
+        } catch (error) {
+          showToast({
+            type: 'error',
+            title: '加载失败',
+            message: error instanceof Error ? error.message : '无法加载服务器最新版本',
+          });
+        }
+      },
+    });
   }, [activeState.projectId, content, conflict, refreshWorkspace, showToast]);
 
   /** 冲突时：复制当前草稿到剪贴板 */

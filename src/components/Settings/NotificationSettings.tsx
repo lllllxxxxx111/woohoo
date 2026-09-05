@@ -5,6 +5,7 @@ import {
   Card,
   Divider,
   Input,
+  Modal,
   Select,
   Space,
   Switch,
@@ -276,33 +277,36 @@ export const NotificationSettings: React.FC<Props> = ({ language, onLanguageChan
     }
   };
 
-  const handleDelete = async (channel: OpsNotificationChannel) => {
-    const confirmed = window.confirm(`确认删除通知通道「${channel.name}」？`);
-    if (!confirmed) {
-      return;
-    }
-
-    setDeleting(channel.id);
-    try {
-      await deleteNotificationChannel(channel.id);
-      showToast({
-        type: 'success',
-        title: '通知通道已删除',
-        message: channel.name,
-      });
-      if (selectedId === channel.id) {
-        syncForm(null);
-      }
-      await refresh(true);
-    } catch (error) {
-      showToast({
-        type: 'error',
-        title: '删除失败',
-        message: error instanceof Error ? error.message : '通知通道删除失败',
-      });
-    } finally {
-      setDeleting(null);
-    }
+  const handleDelete = (channel: OpsNotificationChannel) => {
+    Modal.confirm({
+      title: '删除通知通道',
+      content: `确认删除通知通道「${channel.name}」？删除后不可恢复。`,
+      okText: '删除',
+      cancelText: '取消',
+      onOk: async () => {
+        setDeleting(channel.id);
+        try {
+          await deleteNotificationChannel(channel.id);
+          showToast({
+            type: 'success',
+            title: '通知通道已删除',
+            message: channel.name,
+          });
+          if (selectedId === channel.id) {
+            syncForm(null);
+          }
+          await refresh(true);
+        } catch (error) {
+          showToast({
+            type: 'error',
+            title: '删除失败',
+            message: error instanceof Error ? error.message : '通知通道删除失败',
+          });
+        } finally {
+          setDeleting(null);
+        }
+      },
+    });
   };
 
   const handleTest = async (channel?: OpsNotificationChannel | null) => {

@@ -710,16 +710,19 @@ export const ImageGenerationPanel: React.FC = () => {
     void loadGenerationHistory();
   }, [loadGenerationHistory]);
 
+  /** 轮询依赖收敛为「进行中的 generationId 串」：turn 的任何合并（包括乐观更新）
+   *  都不会重建 interval，仅当有任务进入/离开 generating 集合时才重订轮询 */
+  const runningGenerationIdsKey = turns
+    .filter((turn) => turn.status === 'generating' && turn.generationId)
+    .map((turn) => turn.generationId as string)
+    .sort()
+    .join(',');
+
   useEffect(() => {
-    const runningGenerationStatusById = new Map(
-      turns
-        .filter((turn) => turn.status === 'generating' && turn.generationId)
-        .map((turn) => [turn.generationId as string, turn.status] as const),
-    );
-    const runningGenerationIds = Array.from(runningGenerationStatusById.keys());
-    if (runningGenerationIds.length === 0) {
+    if (runningGenerationIdsKey === '') {
       return undefined;
     }
+    const runningGenerationIds = runningGenerationIdsKey.split(',');
 
     let cancelled = false;
     const poll = async () => {
@@ -731,12 +734,8 @@ export const ImageGenerationPanel: React.FC = () => {
             if (cancelled) {
               return;
             }
-            const previousStatus = runningGenerationStatusById.get(generationId);
             mergeGenerationTurn(generation);
-            if (
-              previousStatus === 'generating' &&
-              (generation.status === 'completed' || generation.status === 'failed')
-            ) {
+            if (generation.status === 'completed' || generation.status === 'failed') {
               shouldRefreshWorkspace = true;
             }
           } catch (error) {
@@ -760,7 +759,7 @@ export const ImageGenerationPanel: React.FC = () => {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [mergeGenerationTurn, refreshWorkspace, turns]);
+  }, [runningGenerationIdsKey, mergeGenerationTurn, refreshWorkspace]);
 
   const buildCurrentParams = (): ImageGenerationTurnParams => ({
     endpointId: selectedEndpoint?.id ?? endpointId,
