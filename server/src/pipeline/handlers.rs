@@ -1130,12 +1130,120 @@ pub async fn list_step_reviews(
     Ok(Json(reviews))
 }
 
+/**
+ * 列出项目内所有 video_gen 步骤已产出的镜头视频资产
+ *
+ * GET /api/pipelines/projects/{project_id}/video-assets
+ *
+ * 用途：剪辑时间线（EditView）与视频镜头页（VideoView）需要把镜头卡片
+ * 映射回已生成的视频资产。视频产物分布在多个 run（每个镜头一次启动），
+ * 逐 run 拉详情代价高，这里用一条 SQL 按 stepKey 聚合，重复生成取最新。
+ *
+ * 关联语义：video_gen 步骤完成时 output_json 携带 assetId（036 起）或
+ * asset.id（历史兜底）；两者都缺失的行（老数据未落盘）无法关联，不返回。
+ * 鉴权与 list_pipeline_runs 一致：run.user_id = 当前用户。
+ */
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoShotAssetView {
+    pub step_key: String,
+    pub run_id: String,
+    pub completed_at: String,
+    pub asset: crate::asset::model::Asset,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct VideoShotAssetRow {
+    step_key: String,
+    run_id: String,
+    completed_at: String,
+    asset_id: String,
+    asset_project_id: String,
+    asset_name: String,
+    asset_asset_type: String,
+    asset_url: String,
+    asset_metadata: Option<String>,
+    asset_created_at: String,
+    asset_updated_at: String,
+}
+
+pub async fn list_project_video_shot_assets(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Path(project_id): Path<String>,
+) -> AppResult<Json<Vec<VideoShotAssetView>>> {
+    Ok(Json(
+        query_project_video_shot_assets(&state.db, &user_id.0, &project_id).await?,
+    ))
+}
+
+/// 供 handler 与 DB 级测试共用的查询 + 去重逻辑
+async fn query_project_video_shot_assets(
+    db: &SqlitePool,
+    user_id: &str,
+    project_id: &str,
+) -> AppResult<Vec<VideoShotAssetView>> {
+    let rows = sqlx::query_as::<_, VideoShotAssetRow>(
+        "SELECT s.step_key AS step_key,
+                s.run_id AS run_id,
+                o.created_at AS completed_at,
+                a.id AS asset_id,
+                a.project_id AS asset_project_id,
+                a.name AS asset_name,
+                a.asset_type AS asset_asset_type,
+                a.url AS asset_url,
+                a.metadata AS asset_metadata,
+                a.created_at AS asset_created_at,
+                a.updated_at AS asset_updated_at
+         FROM pipeline_run_steps s
+         JOIN pipeline_runs r ON r.id = s.run_id
+         JOIN pipeline_step_outputs o ON o.step_id = s.id
+         JOIN assets a ON a.id = COALESCE(
+                 json_extract(o.output_json, '$.assetId'),
+                 json_extract(o.output_json, '$.asset.id'))
+         WHERE r.user_id = ?
+           AND r.project_id = ?
+           AND s.status = 'completed'
+           AND s.step_key LIKE 'video_shot_%'
+         ORDER BY o.created_at DESC, o.rowid DESC
+         LIMIT 500",
+    )
+    .bind(user_id)
+    .bind(project_id)
+    .fetch_all(db)
+    .await?;
+
+    // 按 stepKey 去重：SQL 已按产出时间倒序，首个即该镜头的最新产物
+    let mut seen = std::collections::HashSet::new();
+    let items = rows
+        .into_iter()
+        .filter(|row| seen.insert(row.step_key.clone()))
+        .map(|row| VideoShotAssetView {
+            step_key: row.step_key,
+            run_id: row.run_id,
+            completed_at: row.completed_at,
+            asset: crate::asset::model::Asset {
+                id: row.asset_id,
+                project_id: row.asset_project_id,
+                name: row.asset_name,
+                asset_type: row.asset_asset_type,
+                url: row.asset_url,
+                metadata: row.asset_metadata,
+                created_at: row.asset_created_at,
+                updated_at: row.asset_updated_at,
+            },
+        })
+        .collect::<Vec<_>>();
+
+    Ok(items)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         cancel_pipeline_run_state, create_pipeline_run_for_user, get_run_by_id,
-        pause_pipeline_run_state, resume_pipeline_run_state, CreatePipelineRunReq,
-        CreatePipelineStepReq, PipelineRunFilter,
+        pause_pipeline_run_state, query_project_video_shot_assets, resume_pipeline_run_state,
+        CreatePipelineRunReq, CreatePipelineStepReq, PipelineRunFilter,
     };
     use crate::db::init_db;
     use crate::error::AppError;
@@ -1730,6 +1838,155 @@ mod tests {
             Some("video_gen"),
             "video_gen step should persist step_type='video_gen'"
         );
+
+        pool.close().await;
+        std::fs::remove_file(db_path).ok();
+    }
+
+    /// 为 video-assets 查询造数据：一个已完成 video_shot 步骤 + 带资产 ID 的 output + assets 行
+    async fn insert_video_shot_asset(
+        pool: &SqlitePool,
+        project_id: &str,
+        step_key: &str,
+        asset_id: &str,
+        output_created_at: &str,
+        asset_id_field: &str,
+    ) {
+        let run_id = format!("run-{}", Uuid::new_v4());
+        let conversation_id = format!("conv-{}", Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO conversations (id, project_id, user_id, title) VALUES (?, ?, (SELECT user_id FROM projects WHERE id = ?), 'c')",
+        )
+        .bind(&conversation_id)
+        .bind(project_id)
+        .bind(project_id)
+        .execute(pool)
+        .await
+        .expect("insert conversation");
+
+        let user_id: String = sqlx::query_scalar("SELECT user_id FROM projects WHERE id = ?")
+            .bind(project_id)
+            .fetch_one(pool)
+            .await
+            .expect("load project owner");
+        sqlx::query(
+            "INSERT INTO pipeline_runs (
+                id, user_id, project_id, conversation_id,
+                pipeline_type, trigger_source, status,
+                idempotency_key, total_steps, completed_steps, failed_steps
+            ) VALUES (?, ?, ?, ?, 'custom', 'video', 'completed', ?, 1, 1, 0)",
+        )
+        .bind(&run_id)
+        .bind(&user_id)
+        .bind(project_id)
+        .bind(&conversation_id)
+        .bind(format!("idem-{run_id}"))
+        .execute(pool)
+        .await
+        .expect("insert run");
+
+        let step_id = format!("step-{}", Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO pipeline_run_steps (
+                id, run_id, step_key, step_name, step_order, step_type, status, attempt_count
+            ) VALUES (?, ?, ?, '镜头', 1, 'video_gen', 'completed', 1)",
+        )
+        .bind(&step_id)
+        .bind(&run_id)
+        .bind(step_key)
+        .execute(pool)
+        .await
+        .expect("insert step");
+
+        let output_json = if asset_id_field == "assetId" {
+            serde_json::json!({"format": "video", "assetId": asset_id})
+        } else {
+            serde_json::json!({"format": "video", "asset": {"id": asset_id}})
+        };
+        sqlx::query(
+            "INSERT INTO pipeline_step_outputs (id, run_id, step_id, output_type, output_json, created_at)
+             VALUES (?, ?, ?, 'video', ?, ?)",
+        )
+        .bind(format!("out-{}", Uuid::new_v4()))
+        .bind(&run_id)
+        .bind(&step_id)
+        .bind(output_json.to_string())
+        .bind(output_created_at)
+        .execute(pool)
+        .await
+        .expect("insert output");
+
+        sqlx::query(
+            "INSERT INTO assets (id, project_id, name, asset_type, url) VALUES (?, ?, '镜头视频', 'video', '/uploads/x.mp4')",
+        )
+        .bind(asset_id)
+        .bind(project_id)
+        .execute(pool)
+        .await
+        .expect("insert asset");
+    }
+
+    #[tokio::test]
+    async fn video_shot_assets_dedupes_by_step_key_and_prefers_latest() {
+        let (pool, user_id, run_id, db_path) = setup_test_run("completed").await;
+        let project_id: String =
+            sqlx::query_scalar("SELECT project_id FROM pipeline_runs WHERE id = ?")
+                .bind(&run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load project");
+
+        // 同一镜头生成两次：取 created_at 更晚的一条（asset-new）
+        insert_video_shot_asset(
+            &pool,
+            &project_id,
+            "video_shot_shot-1",
+            "asset-old",
+            "2026-09-05T10:00:00Z",
+            "assetId",
+        )
+        .await;
+        insert_video_shot_asset(
+            &pool,
+            &project_id,
+            "video_shot_shot-1",
+            "asset-new",
+            "2026-09-05T11:00:00Z",
+            "assetId",
+        )
+        .await;
+        // 另一镜头走 asset.id 嵌套写法（历史兜底）
+        insert_video_shot_asset(
+            &pool,
+            &project_id,
+            "video_shot_shot-2",
+            "asset-nested",
+            "2026-09-05T10:30:00Z",
+            "nested",
+        )
+        .await;
+
+        let items = query_project_video_shot_assets(&pool, &user_id, &project_id)
+            .await
+            .expect("query video shot assets");
+
+        assert_eq!(items.len(), 2, "按 stepKey 去重后应只剩两镜头");
+        let shot1 = items
+            .iter()
+            .find(|item| item.step_key == "video_shot_shot-1")
+            .expect("shot-1 entry");
+        assert_eq!(shot1.asset.id, "asset-new", "应取最新一次产物");
+        let shot2 = items
+            .iter()
+            .find(|item| item.step_key == "video_shot_shot-2")
+            .expect("shot-2 entry");
+        assert_eq!(shot2.asset.id, "asset-nested", "asset.id 嵌套写法应可关联");
+
+        // 他人查询不到
+        let other = query_project_video_shot_assets(&pool, "user-other", &project_id)
+            .await
+            .expect("query with other user");
+        assert!(other.is_empty(), "非归属用户应查不到");
 
         pool.close().await;
         std::fs::remove_file(db_path).ok();

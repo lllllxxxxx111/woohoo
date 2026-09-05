@@ -2187,8 +2187,8 @@ async fn handle_video_gen_status(
     step: &PipelineStepRow,
     job: &PipelineStepExternalJobRow,
 ) -> Result<bool> {
-    let row = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
-        "SELECT status, result_url, error_message
+    let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+        "SELECT status, result_url, error_message, result_asset_id
          FROM video_generations
          WHERE id = ? AND user_id = ?",
     )
@@ -2197,7 +2197,7 @@ async fn handle_video_gen_status(
     .fetch_optional(&state.db)
     .await?;
 
-    let Some((status, result_url, error_message)) = row else {
+    let Some((status, result_url, error_message, result_asset_id)) = row else {
         mark_step_failed(
             &state.db,
             &run.id,
@@ -2214,7 +2214,15 @@ async fn handle_video_gen_status(
             Ok(false)
         }
         "completed" => {
-            handle_video_gen_completion(state, run, step, &job.job_id, result_url.as_deref()).await
+            handle_video_gen_completion(
+                state,
+                run,
+                step,
+                &job.job_id,
+                result_url.as_deref(),
+                result_asset_id.as_deref(),
+            )
+            .await
         }
         "failed" => {
             let error_msg = error_message.unwrap_or_else(|| "视频生成失败".to_string());
@@ -2227,6 +2235,10 @@ async fn handle_video_gen_status(
 
 /**
  * 处理 video generation 完成：写 step output → mark_step_completed
+ *
+ * result_asset_id 来自 video_generations（036）：产物落盘后的本地资产 ID，
+ * 写入 outputJson 的 assetId 供前端按 stepKey 解析镜头成片素材；
+ * 资产化失败（历史记录 / 无项目上下文 / 落盘异常）时为 None，前端退回 URL。
  */
 async fn handle_video_gen_completion(
     state: &AppState,
@@ -2234,14 +2246,19 @@ async fn handle_video_gen_completion(
     step: &PipelineStepRow,
     generation_id: &str,
     result_url: Option<&str>,
+    result_asset_id: Option<&str>,
 ) -> Result<bool> {
-    let output_json = serde_json::to_string(&json!({
+    let mut output_payload = json!({
         "format": "video",
         "generationId": generation_id,
         "url": result_url,
         "stepKey": step.step_key,
         "stepName": step.step_name,
-    }))?;
+    });
+    if let Some(asset_id) = result_asset_id.map(str::trim).filter(|v| !v.is_empty()) {
+        output_payload["assetId"] = json!(asset_id);
+    }
+    let output_json = serde_json::to_string(&output_payload)?;
 
     let output_id = insert_step_output(
         &state.db,

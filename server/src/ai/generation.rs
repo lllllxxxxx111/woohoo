@@ -71,7 +71,7 @@ pub async fn save_ai_generated_asset(
     });
 
     sqlx::query(
-        "INSERT INTO assets (id, project_id, name, type, url, metadata, created_at, updated_at)
+        "INSERT INTO assets (id, project_id, name, asset_type, url, metadata, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&asset_id)

@@ -4,15 +4,17 @@ import { useShallow } from 'zustand/react/shallow';
 
 import { useAppStore } from '../../../../../store';
 import { useToast } from '../../../../../context/useToast';
+import { listProjectVideoShotAssets } from '../../../../../lib/serverApi';
 import type { Asset } from '../../../../../types';
 import {
   usePipelineRunController,
-  extractOutputAssetIds,
   type PipelineStepInput,
 } from './usePipelineRunController';
 import { getErrorCodePreset } from './pipelineStatusPresets';
 import styles from './PipelineSteps.module.css';
 import { createProjectSnapshot, type DerivedVideoShot } from '../workspaceMvp';
+
+const VIDEO_STEP_KEY_PREFIX = 'video_shot_';
 
 /**
  * 重写镜头提示词，加入角色与素材参考
@@ -84,37 +86,37 @@ export const VideoView: React.FC = () => {
   }, [snapshot]);
 
   /**
-   * 把已完成 video_gen 步骤的产出 asset 映射回镜头卡片：
-   * run 按 stepKey `video_shot_{shot.id}` 建步骤，输出 outputJson 携带 assetId，
-   * 从 activeAssets 解析出可播放的 url。没有对应产出时回退到占位图标。
+   * 把已完成 video_gen 步骤的产出 asset 映射回镜头卡片。
+   * 走 /video-assets 端点跨 run 聚合（每个镜头一次启动、各自一个 run，
+   * 仅看 currentRun 会漏掉历史镜头），重复生成取最新。
    */
-  const shotVideoAssets = useMemo(() => {
-    const map = new Map<string, Asset>();
-    if (!currentRun || !snapshot) {
-      return map;
+  const [shotVideoAssets, setShotVideoAssets] = useState<Map<string, Asset>>(new Map());
+  useEffect(() => {
+    if (!activeProject) {
+      setShotVideoAssets(new Map());
+      return undefined;
     }
-    const stepsByKey = new Map(currentRun.steps.map((step) => [step.stepKey, step]));
-    const outputsByStep = new Map<string, typeof currentRun.outputs>();
-    currentRun.outputs.forEach((output) => {
-      const list = outputsByStep.get(output.stepId) ?? [];
-      list.push(output);
-      outputsByStep.set(output.stepId, list);
-    });
-    snapshot.videoShots.forEach((shot) => {
-      const step = stepsByKey.get(`video_shot_${shot.id}`);
-      if (!step || step.status !== 'completed') {
-        return;
-      }
-      const assetIds = extractOutputAssetIds(outputsByStep.get(step.id) ?? []);
-      const asset = assetIds
-        .map((id) => activeAssets.find((item) => item.id === id))
-        .find((item): item is Asset => Boolean(item));
-      if (asset) {
-        map.set(shot.id, asset);
-      }
-    });
-    return map;
-  }, [currentRun, snapshot, activeAssets]);
+    let cancelled = false;
+    listProjectVideoShotAssets(activeProject.id)
+      .then((items) => {
+        if (cancelled) {
+          return;
+        }
+        const next = new Map<string, Asset>();
+        items.forEach((item) => {
+          if (item.stepKey.startsWith(VIDEO_STEP_KEY_PREFIX)) {
+            next.set(item.stepKey.slice(VIDEO_STEP_KEY_PREFIX.length), item.asset);
+          }
+        });
+        setShotVideoAssets(next);
+      })
+      .catch(() => {
+        // 素材聚合失败不阻塞页面，卡片回退占位图标
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProject, currentRun?.run.status]);
 
   /**
    * 提交视频生成任务到 pipeline video_gen step（req #1：真实 video_gen step）

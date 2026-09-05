@@ -208,6 +208,14 @@ pub(crate) async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<Strin
             "035_ai_usage_cache_metrics",
             include_str!("../migrations/035_ai_usage_cache_metrics.sql"),
         ),
+        (
+            "036_video_result_asset",
+            include_str!("../migrations/036_video_result_asset.sql"),
+        ),
+        (
+            "037_pipeline_trigger_source_relax",
+            include_str!("../migrations/037_pipeline_trigger_source_relax.sql"),
+        ),
     ] {
         if version == "020_asset_governance" {
             let tables = list_all_tables(pool)
@@ -237,6 +245,25 @@ pub(crate) async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<Strin
             // 否则缺表旧库 / 部分执行后重启会以 "no such table" 或 "duplicate column"
             // 永久失败。
             if apply_migration_026_pipeline_prompt_optimization_versions(pool).await? {
+                applied_versions.push(version.to_string());
+            }
+            continue;
+        }
+        if version == "036_video_result_asset" {
+            // 036 对 video_generations 做 ALTER ADD COLUMN。旧库 / 测试夹具可能
+            // 尚未建该表（017 未跑），直接 ALTER 会以 "no such table" 失败；
+            // 已有列（部分执行过的库）会以 "duplicate column" 失败。
+            // 与 026 相同，走存在性守卫分支。
+            if apply_migration_036_video_result_asset(pool).await? {
+                applied_versions.push(version.to_string());
+            }
+            continue;
+        }
+        if version == "037_pipeline_trigger_source_relax" {
+            // 037 重建 pipeline_runs 放宽 trigger_source CHECK（父表重建，
+            // 必须先 PRAGMA foreign_keys = OFF，见迁移文件头注释）。
+            // 表不存在（002 未跑的极端夹具）时跳过不记录，待建表后重试。
+            if apply_migration_037_pipeline_trigger_source_relax(pool).await? {
                 applied_versions.push(version.to_string());
             }
             continue;
@@ -636,6 +663,223 @@ async fn apply_migration_026_pipeline_prompt_optimization_versions(
     )
     .execute(pool)
     .await?;
+
+    record_schema_migration(pool, VERSION, "rust").await?;
+    Ok(true)
+}
+
+/**
+ * 应用 migration 036：video_generations.result_asset_id
+ *
+ * 背景：视频生成完成后此前只保存 provider 的远程 result_url（或 base64
+ *   塞进 result_b64_json），从不落盘、从不注册为 asset，资产库没有视频，
+ *   剪辑时间线与成片合成无从取材。036 为 video_generations 增加
+ *   result_asset_id 列，关联 run_generation_task 落盘后注册的本地视频。
+ *
+ * 兼容策略（与 026 相同的存在性守卫）：
+ *   1. 已应用过 → 幂等跳过。
+ *   2. video_generations 表不存在（017 未执行的旧库 / 部分测试夹具）→ 跳过
+ *      不记录，待 017 建表后下次启动重试。
+ *   3. 列已存在（部分执行过的库）→ 记录已应用，不再 ALTER。
+ *
+ * @param pool 数据库连接池
+ * @returns true 表示本次执行了迁移；false 表示跳过或已应用
+ */
+async fn apply_migration_036_video_result_asset(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
+    const VERSION: &str = "036_video_result_asset";
+
+    if has_schema_migration(pool, VERSION).await? {
+        return Ok(false);
+    }
+
+    let tables: HashSet<String> = list_all_tables(pool).await?.into_iter().collect();
+    if !tables.contains("video_generations") {
+        tracing::info!(
+            version = VERSION,
+            "video_generations 表尚不存在，跳过 036，待 017 建表后下次启动重试"
+        );
+        return Ok(false);
+    }
+
+    let existing_columns = list_table_columns(pool, "video_generations").await?;
+    if !existing_columns.contains("result_asset_id") {
+        sqlx::query("ALTER TABLE video_generations ADD COLUMN result_asset_id TEXT")
+            .execute(pool)
+            .await?;
+    }
+
+    record_schema_migration(pool, VERSION, "rust").await?;
+    Ok(true)
+}
+
+/**
+ * 应用 migration 037：重建 pipeline_runs 放宽 trigger_source CHECK
+ *
+ * 背景：002 对 trigger_source 设了 ('manual','automation','api','retry')
+ *   白名单，但前端制作流程的三个视图各自以专属 trigger_source 启动 run
+ *   （VideoView='video'、CharSceneView='char_scene'、KeyframeView='keyframe'，
+ *   pipeline_type 统一 'custom'），INSERT 违反 CHECK → 500。即这三类编排
+ *   自上线起就无法创建 run，只有 OutlineView（'manual'）能正常工作。
+ *
+ * 兼容策略：
+ *   1. 已应用过 → 幂等跳过。
+ *   2. pipeline_runs 表不存在（002 未跑的极端夹具）→ 跳过不记录，待建表后重试。
+ *   3. 表存在 → 执行 037 SQL 文件：先 PRAGMA foreign_keys = OFF（父表重建，
+ *      不能在事务内切换该开关），事务内 CREATE new → INSERT...SELECT 复制 →
+ *      DROP old → RENAME → 重建索引 → COMMIT → foreign_keys = ON。
+ *      数据全量保留，外键完整性由 PRAGMA foreign_key_check 验证。
+ *
+ * @param pool 数据库连接池
+ * @returns true 表示本次执行了迁移；false 表示跳过或已应用
+ */
+async fn apply_migration_037_pipeline_trigger_source_relax(
+    pool: &SqlitePool,
+) -> Result<bool, sqlx::Error> {
+    const VERSION: &str = "037_pipeline_trigger_source_relax";
+
+    if has_schema_migration(pool, VERSION).await? {
+        return Ok(false);
+    }
+
+    let tables: HashSet<String> = list_all_tables(pool).await?.into_iter().collect();
+    if !tables.contains("pipeline_runs") {
+        tracing::info!(
+            version = VERSION,
+            "pipeline_runs 表尚不存在，跳过 037，待 002 建表后下次启动重试"
+        );
+        return Ok(false);
+    }
+
+    tracing::info!(version = VERSION, "执行 SQL schema migration（父表重建）");
+
+    // 父表重建必须固定在同一连接上完成（foreign_keys 开关按连接生效），
+    // 数据复制用动态列交集：legacy 库的 pipeline_runs 可能缺 002 之后的列。
+    let old_columns = list_table_columns(pool, "pipeline_runs").await?;
+    let mut conn = pool.acquire().await?;
+
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *conn)
+        .await?;
+    sqlx::raw_sql("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+    let create_result = sqlx::raw_sql(include_str!(
+        "../migrations/037_pipeline_trigger_source_relax.sql"
+    ))
+    .execute(&mut *conn)
+    .await;
+
+    if let Err(error) = create_result {
+        let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await;
+        let _ = sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&mut *conn)
+            .await;
+        drop(conn);
+        return Err(error);
+    }
+
+    // 动态列交集：只复制新旧两表共有的列，缺失列走新表默认值
+    let expected_columns = [
+        "id",
+        "user_id",
+        "project_id",
+        "conversation_id",
+        "pipeline_type",
+        "trigger_source",
+        "status",
+        "idempotency_key",
+        "total_steps",
+        "completed_steps",
+        "failed_steps",
+        "created_at",
+        "started_at",
+        "finished_at",
+        "updated_at",
+        "error_message",
+        "error_code",
+    ];
+    let copy_columns: Vec<&str> = expected_columns
+        .iter()
+        .copied()
+        .filter(|column| old_columns.contains(*column))
+        .collect();
+    let columns_sql = copy_columns.join(", ");
+    if let Err(error) = sqlx::query(&format!(
+        "INSERT INTO pipeline_runs_new ({columns_sql}) SELECT {columns_sql} FROM pipeline_runs"
+    ))
+    .execute(&mut *conn)
+    .await
+    {
+        let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await;
+        let _ = sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&mut *conn)
+            .await;
+        drop(conn);
+        return Err(error);
+    }
+
+    if !old_columns.contains("updated_at") {
+        // 旧表没有 updated_at（011 的 ensure 回填尚未执行）：新表 DEFAULT 会把
+        // updated_at 写成重建时刻。按 011 对 pipeline_runs 的口径
+        // （finished_at → started_at → created_at）修复，保证重建不破坏
+        // 011 的回填语义。
+        if let Err(error) = sqlx::query(
+            "UPDATE pipeline_runs_new
+             SET updated_at = COALESCE(NULLIF(finished_at, ''), NULLIF(started_at, ''), created_at)
+             WHERE created_at IS NOT NULL",
+        )
+        .execute(&mut *conn)
+        .await
+        {
+            let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await;
+            let _ = sqlx::query("PRAGMA foreign_keys = ON")
+                .execute(&mut *conn)
+                .await;
+            drop(conn);
+            return Err(error);
+        }
+    }
+
+    let finalize = sqlx::raw_sql(
+        "DROP TABLE pipeline_runs;
+         ALTER TABLE pipeline_runs_new RENAME TO pipeline_runs;
+         CREATE INDEX IF NOT EXISTS idx_pipeline_runs_user ON pipeline_runs(user_id, created_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_pipeline_runs_project ON pipeline_runs(project_id, created_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status ON pipeline_runs(user_id, status, created_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_pipeline_runs_idempotency ON pipeline_runs(user_id, idempotency_key);
+         CREATE INDEX IF NOT EXISTS idx_pipeline_runs_project_type_status
+             ON pipeline_runs(project_id, pipeline_type, trigger_source, status);
+         COMMIT;",
+    )
+    .execute(&mut *conn)
+    .await;
+
+    if let Err(error) = finalize {
+        let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await;
+        let _ = sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&mut *conn)
+            .await;
+        drop(conn);
+        return Err(error);
+    }
+
+    let _ = sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *conn)
+        .await;
+    // 外键完整性自检（信息性：有空引用则记 warn，不阻断迁移）
+    match sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&mut *conn)
+        .await
+    {
+        Ok(violations) if !violations.is_empty() => {
+            tracing::warn!(
+                version = VERSION,
+                violations = violations.len(),
+                "PRAGMA foreign_key_check 在 037 重建后报告外键引用异常"
+            );
+        }
+        _ => {}
+    }
+    drop(conn);
 
     record_schema_migration(pool, VERSION, "rust").await?;
     Ok(true)
@@ -2977,6 +3221,8 @@ mod tests {
                 "033_ai_tasks_result".to_string(),
                 "034_pipeline_events_source_assistant".to_string(),
                 "035_ai_usage_cache_metrics".to_string(),
+                "036_video_result_asset".to_string(),
+                "037_pipeline_trigger_source_relax".to_string(),
             ]
         );
 

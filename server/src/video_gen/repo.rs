@@ -220,3 +220,21 @@ pub async fn fail_interrupted_generations(pool: &SqlitePool) -> Result<u64> {
 
     Ok(result.rows_affected())
 }
+
+/// 记录视频生成产物对应的本地资产 ID（migration 036 的 result_asset_id 列）。
+///
+/// 由 run_generation_task 在视频落盘并注册 assets 后调用；
+/// orchestrator 完成 video_gen 步骤时读取该列写入 output_json 的 assetId，
+/// 供前端按 stepKey 解析镜头成片素材。
+pub async fn set_result_asset(
+    pool: &SqlitePool,
+    generation_id: &str,
+    asset_id: &str,
+) -> Result<()> {
+    sqlx::query("UPDATE video_generations SET result_asset_id = ? WHERE id = ?")
+        .bind(asset_id)
+        .bind(generation_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}

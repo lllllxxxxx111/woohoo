@@ -386,6 +386,33 @@ async fn run_generation_task(
             )
             .await
             .map_err(|error| AppError::Internal(error.to_string()))?;
+
+            // 产物资产化（best-effort）：落盘 + 注册 assets + 回写 result_asset_id。
+            // 失败只记 warn —— 生成结果本身已成功，不应因此判任务失败或退款；
+            // 剪辑合成端点对远程 URL 仍有兜底下载路径。
+            if let Some(asset) = persist_video_result_asset(
+                &state,
+                &generation_id,
+                req.project_id.as_deref(),
+                &req.prompt,
+                &model,
+                req.duration_seconds,
+                &req.aspect_ratio,
+                response.url.as_deref(),
+                response.b64_json.as_deref(),
+            )
+            .await
+            {
+                if let Err(error) =
+                    repo::set_result_asset(&state.db, &generation_id, &asset.id).await
+                {
+                    tracing::warn!(
+                        generation_id = %generation_id,
+                        asset_id = %asset.id,
+                        "failed to record result_asset_id: {error}"
+                    );
+                }
+            }
         }
         Ok(Err(error)) => {
             refund_and_fail(&state, &user_id, &generation_id, cost, &error.to_string()).await?;
@@ -652,6 +679,196 @@ async fn ensure_project_access(
         ));
     }
     Ok(())
+}
+
+/// 视频产物下载的大小上限：512 MB，防御异常 provider 返回超大响应。
+const VIDEO_DOWNLOAD_MAX_BYTES: usize = 512 * 1024 * 1024;
+/// 视频产物下载超时：10 分钟。
+const VIDEO_DOWNLOAD_TIMEOUT_SECS: u64 = 600;
+
+/**
+ * 把已完成的视频产物落盘为本地资产（best-effort）。
+ *
+ * 来源二选一：
+ *   - result_b64_json：base64 解码后直接写文件；
+ *   - result_url：provider 返回的远程 URL，经 SSRF 校验后带大小上限下载。
+ *
+ * 成功后注册 assets(type='video', url='/uploads/{filename}')，调用方再把
+ * asset.id 写回 video_generations.result_asset_id（migration 036）。
+ *
+ * 失败语义：返回 None 并记 warn，不向上传播错误 —— 生成结果本身已成功，
+ * 资产化失败不应使任务判失败或退款；剪辑合成端点对远程 URL 仍有兜底下载。
+ * project_id 为 None 时同样跳过（assets.project_id NOT NULL，无处归属）。
+ */
+#[allow(clippy::too_many_arguments)]
+async fn persist_video_result_asset(
+    state: &AppState,
+    generation_id: &str,
+    project_id: Option<&str>,
+    prompt: &str,
+    model: &str,
+    duration_seconds: Option<f64>,
+    aspect_ratio: &str,
+    result_url: Option<&str>,
+    result_b64_json: Option<&str>,
+) -> Option<crate::asset::model::Asset> {
+    let Some(project_id) = normalize_project_id(project_id) else {
+        tracing::info!(
+            generation_id = %generation_id,
+            "video generation has no project context, skip asset persistence"
+        );
+        return None;
+    };
+
+    let bytes: Vec<u8> = if let Some(b64) = result_b64_json.map(str::trim).filter(|v| !v.is_empty())
+    {
+        match decode_video_b64(b64) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(generation_id = %generation_id, "failed to decode video b64: {error}");
+                return None;
+            }
+        }
+    } else if let Some(url) = result_url.map(str::trim).filter(|v| !v.is_empty()) {
+        match download_video_asset(url).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(
+                    generation_id = %generation_id,
+                    url = %url,
+                    "failed to download generated video: {error}"
+                );
+                return None;
+            }
+        }
+    } else {
+        return None;
+    };
+
+    if bytes.is_empty() {
+        tracing::warn!(generation_id = %generation_id, "video result is empty, skip asset persistence");
+        return None;
+    }
+
+    // 落盘目录与 image_gen 的 resolve_assets_root 保持一致（assets_dir）。
+    if let Err(error) = tokio::fs::create_dir_all(&state.config.assets_dir).await {
+        tracing::warn!(generation_id = %generation_id, "failed to create assets dir: {error}");
+        return None;
+    }
+    let assets_root = match tokio::fs::canonicalize(&state.config.assets_dir).await {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(generation_id = %generation_id, "failed to resolve assets dir: {error}");
+            return None;
+        }
+    };
+
+    let filename = format!("video-generation-{generation_id}.mp4");
+    let file_path = assets_root.join(&filename);
+    if !file_path.starts_with(&assets_root) {
+        tracing::warn!(generation_id = %generation_id, "invalid generated video path");
+        return None;
+    }
+    if let Err(error) = tokio::fs::write(&file_path, &bytes).await {
+        tracing::warn!(generation_id = %generation_id, "failed to write generated video: {error}");
+        return None;
+    }
+
+    let metadata = serde_json::json!({
+        "origin": "video_generation",
+        "source": "video_generation",
+        "generationId": generation_id,
+        "prompt": prompt,
+        "model": model,
+        "durationSeconds": duration_seconds,
+        "aspectRatio": aspect_ratio,
+        "sourceUrl": result_url,
+        "sizeBytes": bytes.len(),
+        "generatedAt": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    });
+
+    match crate::asset::repo::create_asset(
+        &state.db,
+        &project_id,
+        &format!("AI 视频 {}", chrono::Utc::now().format("%Y-%m-%d %H-%M-%S")),
+        "video",
+        &format!("/uploads/{filename}"),
+        Some(&metadata.to_string()),
+    )
+    .await
+    {
+        Ok(asset) => Some(asset),
+        Err(error) => {
+            tracing::warn!(generation_id = %generation_id, "failed to register video asset: {error}");
+            None
+        }
+    }
+}
+
+/** 解码 provider 返回的 base64 视频数据（容忍 data URL 前缀与空白字符）。 */
+fn decode_video_b64(value: &str) -> Result<Vec<u8>, AppError> {
+    let raw = value
+        .strip_prefix("data:")
+        .and_then(|v| v.split_once(','))
+        .map(|v| v.1)
+        .unwrap_or(value);
+    let cleaned: String = raw.chars().filter(|ch| !ch.is_whitespace()).collect();
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(cleaned.as_bytes())
+        .map_err(|error| AppError::Internal(format!("failed to decode generated video: {error}")))
+}
+
+/**
+ * 下载 provider 返回的远程视频到内存。
+ *
+ * 安全设计：下载前用 ssrf_guard 校验 URL（provider 响应里的地址不可信，
+ * 可能指向内网/云元数据）；带大小上限与超时，避免异常响应拖垮内存。
+ */
+async fn download_video_asset(url: &str) -> Result<Vec<u8>, AppError> {
+    ssrf_guard::validate_endpoint_url(url).await?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(VIDEO_DOWNLOAD_TIMEOUT_SECS))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| AppError::Internal(format!("failed to create HTTP client: {error}")))?;
+
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| AppError::Internal(format!("video download failed: {error}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::Internal(format!(
+            "video download returned {}",
+            response.status()
+        )));
+    }
+
+    if let Some(length) = response.content_length() {
+        if length as usize > VIDEO_DOWNLOAD_MAX_BYTES {
+            return Err(AppError::Internal(format!(
+                "video exceeds download size limit ({length} bytes)"
+            )));
+        }
+    }
+
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut stream = response;
+    while let Some(chunk) = stream
+        .chunk()
+        .await
+        .map_err(|error| AppError::Internal(format!("video download interrupted: {error}")))?
+    {
+        if bytes.len() + chunk.len() > VIDEO_DOWNLOAD_MAX_BYTES {
+            return Err(AppError::Internal(
+                "video exceeds download size limit".to_string(),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]

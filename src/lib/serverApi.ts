@@ -203,7 +203,7 @@ type ServerBootstrapMessage = ServerMessage & {
   meta?: Message['meta'] | string | null;
 };
 
-type ServerAsset = {
+export type ServerAsset = {
   id: string;
   projectId: string;
   ownerUserId?: string | null;
@@ -2262,6 +2262,7 @@ export const listAiTasks = usageTaskPipelineApi.listAiTasks;
 export const getAiTask = usageTaskPipelineApi.getAiTask;
 export const createPipelineRun = usageTaskPipelineApi.createPipelineRun;
 export const getPipelineRun = usageTaskPipelineApi.getPipelineRun;
+export const listProjectVideoShotAssets = usageTaskPipelineApi.listProjectVideoShotAssets;
 export const getPipelineOptimizations = usageTaskPipelineApi.getPipelineOptimizations;
 export const applyPipelineOptimization = usageTaskPipelineApi.applyPipelineOptimization;
 export const rollbackPipelineOptimization = usageTaskPipelineApi.rollbackPipelineOptimization;
@@ -2279,6 +2280,29 @@ export const getReviewQueue = usageTaskPipelineApi.getReviewQueue;
 export const submitReviewDecision = usageTaskPipelineApi.submitReviewDecision;
 export const listStepReviews = usageTaskPipelineApi.listStepReviews;
 export const streamPipelineRun = usageTaskPipelineApi.streamPipelineRun;
+
+/**
+ * ffmpeg 成片合成：按顺序拼接已生成的镜头视频并注册为新资产。
+ * 依赖服务端本机安装 ffmpeg，未安装时返回带提示的错误。
+ */
+export async function composeFinalCutVideo(input: {
+  projectId: string;
+  clipAssetIds: string[];
+  name?: string;
+}): Promise<Asset> {
+  const asset = await requestApi<ServerAsset>('/api/export/final-cut', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+  return mapServerAsset(asset);
+}
+
+/** 探测服务端 ffmpeg 是否可用（用于提前禁用合成按钮） */
+export async function getFfmpegStatus(): Promise<{ available: boolean; hint: string | null }> {
+  return requestApi<{ available: boolean; hint: string | null }>(
+    '/api/export/final-cut/ffmpeg-status',
+  );
+}
 
 const budgetApi = createBudgetApi(requestApi);
 

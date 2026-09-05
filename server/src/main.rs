@@ -550,6 +550,20 @@ async fn main() {
             get(pipeline::prompt_optimizations::get_auto_apply_config)
                 .put(pipeline::prompt_optimizations::set_auto_apply_config),
         )
+        // 镜头成片素材：stepKey -> 最新已生成视频资产（剪辑时间线/成片预览共用）
+        .route(
+            "/api/pipelines/projects/{project_id}/video-assets",
+            get(pipeline::handlers::list_project_video_shot_assets),
+        )
+        // ffmpeg 检测与成片合成导出
+        .route(
+            "/api/export/final-cut",
+            post(export::final_cut::compose_final_cut),
+        )
+        .route(
+            "/api/export/final-cut/ffmpeg-status",
+            get(export::final_cut::ffmpeg_availability),
+        )
         .route(
             "/api/pipelines/runs/{id}/pause",
             post(pipeline::handlers::pause_pipeline_run),

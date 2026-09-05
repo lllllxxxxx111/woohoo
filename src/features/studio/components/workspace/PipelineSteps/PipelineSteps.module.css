@@ -1384,8 +1384,7 @@
   align-items: center;
   justify-content: center;
   color: #fff;
-  gap: 16px;
-}
+  gap: 16px;}
 
 .timelineTracks {
   height: 250px;
@@ -1459,3 +1458,14 @@
 .trackBGM {
   background-color: #8b5cf6;
 } /* Purple */
+
+/* 剪辑预览区：已生成镜头视频的真实播放器 */
+.previewVideo {
+  width: 60%;
+  max-width: 100%;
+  aspect-ratio: 16/9;
+  background-color: #000;
+  border-radius: var(--radius-sm);
+  object-fit: contain;
+  outline: none;
+}

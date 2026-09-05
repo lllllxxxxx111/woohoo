@@ -1,5 +1,6 @@
-import { getServerBaseUrl } from './serverApi';
-import type { AiTask, AiUsageBucket, AiUsageRecord, AiUsageSummary } from './serverApi';
+import { getServerBaseUrl, mapServerAsset } from './serverApi';
+import type { AiTask, AiUsageBucket, AiUsageRecord, AiUsageSummary, ServerAsset } from './serverApi';
+import type { Asset } from '../types';
 
 type RequestApi = <T>(path: string, init?: RequestInit, retry?: boolean) => Promise<T>;
 
@@ -88,6 +89,14 @@ export interface PipelineRunSummary {
   recentEvents: PipelineRunEvent[];
   outputs: PipelineStepOutput[];
   reviews: PipelineManualReview[];
+}
+
+/** 镜头成片素材：一个已完成 video_gen 步骤（stepKey）对应的最新视频资产 */
+export interface VideoShotAssetItem {
+  stepKey: string;
+  runId: string;
+  completedAt: string;
+  asset: Asset;
 }
 
 export interface PipelineRunEvent {
@@ -376,6 +385,17 @@ export function createUsageTaskPipelineApi(requestApi: RequestApi) {
     return requestApi<PipelineRunSummary>(`/api/pipelines/runs/${id}`);
   };
 
+  /**
+   * 列出项目内所有镜头成片素材（stepKey -> 最新已生成视频资产）
+   * GET /api/pipelines/projects/{projectId}/video-assets
+   */
+  const listProjectVideoShotAssets = async (projectId: string): Promise<VideoShotAssetItem[]> => {
+    const items = await requestApi<
+      Array<{ stepKey: string; runId: string; completedAt: string; asset: ServerAsset }>
+    >(`/api/pipelines/projects/${encodeURIComponent(projectId)}/video-assets`);
+    return items.map((item) => ({ ...item, asset: mapServerAsset(item.asset) }));
+  };
+
   const getPipelineOptimizations = async (id: string): Promise<PipelinePromptOptimization[]> => {
     return requestApi<PipelinePromptOptimization[]>(`/api/pipelines/runs/${id}/optimizations`);
   };
@@ -643,6 +663,7 @@ export function createUsageTaskPipelineApi(requestApi: RequestApi) {
     getAiTask,
     createPipelineRun,
     getPipelineRun,
+    listProjectVideoShotAssets,
     getPipelineOptimizations,
     applyPipelineOptimization,
     rollbackPipelineOptimization,
