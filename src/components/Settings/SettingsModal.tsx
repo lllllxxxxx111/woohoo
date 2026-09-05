@@ -23,6 +23,7 @@ import {
   Divider,
   Input,
   InputNumber,
+  Modal,
   Select,
   Space,
   Switch,
@@ -169,6 +170,24 @@ export const SettingsModal: React.FC = () => {
   const requiresGlobalSave =
     activeTab === 'model' || activeTab === 'workflow' || activeTab === 'policy';
   const shouldValidateAiSettings = activeTab === 'model' && !serverAiEndpointId;
+  const hasUnsavedAiDraft =
+    requiresGlobalSave &&
+    JSON.stringify(normalizedDraftAiSettings) !==
+      JSON.stringify(normalizeAiSettingsPayload(aiSettings));
+
+  const requestClose = () => {
+    if (!hasUnsavedAiDraft) {
+      setSettingsOpen(false);
+      return;
+    }
+    Modal.confirm({
+      title: '有未保存的修改',
+      content: '关闭后本次改动将被丢弃，确认关闭？',
+      okText: '丢弃并关闭',
+      cancelText: '继续编辑',
+      onOk: () => setSettingsOpen(false),
+    });
+  };
 
   const updateDraftField = <K extends keyof AiSettings>(key: K, value: AiSettings[K]) => {
     setDraftAiSettings((prev) => ({ ...prev, [key]: value }));
@@ -234,7 +253,7 @@ export const SettingsModal: React.FC = () => {
   };
 
   return (
-    <div className={styles.overlay} onClick={() => setSettingsOpen(false)}>
+    <div className={styles.overlay} onClick={requestClose}>
       <div className={styles.modal} onClick={(event) => event.stopPropagation()}>
         <aside className={styles.sidebar}>
           <div className={styles.sidebarHeader}>
@@ -302,7 +321,7 @@ export const SettingsModal: React.FC = () => {
             <Button
               shape="circle"
               icon={<X size={18} />}
-              onClick={() => setSettingsOpen(false)}
+              onClick={requestClose}
               type="text"
             />
           </div>
@@ -763,7 +782,7 @@ export const SettingsModal: React.FC = () => {
           </div>
 
           <div className={styles.footer}>
-            <Button size="large" onClick={() => setSettingsOpen(false)} style={{ marginRight: 16 }}>
+            <Button size="large" onClick={requestClose} style={{ marginRight: 16 }}>
               取消
             </Button>
             <Button size="large" type="primary" onClick={handleSave} loading={isSaving}>
