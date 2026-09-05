@@ -16,6 +16,12 @@ pub struct AppConfig {
     pub upload_session_ttl_secs: i64,
     pub project_files_dir: String,
     pub ai_max_concurrent_tasks: usize,
+    /// AI 会话历史是否启用前缀稳定截断；关闭后每次请求发送全量历史（旧行为）。
+    pub ai_chat_history_truncation_enabled: bool,
+    /// AI 会话历史截断时保留的最早轮次数量（锚定前缀）。
+    pub ai_chat_history_prefix_keep: usize,
+    /// AI 会话历史截断时保留的最近消息数量。
+    pub ai_chat_history_recent_keep: usize,
     pub runtime_manifest_path: String,
     pub password_hash_cost: u32,
     pub debug_log_path: String,
@@ -89,6 +95,19 @@ impl AppConfig {
                 .unwrap_or_else(|_| "10".into())
                 .parse()
                 .unwrap_or(10),
+            ai_chat_history_truncation_enabled: env::var("AI_CHAT_HISTORY_TRUNCATION_ENABLED")
+                .unwrap_or_else(|_| "true".into())
+                .to_lowercase()
+                .parse()
+                .unwrap_or(true),
+            ai_chat_history_prefix_keep: env::var("AI_CHAT_HISTORY_PREFIX_KEEP")
+                .unwrap_or_else(|_| "8".into())
+                .parse()
+                .unwrap_or(8),
+            ai_chat_history_recent_keep: env::var("AI_CHAT_HISTORY_RECENT_KEEP")
+                .unwrap_or_else(|_| "40".into())
+                .parse()
+                .unwrap_or(40),
             runtime_manifest_path: env::var("RUNTIME_MANIFEST_PATH")
                 .unwrap_or_else(|_| "./data/runtime/server-info.json".into()),
             password_hash_cost: env::var("BCRYPT_COST")
@@ -226,6 +245,42 @@ fn validate_production_security(
     }
 
     Ok(())
+}
+
+/// 测试辅助：构造一份与 `from_env` 默认值一致的完整配置。
+/// 仅在 `cargo test` 下编译；新增字段时此处会在测试编译期暴露遗漏。
+#[cfg(test)]
+pub(crate) fn test_config() -> AppConfig {
+    AppConfig {
+        host: "127.0.0.1".into(),
+        port: 8080,
+        port_search_limit: 12,
+        database_url: "sqlite://data/woohoo-test.db?mode=rwc".into(),
+        jwt_secret: "test-jwt-secret".into(),
+        jwt_expire_hours: 72,
+        assets_dir: "./data/assets".into(),
+        upload_tmp_dir: "./data/uploads-tmp".into(),
+        upload_session_ttl_secs: 86_400,
+        project_files_dir: "./data/project-files".into(),
+        ai_max_concurrent_tasks: 10,
+        ai_chat_history_truncation_enabled: true,
+        ai_chat_history_prefix_keep: 8,
+        ai_chat_history_recent_keep: 40,
+        runtime_manifest_path: "./data/runtime/server-info.json".into(),
+        password_hash_cost: 10,
+        debug_log_path: "./data/runtime/usage-debug.log".into(),
+        debug_log_enabled: false,
+        debug_log_max_size_mb: 50,
+        debug_log_max_files: 5,
+        ops_heartbeat_interval_secs: 15,
+        ops_inspection_interval_secs: 30,
+        ops_notification_interval_secs: 10,
+        ops_notification_timeout_secs: 15,
+        ops_notification_max_retries: 4,
+        ops_stale_task_after_secs: 600,
+        ops_failure_window_minutes: 15,
+        cors_allowed_origins: vec![],
+    }
 }
 
 #[cfg(test)]

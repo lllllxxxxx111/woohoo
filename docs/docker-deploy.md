@@ -51,6 +51,9 @@ docker compose -f docker-compose.production.yml up --build -d
 | `CORS_ALLOWED_ORIGINS` | 本地前端 origins | 必填，严格 origin 列表 | 浏览器跨域来源 |
 | `WOOHOO_API_KEY_ENCRYPTION_KEY` | 不需要 | 必填，64 位 hex | AI endpoint API Key 加密主密钥 |
 | `WOOHOO_DEV_ALLOW_PRIVATE_ENDPOINTS` | `true` | 固定 `false` | 是否允许访问私网模型 endpoint |
+| `AI_CHAT_HISTORY_TRUNCATION_ENABLED` | `true` | 可选 | 会话历史前缀稳定截断开关；设为 `false` 恢复全量历史旧行为 |
+| `AI_CHAT_HISTORY_PREFIX_KEEP` | `8` | 可选 | 截断时保留的最早轮次数量（锚定前缀） |
+| `AI_CHAT_HISTORY_RECENT_KEEP` | `40` | 可选 | 截断时保留的最近消息数量 |
 
 ## 健康检查与发布记录
 
