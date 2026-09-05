@@ -32,6 +32,7 @@ import {
   BarChart2,
   Clock3,
   Layers3,
+  MessageSquare,
   RefreshCw,
   RotateCcw,
   Tags,
@@ -39,6 +40,7 @@ import {
   X,
   Search,
   ChevronRight,
+  Zap,
 } from 'lucide-react';
 import styles from './UsageDashboard.module.css';
 
@@ -136,6 +138,14 @@ function percentage(numerator: number, denominator: number) {
   return `${((numerator / denominator) * 100).toFixed(1)}%`;
 }
 
+/** 缓存命中率展示：供应商未上报数据（null）时返回 '—'，与“命中率为 0”区分 */
+function formatHitRatio(ratio: number | null | undefined) {
+  if (ratio === null || ratio === undefined) {
+    return '—';
+  }
+  return `${(ratio * 100).toFixed(1)}%`;
+}
+
 /** 根据筛选条件创建一个全零的空汇总对象 */
 function createEmptySummary(filters: UsageFilters): AiUsageSummary {
   return {
@@ -178,8 +188,11 @@ function createEmptySummary(filters: UsageFilters): AiUsageSummary {
       retrySuccessTokens: 0,
       projectCount: 0,
       conversationCount: 0,
+      cachedPromptTokens: 0,
+      cachedTokenRecords: 0,
     },
     series: [],
+    byConversation: [],
     byEndpoint: [],
     byApiKey: [],
     byModel: [],
@@ -252,11 +265,70 @@ const BreakdownSection: React.FC<{
                 <span>积分: {formatCreditsFromTokens(item.totalTokens)}</span>
                 <span>•</span>
                 <span>产出: {item.outputItems}</span>
+                {item.cacheHitRatio !== null && (
+                  <>
+                    <span>•</span>
+                    <span>缓存命中率: {formatHitRatio(item.cacheHitRatio)}</span>
+                  </>
+                )}
               </div>
             </div>
           ))
         ) : (
           <Empty description={emptyLabel} style={{ padding: '20px 0' }} />
+        )}
+        {items.length > 5 && (
+          <Button
+            type="text"
+            size="small"
+            icon={
+              <ChevronRight
+                size={12}
+                style={{ transform: expanded ? 'rotate(90deg)' : undefined }}
+              />
+            }
+            onClick={() => setExpanded((prev) => !prev)}
+          >
+            {expanded ? '收起' : `查看更多共 ${items.length} 项`}
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+};
+
+/** 会话维度缓存命中率面板：每行以命中率为核心指标，无供应商上报时显示 '—' */
+const ConversationCacheSection: React.FC<{ items: AiUsageBreakdownItem[] }> = ({ items }) => {
+  const [expanded, setExpanded] = useState(false);
+  const visibleItems = expanded ? items : items.slice(0, 5);
+
+  return (
+    <div className={styles.breakdownCard}>
+      <div className={styles.breakdownHeader}>
+        <MessageSquare size={16} /> 会话缓存命中率
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {items.length ? (
+          visibleItems.map((item) => (
+            <div key={item.key} className={styles.breakdownItem}>
+              <div className={styles.breakdownLabel}>
+                <span>{item.label}</span>
+                <span style={{ color: 'var(--bg-accent)' }}>
+                  {formatHitRatio(item.cacheHitRatio)}
+                </span>
+              </div>
+              <div className={styles.breakdownValue}>{item.requestCount.toLocaleString()}</div>
+              <div className={styles.breakdownMeta}>
+                <span>缓存命中: {item.cachedPromptTokens.toLocaleString()} tokens</span>
+                <span>•</span>
+                <span>积分: {formatCreditsFromTokens(item.totalTokens)}</span>
+                <span>•</span>
+                <span>上报: {item.cachedTokenRecords} 次</span>
+              </div>
+            </div>
+          ))
+        ) : (
+          <Empty description="暂无会话数据" style={{ padding: '20px 0' }} />
         )}
         {items.length > 5 && (
           <Button
@@ -492,6 +564,18 @@ export const UsageDashboard: React.FC = () => {
       width: 100,
       render: (v: number) => <Tag size="small">{v}ms</Tag>,
     },
+    {
+      title: '前缀命中',
+      dataIndex: 'promptPrefixHitRatio',
+      width: 100,
+      render: (_: number | null | undefined, r: AiUsageRecord) => (
+        <Tag size="small" color={r.promptPrefixHitRatio != null ? 'cyan' : 'gray'}>
+          {r.promptPrefixHitRatio != null
+            ? `${(r.promptPrefixHitRatio * 100).toFixed(0)}%`
+            : '—'}
+        </Tag>
+      ),
+    },
   ];
 
   /** 渲染指定可选筛选条件的控件（输入框或下拉选择） */
@@ -713,9 +797,28 @@ export const UsageDashboard: React.FC = () => {
           color="#ef4444"
           footer={`重试 ${currentSummary.totals.redoRequestCount} 次`}
         />
+        <StatCard
+          title="缓存命中率"
+          value={
+            currentSummary.totals.cachedTokenRecords > 0
+              ? percentage(
+                  currentSummary.totals.cachedPromptTokens,
+                  currentSummary.totals.promptTokens,
+                )
+              : '—'
+          }
+          icon={<Zap size={18} />}
+          color="#06b6d4"
+          footer={
+            currentSummary.totals.cachedTokenRecords > 0
+              ? `命中 ${currentSummary.totals.cachedPromptTokens.toLocaleString()} / ${currentSummary.totals.promptTokens.toLocaleString()} prompt tokens`
+              : '供应商未上报缓存命中数据'
+          }
+        />
       </div>
 
       <div className={styles.breakdownGrid}>
+        <ConversationCacheSection items={currentSummary.byConversation} />
         <BreakdownSection
           title="项目归属分布"
           items={currentSummary.byProject}
@@ -764,7 +867,7 @@ export const UsageDashboard: React.FC = () => {
           pagination={false}
           border={false}
           loading={loading}
-          scroll={{ x: 740, y: 320 }}
+          scroll={{ x: 990, y: 320 }}
           style={{ width: '100%' }}
         />
       </div>

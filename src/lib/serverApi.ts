@@ -340,7 +340,12 @@ export type AiUsageBreakdownItem = {
   failureCount: number;
   avgLatencyMs: number;
   totalTokens: number;
+  promptTokens: number;
   outputItems: number;
+  cachedPromptTokens: number;
+  cachedTokenRecords: number;
+  /** 缓存命中 tokens / prompt tokens；无供应商上报数据时为 null */
+  cacheHitRatio: number | null;
 };
 
 export type AiUsageWindow = {
@@ -383,6 +388,10 @@ export type AiUsageTotals = {
   retrySuccessTokens: number;
   projectCount: number;
   conversationCount: number;
+  /** 供应商上报的缓存命中 prompt tokens 合计 */
+  cachedPromptTokens: number;
+  /** 有缓存命中上报的请求数（用于区分“无数据”与“命中率为 0”） */
+  cachedTokenRecords: number;
 };
 
 export type AiUsageSeriesPoint = {
@@ -393,12 +402,15 @@ export type AiUsageSeriesPoint = {
   avgLatencyMs: number;
   totalTokens: number;
   outputItems: number;
+  cachedPromptTokens: number;
+  cachedTokenRecords: number;
 };
 
 export type AiUsageSummary = {
   window: AiUsageWindow;
   totals: AiUsageTotals;
   series: AiUsageSeriesPoint[];
+  byConversation: AiUsageBreakdownItem[];
   byEndpoint: AiUsageBreakdownItem[];
   byApiKey: AiUsageBreakdownItem[];
   byModel: AiUsageBreakdownItem[];
@@ -435,6 +447,10 @@ export type AiUsageRecord = {
   inputChars: number;
   outputChars: number;
   latencyMs: number;
+  /** 供应商上报的缓存命中 prompt tokens（未上报为 null） */
+  cachedPromptTokens?: number | null;
+  /** 与该会话上一次请求的共享前缀占比（会话首次请求为 null） */
+  promptPrefixHitRatio?: number | null;
   errorMessage?: string;
   createdAt: string;
 };
