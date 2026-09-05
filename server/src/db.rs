@@ -204,6 +204,10 @@ pub(crate) async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<Strin
             include_str!("../migrations/033_ai_tasks_result.sql"),
         ),
         ("034_pipeline_events_source_assistant", ""),
+        (
+            "035_ai_usage_cache_metrics",
+            include_str!("../migrations/035_ai_usage_cache_metrics.sql"),
+        ),
     ] {
         if version == "020_asset_governance" {
             let tables = list_all_tables(pool)
@@ -254,6 +258,14 @@ pub(crate) async fn run_schema_migrations(pool: &SqlitePool) -> Result<Vec<Strin
         }
         if version == "034_pipeline_events_source_assistant" {
             if apply_migration_034_pipeline_events_source_assistant(pool).await? {
+                applied_versions.push(version.to_string());
+            }
+            continue;
+        }
+        if version == "035_ai_usage_cache_metrics" {
+            // 035 对 ai_usage_events 做逐列 ALTER，缺表旧库 / 测试夹具（仅建部分表）
+            // 不能走统一 run_sql_migration 路径，否则 "no such table" 会永久失败。
+            if apply_migration_035_ai_usage_cache_metrics(pool).await? {
                 applied_versions.push(version.to_string());
             }
             continue;
@@ -857,6 +869,40 @@ async fn apply_migration_034_pipeline_events_source_assistant(
     .await?;
 
     ensure_idx_pipeline_runs_project_type_status(pool).await?;
+    record_schema_migration(pool, VERSION, "rust").await?;
+    Ok(true)
+}
+
+async fn apply_migration_035_ai_usage_cache_metrics(
+    pool: &SqlitePool,
+) -> Result<bool, sqlx::Error> {
+    const VERSION: &str = "035_ai_usage_cache_metrics";
+
+    if has_schema_migration(pool, VERSION).await? {
+        return Ok(false);
+    }
+
+    let tables = list_all_tables(pool).await?;
+    if !tables.iter().any(|table| table == "ai_usage_events") {
+        tracing::info!(
+            version = VERSION,
+            "ai_usage_events 不存在，延后缓存指标列迁移（后续启动自动重试）"
+        );
+        return Ok(false);
+    }
+
+    let columns = list_table_columns(pool, "ai_usage_events").await?;
+    if !columns.contains("cached_prompt_tokens") {
+        sqlx::query("ALTER TABLE ai_usage_events ADD COLUMN cached_prompt_tokens INTEGER")
+            .execute(pool)
+            .await?;
+    }
+    if !columns.contains("prompt_prefix_hit_ratio") {
+        sqlx::query("ALTER TABLE ai_usage_events ADD COLUMN prompt_prefix_hit_ratio REAL")
+            .execute(pool)
+            .await?;
+    }
+
     record_schema_migration(pool, VERSION, "rust").await?;
     Ok(true)
 }
@@ -1878,6 +1924,14 @@ async fn ensure_ai_usage_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             "trigger_source",
             "ALTER TABLE ai_usage_events ADD COLUMN trigger_source TEXT",
         ),
+        (
+            "cached_prompt_tokens",
+            "ALTER TABLE ai_usage_events ADD COLUMN cached_prompt_tokens INTEGER",
+        ),
+        (
+            "prompt_prefix_hit_ratio",
+            "ALTER TABLE ai_usage_events ADD COLUMN prompt_prefix_hit_ratio REAL",
+        ),
     ];
 
     for (column, sql) in additions {
@@ -1943,6 +1997,18 @@ async fn repair_ai_usage_agent_foreign_key(pool: &SqlitePool) -> Result<(), sqlx
         sqlx::query("ALTER TABLE ai_usage_events RENAME TO ai_usage_events_legacy")
             .execute(&mut *conn)
             .await?;
+        // 旧表快照可能还没有 035 的缓存指标列；有则一并拷贝，无则重建后保持 NULL。
+        let legacy_cache_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('ai_usage_events_legacy')
+             WHERE name IN ('cached_prompt_tokens', 'prompt_prefix_hit_ratio')",
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        let cache_columns_sql = if legacy_cache_columns == 2 {
+            ", cached_prompt_tokens, prompt_prefix_hit_ratio"
+        } else {
+            ""
+        };
         sqlx::query(
             "CREATE TABLE ai_usage_events (
                 id                  TEXT PRIMARY KEY NOT NULL,
@@ -1973,27 +2039,29 @@ async fn repair_ai_usage_agent_foreign_key(pool: &SqlitePool) -> Result<(), sqlx
                 is_redo             INTEGER NOT NULL DEFAULT 0,
                 trigger_source      TEXT,
                 error_message       TEXT,
+                cached_prompt_tokens INTEGER,
+                prompt_prefix_hit_ratio REAL,
                 created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
             )",
         )
         .execute(&mut *conn)
         .await?;
-        sqlx::query(
+        sqlx::query(&format!(
             "INSERT INTO ai_usage_events (
                 id, user_id, project_id, conversation_id, agent_id, endpoint_id,
                 api_key_fingerprint, provider, model, operation, status, resource_kind,
                 output_items, latency_ms, prompt_tokens, completion_tokens, total_tokens,
                 token_source, input_chars, output_chars, request_fingerprint,
-                attempt_group_key, attempt_index, is_redo, trigger_source, error_message, created_at
+                attempt_group_key, attempt_index, is_redo, trigger_source, error_message{cache_columns_sql}, created_at
             )
             SELECT
                 id, user_id, project_id, conversation_id, agent_id, endpoint_id,
                 api_key_fingerprint, provider, model, operation, status, resource_kind,
                 output_items, latency_ms, prompt_tokens, completion_tokens, total_tokens,
                 token_source, input_chars, output_chars, request_fingerprint,
-                attempt_group_key, attempt_index, is_redo, trigger_source, error_message, created_at
-            FROM ai_usage_events_legacy",
-        )
+                attempt_group_key, attempt_index, is_redo, trigger_source, error_message{cache_columns_sql}, created_at
+            FROM ai_usage_events_legacy"
+        ))
         .execute(&mut *conn)
         .await?;
         sqlx::query("DROP TABLE ai_usage_events_legacy")
@@ -2908,6 +2976,7 @@ mod tests {
                 "032_upload_parts_cleanup".to_string(),
                 "033_ai_tasks_result".to_string(),
                 "034_pipeline_events_source_assistant".to_string(),
+                "035_ai_usage_cache_metrics".to_string(),
             ]
         );
 

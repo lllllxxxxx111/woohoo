@@ -1,4 +1,5 @@
 pub mod api_key_crypto;
+pub mod cache_probe;
 pub mod capabilities;
 pub mod catalog_handlers;
 pub mod client;

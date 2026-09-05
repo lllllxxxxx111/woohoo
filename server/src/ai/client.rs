@@ -578,6 +578,11 @@ pub struct TokenUsage {
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
     pub total_tokens: i64,
+    /// 供应商上报的缓存命中 prompt tokens（无上报时为 None）。
+    /// 兼容 OpenAI `prompt_tokens_details.cached_tokens` 与
+    /// DeepSeek `prompt_cache_hit_tokens` 两种字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_prompt_tokens: Option<i64>,
 }
 
 /// AI 调用结果
@@ -1288,10 +1293,19 @@ fn parse_token_usage(payload: &Value) -> Option<TokenUsage> {
     let total_tokens = value_to_i64(usage.get("total_tokens"))
         .or_else(|| Some(prompt_tokens.unwrap_or(0) + completion_tokens.unwrap_or(0)));
 
+    let cached_prompt_tokens = value_to_i64(
+        usage
+            .get("prompt_tokens_details")
+            .and_then(|details| details.get("cached_tokens"))
+            .or_else(|| usage.get("prompt_cache_hit_tokens")),
+    )
+    .filter(|value| *value > 0);
+
     Some(TokenUsage {
         prompt_tokens: prompt_tokens.unwrap_or(0),
         completion_tokens: completion_tokens.unwrap_or(0),
         total_tokens: total_tokens.unwrap_or(0),
+        cached_prompt_tokens,
     })
 }
 
@@ -1606,7 +1620,7 @@ mod tests {
     use super::{
         append_transport_error_hint, build_image_generation_url, build_stream_fallback_cache_key,
         extract_api_error_message, extract_completion_text, parse_image_generate_response,
-        should_retry_with_stream, ImageGenerationApiKind,
+        parse_token_usage, should_retry_with_stream, ImageGenerationApiKind,
     };
     use serde_json::json;
 
@@ -1858,5 +1872,61 @@ mod tests {
         let summary = append_transport_error_hint("connect", "network unreachable".to_string());
 
         assert!(summary.contains("无法建立到上游接口的连接"));
+    }
+
+    #[test]
+    fn parse_token_usage_reads_openai_cached_tokens() {
+        let payload = json!({
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 200,
+                "total_tokens": 1200,
+                "prompt_tokens_details": { "cached_tokens": 800 }
+            }
+        });
+
+        let usage = parse_token_usage(&payload).expect("usage");
+
+        assert_eq!(usage.prompt_tokens, 1000);
+        assert_eq!(usage.cached_prompt_tokens, Some(800));
+    }
+
+    #[test]
+    fn parse_token_usage_reads_deepseek_cached_tokens() {
+        let payload = json!({
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 200,
+                "total_tokens": 1200,
+                "prompt_cache_hit_tokens": 640,
+                "prompt_cache_miss_tokens": 360
+            }
+        });
+
+        let usage = parse_token_usage(&payload).expect("usage");
+
+        assert_eq!(usage.cached_prompt_tokens, Some(640));
+    }
+
+    #[test]
+    fn parse_token_usage_without_cache_report_is_none() {
+        let no_fields = json!({
+            "usage": { "prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110 }
+        });
+        let zero_cached = json!({
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 10,
+                "total_tokens": 110,
+                "prompt_tokens_details": { "cached_tokens": 0 }
+            }
+        });
+
+        let usage = parse_token_usage(&no_fields).expect("usage");
+        assert_eq!(usage.cached_prompt_tokens, None);
+
+        // 0 命中与未上报等价：视为无缓存数据而不是命中率为 0。
+        let usage = parse_token_usage(&zero_cached).expect("usage");
+        assert_eq!(usage.cached_prompt_tokens, None);
     }
 }

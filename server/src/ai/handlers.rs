@@ -93,6 +93,8 @@ struct ResolvedChatContext {
 struct PreparedChatRequest {
     messages: Vec<ChatMessage>,
     input_chars: i64,
+    /// 与该会话上一次请求的共享前缀占比（cache_probe 在 prepare 时计算并记录）。
+    prompt_prefix_hit_ratio: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -317,7 +319,7 @@ pub async fn ai_chat(
     )
     .await?;
     let _ = persist_user_message(&state.db, &context).await?;
-    let prepared = match prepare_chat_request(&state.db, &context, "direct").await {
+    let prepared = match prepare_chat_request(&state, &context, "direct").await {
         Ok(prepared) => prepared,
         Err(error) => {
             if let Err(message_error) =
@@ -395,6 +397,7 @@ pub async fn ai_chat(
                     0,
                     usage::unavailable_usage(),
                     Some(error.to_string()),
+                    prepared.prompt_prefix_hit_ratio,
                 ),
             )
             .await;
@@ -427,6 +430,7 @@ pub async fn ai_chat(
                         result.content.chars().count() as i64,
                         usage,
                         Some(error.to_string()),
+                        prepared.prompt_prefix_hit_ratio,
                     ),
                 )
                 .await;
@@ -464,6 +468,7 @@ pub async fn ai_chat(
                 finalized.content.chars().count() as i64,
                 usage,
                 Some(error.to_string()),
+                prepared.prompt_prefix_hit_ratio,
             ),
         )
         .await;
@@ -481,6 +486,7 @@ pub async fn ai_chat(
             finalized.content.chars().count() as i64,
             usage,
             None,
+            prepared.prompt_prefix_hit_ratio,
         ),
     )
     .await;
@@ -518,7 +524,7 @@ pub async fn ai_chat_stream(
     )
     .await?;
     persist_user_message(&state.db, &context).await?;
-    let prepared = match prepare_chat_request(&state.db, &context, "streaming").await {
+    let prepared = match prepare_chat_request(&state, &context, "streaming").await {
         Ok(prepared) => prepared,
         Err(error) => {
             if let Err(message_error) =
@@ -595,6 +601,7 @@ pub async fn ai_chat_stream(
                     0,
                     usage::unavailable_usage(),
                     Some(error.to_string()),
+                    prepared.prompt_prefix_hit_ratio,
                 ),
             )
             .await;
@@ -853,6 +860,7 @@ pub async fn ai_chat_stream(
         } else {
             let completion_tokens = usage::estimate_tokens(&full_content);
             UsageNumbers {
+                cached_prompt_tokens: None,
                 prompt_tokens: prompt_tokens_estimate,
                 completion_tokens,
                 total_tokens: prompt_tokens_estimate + completion_tokens,
@@ -886,6 +894,7 @@ pub async fn ai_chat_stream(
                 usage,
                 None,
                 postprocess_error.clone().or(stream_error.clone()),
+                prepared.prompt_prefix_hit_ratio,
             ),
         ).await;
 
@@ -983,6 +992,7 @@ pub async fn test_endpoint(
                     usage::unavailable_usage(),
                     None,
                     Some(error.to_string()),
+                    None,
                 ),
             )
             .await;
@@ -1010,6 +1020,7 @@ pub async fn test_endpoint(
             input_chars,
             result.content.chars().count() as i64,
             usage,
+            None,
             None,
             None,
         ),
@@ -1190,6 +1201,7 @@ async fn run_ai_task(
                 0,
                 0,
                 usage::unavailable_usage(),
+                None,
                 format!("任务调度失败: {}", error),
                 persisted_message_id.as_deref(),
             )
@@ -1278,6 +1290,7 @@ async fn run_ai_task(
                 0,
                 0,
                 usage::unavailable_usage(),
+                None,
                 error.to_string(),
                 persisted_message_id.as_deref(),
             )
@@ -1286,7 +1299,7 @@ async fn run_ai_task(
         }
     }
 
-    let prepared = match prepare_chat_request(&state.db, &context, "running").await {
+    let prepared = match prepare_chat_request(&state, &context, "running").await {
         Ok(prepared) => prepared,
         Err(error) => {
             fail_task_execution(
@@ -1298,6 +1311,7 @@ async fn run_ai_task(
                 0,
                 0,
                 usage::unavailable_usage(),
+                None,
                 error.to_string(),
                 persisted_message_id.as_deref(),
             )
@@ -1339,6 +1353,7 @@ async fn run_ai_task(
             prepared.input_chars,
             0,
             usage::unavailable_usage(),
+            prepared.prompt_prefix_hit_ratio,
             error.to_string(),
             persisted_message_id.as_deref(),
         )
@@ -1566,6 +1581,7 @@ async fn run_ai_task_non_stream(
                 prepared.input_chars,
                 0,
                 usage::unavailable_usage(),
+                prepared.prompt_prefix_hit_ratio,
                 error.to_string(),
                 persisted_message_id,
             )
@@ -1603,6 +1619,7 @@ async fn finalize_task_success(
                     prepared.input_chars,
                     result.content.chars().count() as i64,
                     usage,
+                    prepared.prompt_prefix_hit_ratio,
                     error.to_string(),
                     persisted_message_id,
                 )
@@ -1656,6 +1673,7 @@ async fn finalize_task_success(
             prepared.input_chars,
             finalized.content.chars().count() as i64,
             usage,
+            prepared.prompt_prefix_hit_ratio,
             error.to_string(),
             persisted_message_id,
         )
@@ -1679,6 +1697,7 @@ async fn finalize_task_success(
             finalized.content.chars().count() as i64,
             usage,
             None,
+            prepared.prompt_prefix_hit_ratio,
         ),
     )
     .await;
@@ -1698,6 +1717,7 @@ async fn fail_task_execution(
     input_chars: i64,
     output_chars: i64,
     usage: UsageNumbers,
+    prompt_prefix_hit_ratio: Option<f64>,
     error_message: String,
     persisted_message_id: Option<&str>,
 ) {
@@ -1743,6 +1763,7 @@ async fn fail_task_execution(
             output_chars,
             usage,
             Some(error_message.clone()),
+            prompt_prefix_hit_ratio,
         ),
     )
     .await;

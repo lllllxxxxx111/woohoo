@@ -611,6 +611,7 @@ pub(crate) fn build_usage_record(
     output_chars: i64,
     usage: UsageNumbers,
     error_message: Option<String>,
+    prompt_prefix_hit_ratio: Option<f64>,
 ) -> RecordAiUsageInput {
     build_direct_usage_record(
         user_id,
@@ -637,6 +638,7 @@ pub(crate) fn build_usage_record(
         usage,
         context.trigger_source.clone(),
         error_message,
+        prompt_prefix_hit_ratio,
     )
 }
 
@@ -660,6 +662,7 @@ pub(crate) fn build_direct_usage_record(
     usage: UsageNumbers,
     trigger_source: Option<String>,
     error_message: Option<String>,
+    prompt_prefix_hit_ratio: Option<f64>,
 ) -> RecordAiUsageInput {
     let request_fingerprint = usage::fingerprint_request(content);
     let attempt_group_key = usage::build_attempt_group_key(
@@ -697,6 +700,8 @@ pub(crate) fn build_direct_usage_record(
         attempt_group_key,
         trigger_source,
         error_message,
+        cached_prompt_tokens: usage.cached_prompt_tokens,
+        prompt_prefix_hit_ratio,
     }
 }
 
@@ -806,6 +811,8 @@ mod tests {
             attempt_group_key: "attempt".to_string(),
             trigger_source: None,
             error_message: None,
+            cached_prompt_tokens: None,
+            prompt_prefix_hit_ratio: None,
         }
     }
 
@@ -917,6 +924,8 @@ mod tests {
                 is_redo INTEGER NOT NULL DEFAULT 0,
                 trigger_source TEXT,
                 error_message TEXT,
+                cached_prompt_tokens INTEGER,
+                prompt_prefix_hit_ratio REAL,
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
              )",
         )

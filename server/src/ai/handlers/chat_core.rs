@@ -6,16 +6,22 @@ use super::assistant_actions::{
 };
 use super::*;
 use crate::ai::catalog_handlers;
+use crate::config::AppConfig;
 use crate::conversation::model::Message;
 
 pub(super) async fn prepare_chat_request(
-    pool: &SqlitePool,
+    state: &AppState,
     context: &ResolvedChatContext,
     execution_stage: &str,
 ) -> AppResult<PreparedChatRequest> {
-    let messages = build_conversation_messages(pool, context, execution_stage).await?;
+    let policy = ChatHistoryPolicy::from_config(&state.config);
+    let messages = build_conversation_messages(&state.db, context, execution_stage, policy).await?;
     let input_chars = message_char_count(&messages);
+    // 每次请求恰好测量一次：与该会话上一次请求对比共享前缀占比。
+    let prompt_prefix_hit_ratio =
+        crate::ai::cache_probe::measure_prefix_hit_ratio(&context.conversation.id, &messages);
     Ok(PreparedChatRequest {
+        prompt_prefix_hit_ratio,
         messages,
         input_chars,
     })
@@ -495,6 +501,7 @@ async fn build_conversation_messages(
     pool: &SqlitePool,
     context: &ResolvedChatContext,
     execution_stage: &str,
+    policy: ChatHistoryPolicy,
 ) -> AppResult<Vec<ChatMessage>> {
     let history = conversation::repo::list_message_history(pool, &context.conversation.id).await?;
     let runtime_prompt = build_execution_prompt(context, history.len(), execution_stage);
@@ -516,6 +523,7 @@ async fn build_conversation_messages(
         system_prompt,
         history,
         runtime_prompt,
+        policy,
     ))
 }
 
@@ -524,6 +532,7 @@ fn assemble_chat_messages(
     system_prompt: String,
     mut history: Vec<conversation::model::MessageHistoryEntry>,
     runtime_prompt: String,
+    policy: ChatHistoryPolicy,
 ) -> Vec<ChatMessage> {
     let mut messages = Vec::new();
 
@@ -539,18 +548,20 @@ fn assemble_chat_messages(
     //    使相邻两次请求共享更长的消息前缀，提高供应商 prompt cache 命中率。
     // 2) system prompt 只包含相对稳定的身份与规则；实时执行快照移到末尾，
     //    避免每次请求都破坏可复用的上下文前缀。
+    // 策略窗口与开关由启动配置（AI_CHAT_HISTORY_* 环境变量）决定，
+    // 关闭开关即可一键恢复全量历史的旧行为。
     let total_history = history.len();
-    if total_history > CHAT_HISTORY_PREFIX_KEEP + CHAT_HISTORY_RECENT_KEEP {
-        let drop_count = total_history - CHAT_HISTORY_RECENT_KEEP;
+    if policy.truncation_enabled && total_history > policy.max_history() {
+        let drop_count = total_history - policy.recent_keep;
         tracing::debug!(
             conversation_id = %conversation_id,
             total_history,
-            kept_prefix = CHAT_HISTORY_PREFIX_KEEP,
-            kept_recent = CHAT_HISTORY_RECENT_KEEP,
-            dropped_middle = drop_count - CHAT_HISTORY_PREFIX_KEEP,
+            kept_prefix = policy.prefix_keep,
+            kept_recent = policy.recent_keep,
+            dropped_middle = drop_count - policy.prefix_keep,
             "chat history truncated with stable prefix"
         );
-        history.drain(CHAT_HISTORY_PREFIX_KEEP..drop_count);
+        history.drain(policy.prefix_keep..drop_count);
     }
 
     for message in history {
@@ -572,10 +583,42 @@ fn assemble_chat_messages(
     messages
 }
 
-/// 裁剪会话历史时保留的最早轮次数量。
-const CHAT_HISTORY_PREFIX_KEEP: usize = 8;
-/// 裁剪会话历史时保留的最近消息数量。
-const CHAT_HISTORY_RECENT_KEEP: usize = 40;
+/// 会话历史上下文策略：控制发送给模型的历史是否按“前缀稳定”策略截断，
+/// 以及保留窗口大小。由 `AppConfig` 在启动时从环境变量构建，运行期不变。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChatHistoryPolicy {
+    /// 是否启用前缀稳定截断；关闭后每次请求发送全量历史（旧行为）。
+    truncation_enabled: bool,
+    /// 截断时保留的最早轮次数量（锚定前缀）。
+    prefix_keep: usize,
+    /// 截断时保留的最近消息数量。
+    recent_keep: usize,
+}
+
+impl Default for ChatHistoryPolicy {
+    fn default() -> Self {
+        Self {
+            truncation_enabled: true,
+            prefix_keep: 8,
+            recent_keep: 40,
+        }
+    }
+}
+
+impl ChatHistoryPolicy {
+    fn from_config(config: &AppConfig) -> Self {
+        Self {
+            truncation_enabled: config.ai_chat_history_truncation_enabled,
+            prefix_keep: config.ai_chat_history_prefix_keep,
+            recent_keep: config.ai_chat_history_recent_keep,
+        }
+    }
+
+    /// 触发截断的历史条数阈值：仅当总历史超过该值才裁剪，短会话零影响。
+    fn max_history(&self) -> usize {
+        self.prefix_keep.saturating_add(self.recent_keep)
+    }
+}
 
 pub(super) async fn resolve_chat_context(
     state: &AppState,
@@ -1203,15 +1246,18 @@ fn split_workflow_guard_block(content: &str) -> (String, Option<WorkflowGuard>) 
 
 #[cfg(test)]
 mod chat_history_tests {
+    use super::{assemble_chat_messages, ChatHistoryPolicy};
     use crate::conversation::model::MessageHistoryEntry;
-
-    use super::{assemble_chat_messages, CHAT_HISTORY_PREFIX_KEEP, CHAT_HISTORY_RECENT_KEEP};
 
     fn history_entry(role: &str, index: usize) -> MessageHistoryEntry {
         MessageHistoryEntry {
             role: role.to_string(),
             content: format!("message-{index}"),
         }
+    }
+
+    fn default_policy() -> ChatHistoryPolicy {
+        ChatHistoryPolicy::default()
     }
 
     #[test]
@@ -1222,6 +1268,7 @@ mod chat_history_tests {
             "stable system".to_string(),
             history,
             "runtime snapshot".to_string(),
+            default_policy(),
         );
 
         assert_eq!(messages.len(), 12);
@@ -1236,7 +1283,8 @@ mod chat_history_tests {
 
     #[test]
     fn long_session_truncates_with_stable_prefix_and_recent_window() {
-        let total = CHAT_HISTORY_PREFIX_KEEP + CHAT_HISTORY_RECENT_KEEP + 20;
+        let policy = default_policy();
+        let total = policy.prefix_keep + policy.recent_keep + 20;
         let history = (0..total)
             .map(|index| {
                 if index % 2 == 0 {
@@ -1251,25 +1299,121 @@ mod chat_history_tests {
             String::new(),
             history,
             "runtime snapshot".to_string(),
+            policy,
         );
 
-        assert_eq!(
-            messages.len(),
-            CHAT_HISTORY_PREFIX_KEEP + CHAT_HISTORY_RECENT_KEEP + 1
-        );
-        for (offset, message) in messages[..CHAT_HISTORY_PREFIX_KEEP].iter().enumerate() {
+        let prefix_keep = default_policy().prefix_keep;
+        let recent_keep = default_policy().recent_keep;
+        assert_eq!(messages.len(), prefix_keep + recent_keep + 1);
+        for (offset, message) in messages[..prefix_keep].iter().enumerate() {
             assert_eq!(message.content, format!("message-{offset}"));
         }
-        for (offset, message) in messages
-            [CHAT_HISTORY_PREFIX_KEEP..CHAT_HISTORY_PREFIX_KEEP + CHAT_HISTORY_RECENT_KEEP]
+        for (offset, message) in messages[prefix_keep..prefix_keep + recent_keep]
             .iter()
             .enumerate()
         {
-            let original_index = total - CHAT_HISTORY_RECENT_KEEP + offset;
+            let original_index = total - recent_keep + offset;
             assert_eq!(message.content, format!("message-{original_index}"));
         }
         let runtime_message = messages.last().unwrap();
         assert_eq!(runtime_message.role, "user");
         assert_eq!(runtime_message.content, "runtime snapshot");
+    }
+
+    #[test]
+    fn truncation_disabled_keeps_full_history() {
+        let policy = ChatHistoryPolicy {
+            truncation_enabled: false,
+            ..default_policy()
+        };
+        let total = policy.prefix_keep + policy.recent_keep + 20;
+        let history = (0..total)
+            .map(|index| history_entry("user", index))
+            .collect();
+        let messages = assemble_chat_messages(
+            "conversation-1".to_string(),
+            "stable system".to_string(),
+            history,
+            "runtime snapshot".to_string(),
+            policy,
+        );
+
+        // 旧行为：system + 全量历史 + 末尾 runtime 快照
+        assert_eq!(messages.len(), total + 2);
+        for (offset, message) in messages[1..total + 1].iter().enumerate() {
+            assert_eq!(message.content, format!("message-{offset}"));
+        }
+        assert_eq!(messages.last().unwrap().content, "runtime snapshot");
+    }
+
+    #[test]
+    fn custom_policy_uses_configured_window() {
+        let policy = ChatHistoryPolicy {
+            truncation_enabled: true,
+            prefix_keep: 2,
+            recent_keep: 3,
+        };
+        let total = 12;
+        let history = (0..total)
+            .map(|index| history_entry("user", index))
+            .collect();
+        let messages = assemble_chat_messages(
+            "conversation-1".to_string(),
+            String::new(),
+            history,
+            "runtime snapshot".to_string(),
+            policy,
+        );
+
+        assert_eq!(messages.len(), policy.prefix_keep + policy.recent_keep + 1);
+        for (offset, message) in messages[..policy.prefix_keep].iter().enumerate() {
+            assert_eq!(message.content, format!("message-{offset}"));
+        }
+        for (offset, message) in messages
+            [policy.prefix_keep..policy.prefix_keep + policy.recent_keep]
+            .iter()
+            .enumerate()
+        {
+            let original_index = total - policy.recent_keep + offset;
+            assert_eq!(message.content, format!("message-{original_index}"));
+        }
+    }
+
+    #[test]
+    fn zero_prefix_keeps_only_recent_window() {
+        let policy = ChatHistoryPolicy {
+            truncation_enabled: true,
+            prefix_keep: 0,
+            recent_keep: 3,
+        };
+        let total = 8;
+        let history = (0..total)
+            .map(|index| history_entry("user", index))
+            .collect();
+        let messages = assemble_chat_messages(
+            "conversation-1".to_string(),
+            String::new(),
+            history,
+            "runtime snapshot".to_string(),
+            policy,
+        );
+
+        assert_eq!(messages.len(), policy.recent_keep + 1);
+        for (offset, message) in messages[..policy.recent_keep].iter().enumerate() {
+            let original_index = total - policy.recent_keep + offset;
+            assert_eq!(message.content, format!("message-{original_index}"));
+        }
+    }
+
+    #[test]
+    fn policy_from_config_matches_fields() {
+        let mut config = crate::config::test_config();
+        config.ai_chat_history_truncation_enabled = false;
+        config.ai_chat_history_prefix_keep = 5;
+        config.ai_chat_history_recent_keep = 25;
+        let policy = ChatHistoryPolicy::from_config(&config);
+        assert!(!policy.truncation_enabled);
+        assert_eq!(policy.prefix_keep, 5);
+        assert_eq!(policy.recent_keep, 25);
     }
 }

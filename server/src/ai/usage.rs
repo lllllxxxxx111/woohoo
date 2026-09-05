@@ -93,6 +93,8 @@ pub struct UsageNumbers {
     pub completion_tokens: i64,
     pub total_tokens: i64,
     pub token_source: AiUsageTokenSource,
+    /// 供应商上报的缓存命中 prompt tokens；无上报或估算时为 None。
+    pub cached_prompt_tokens: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +130,10 @@ pub struct RecordAiUsageInput {
      */
     pub trigger_source: Option<String>,
     pub error_message: Option<String>,
+    /// 供应商上报的缓存命中 prompt tokens（无上报时为 None）。
+    pub cached_prompt_tokens: Option<i64>,
+    /// 与该会话上一次请求的共享前缀字符占比（探针缺失时为 None）。
+    pub prompt_prefix_hit_ratio: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -153,6 +159,7 @@ pub struct AiUsageSummary {
     pub window: AiUsageWindow,
     pub totals: AiUsageTotals,
     pub series: Vec<AiUsageSeriesPoint>,
+    pub by_conversation: Vec<AiUsageBreakdownItem>,
     pub by_endpoint: Vec<AiUsageBreakdownItem>,
     pub by_api_key: Vec<AiUsageBreakdownItem>,
     pub by_model: Vec<AiUsageBreakdownItem>,
@@ -207,6 +214,8 @@ pub struct AiUsageTotals {
     pub retry_success_tokens: i64,
     pub project_count: i64,
     pub conversation_count: i64,
+    pub cached_prompt_tokens: i64,
+    pub cached_token_records: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -219,6 +228,8 @@ pub struct AiUsageSeriesPoint {
     pub avg_latency_ms: i64,
     pub total_tokens: i64,
     pub output_items: i64,
+    pub cached_prompt_tokens: i64,
+    pub cached_token_records: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -232,6 +243,10 @@ pub struct AiUsageBreakdownItem {
     pub avg_latency_ms: i64,
     pub total_tokens: i64,
     pub output_items: i64,
+    /// 缓存命中 prompt tokens 合计（供应商上报时才有值）。
+    pub cached_prompt_tokens: i64,
+    /// 缓存命中率 = 缓存命中 tokens / prompt tokens；无供应商上报数据时为 None。
+    pub cache_hit_ratio: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -262,6 +277,8 @@ pub struct AiUsageRecord {
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
     pub total_tokens: i64,
+    pub cached_prompt_tokens: Option<i64>,
+    pub prompt_prefix_hit_ratio: Option<f64>,
     pub error_message: Option<String>,
     pub created_at: String,
 }
@@ -336,6 +353,8 @@ struct TotalsRow {
     retry_success_tokens: i64,
     project_count: i64,
     conversation_count: i64,
+    cached_prompt_tokens: i64,
+    cached_token_records: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -347,6 +366,8 @@ struct SeriesRow {
     avg_latency_ms: Option<f64>,
     total_tokens: i64,
     output_items: i64,
+    cached_prompt_tokens: i64,
+    cached_token_records: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -358,7 +379,25 @@ struct BreakdownRow {
     failure_count: i64,
     avg_latency_ms: Option<f64>,
     total_tokens: i64,
+    prompt_tokens: i64,
     output_items: i64,
+    cached_prompt_tokens: i64,
+    cached_token_records: i64,
+}
+
+/// 缓存命中率 = 缓存命中 tokens / prompt tokens。
+/// 仅当窗口内存在供应商上报数据（cached_token_records > 0）且 prompt tokens > 0 时给出比值，
+/// 否则返回 None 表示“无数据”而不是“命中率为 0”。
+fn cache_hit_ratio(
+    cached_prompt_tokens: i64,
+    cached_token_records: i64,
+    prompt_tokens: i64,
+) -> Option<f64> {
+    if cached_token_records > 0 && prompt_tokens > 0 {
+        Some(cached_prompt_tokens as f64 / prompt_tokens as f64)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, FromRow)]
@@ -388,6 +427,8 @@ struct UsageRecordRow {
     prompt_tokens: i64,
     completion_tokens: i64,
     total_tokens: i64,
+    cached_prompt_tokens: Option<i64>,
+    prompt_prefix_hit_ratio: Option<f64>,
     error_message: Option<String>,
     created_at: String,
 }
@@ -420,9 +461,10 @@ pub async fn record(pool: &SqlitePool, input: RecordAiUsageInput) -> AppResult<(
              output_items, latency_ms,
              prompt_tokens, completion_tokens, total_tokens, token_source,
              input_chars, output_chars, request_fingerprint, attempt_group_key,
-             attempt_index, is_redo, trigger_source, error_message
+             attempt_index, is_redo, trigger_source, error_message,
+             cached_prompt_tokens, prompt_prefix_hit_ratio
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(Uuid::new_v4().to_string())
     .bind(input.user_id)
@@ -450,6 +492,8 @@ pub async fn record(pool: &SqlitePool, input: RecordAiUsageInput) -> AppResult<(
     .bind(if is_redo { 1 } else { 0 })
     .bind(input.trigger_source)
     .bind(input.error_message)
+    .bind(input.cached_prompt_tokens)
+    .bind(input.prompt_prefix_hit_ratio)
     .execute(pool)
     .await?;
 
@@ -465,6 +509,7 @@ pub async fn build_summary(
     let (
         totals,
         series,
+        by_conversation,
         by_endpoint,
         by_api_key,
         by_model,
@@ -476,6 +521,7 @@ pub async fn build_summary(
     ) = tokio::try_join!(
         fetch_totals(pool, user_id, &query),
         fetch_series(pool, user_id, &query),
+        fetch_breakdown(pool, user_id, &query, BreakdownKind::Conversation),
         fetch_breakdown(pool, user_id, &query, BreakdownKind::Endpoint),
         fetch_breakdown(pool, user_id, &query, BreakdownKind::ApiKey),
         fetch_breakdown(pool, user_id, &query, BreakdownKind::Model),
@@ -504,6 +550,7 @@ pub async fn build_summary(
         },
         totals,
         series,
+        by_conversation,
         by_endpoint,
         by_api_key,
         by_model,
@@ -547,6 +594,7 @@ pub fn usage_from_response(
             completion_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
             token_source: AiUsageTokenSource::Actual,
+            cached_prompt_tokens: usage.cached_prompt_tokens,
         },
         None => {
             let prompt_tokens = estimate_prompt_tokens(messages);
@@ -556,6 +604,7 @@ pub fn usage_from_response(
                 completion_tokens,
                 total_tokens: prompt_tokens + completion_tokens,
                 token_source: AiUsageTokenSource::Estimated,
+                cached_prompt_tokens: None,
             }
         }
     }
@@ -563,6 +612,7 @@ pub fn usage_from_response(
 
 pub fn unavailable_usage() -> UsageNumbers {
     UsageNumbers {
+        cached_prompt_tokens: None,
         prompt_tokens: 0,
         completion_tokens: 0,
         total_tokens: 0,
@@ -760,7 +810,9 @@ async fn fetch_totals(
              COALESCE(SUM(CASE WHEN status = 'success' AND is_redo = 1 THEN 1 ELSE 0 END), 0) AS retry_success_count,
              COALESCE(SUM(CASE WHEN status = 'success' AND is_redo = 1 THEN total_tokens ELSE 0 END), 0) AS retry_success_tokens,
              COUNT(DISTINCT project_id) AS project_count,
-             COUNT(DISTINCT conversation_id) AS conversation_count
+             COUNT(DISTINCT conversation_id) AS conversation_count,
+             COALESCE(SUM(cached_prompt_tokens), 0) AS cached_prompt_tokens,
+             COUNT(cached_prompt_tokens) AS cached_token_records
          FROM ai_usage_events u
          WHERE u.user_id = ?
            AND (? IS NULL OR u.created_at >= ?)
@@ -822,6 +874,8 @@ async fn fetch_totals(
         retry_success_tokens: row.retry_success_tokens,
         project_count: row.project_count,
         conversation_count: row.conversation_count,
+        cached_prompt_tokens: row.cached_prompt_tokens,
+        cached_token_records: row.cached_token_records,
     })
 }
 
@@ -838,7 +892,9 @@ async fn fetch_series(
              COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failure_count,
              AVG(latency_ms) AS avg_latency_ms,
              COALESCE(SUM(total_tokens), 0) AS total_tokens,
-             COALESCE(SUM(output_items), 0) AS output_items
+             COALESCE(SUM(output_items), 0) AS output_items,
+             COALESCE(SUM(cached_prompt_tokens), 0) AS cached_prompt_tokens,
+             COUNT(cached_prompt_tokens) AS cached_token_records
          FROM ai_usage_events u
          WHERE u.user_id = ?
            AND (? IS NULL OR u.created_at >= ?)
@@ -891,6 +947,8 @@ async fn fetch_series(
             avg_latency_ms: row.avg_latency_ms.unwrap_or_default().round() as i64,
             total_tokens: row.total_tokens,
             output_items: row.output_items,
+            cached_prompt_tokens: row.cached_prompt_tokens,
+            cached_token_records: row.cached_token_records,
         })
         .collect())
 }
@@ -902,6 +960,7 @@ enum BreakdownKind {
     Model,
     Agent,
     Project,
+    Conversation,
     Operation,
     ResourceKind,
 }
@@ -925,7 +984,10 @@ async fn fetch_breakdown(
                  COALESCE(SUM(CASE WHEN u.status = 'failed' THEN 1 ELSE 0 END), 0) AS failure_count,
                  AVG(u.latency_ms) AS avg_latency_ms,
                  COALESCE(SUM(u.total_tokens), 0) AS total_tokens,
-                 COALESCE(SUM(u.output_items), 0) AS output_items
+                 COALESCE(SUM(u.prompt_tokens), 0) AS prompt_tokens,
+                 COALESCE(SUM(u.output_items), 0) AS output_items,
+                 COALESCE(SUM(u.cached_prompt_tokens), 0) AS cached_prompt_tokens,
+                 COUNT(u.cached_prompt_tokens) AS cached_token_records
              FROM ai_usage_events u
              LEFT JOIN ai_endpoints ep ON ep.id = u.endpoint_id AND ep.user_id = u.user_id
              WHERE u.user_id = ?
@@ -955,7 +1017,10 @@ async fn fetch_breakdown(
                  COALESCE(SUM(CASE WHEN u.status = 'failed' THEN 1 ELSE 0 END), 0) AS failure_count,
                  AVG(u.latency_ms) AS avg_latency_ms,
                  COALESCE(SUM(u.total_tokens), 0) AS total_tokens,
-                 COALESCE(SUM(u.output_items), 0) AS output_items
+                 COALESCE(SUM(u.prompt_tokens), 0) AS prompt_tokens,
+                 COALESCE(SUM(u.output_items), 0) AS output_items,
+                 COALESCE(SUM(u.cached_prompt_tokens), 0) AS cached_prompt_tokens,
+                 COUNT(u.cached_prompt_tokens) AS cached_token_records
              FROM ai_usage_events u
              WHERE u.user_id = ?
                AND (? IS NULL OR u.created_at >= ?)
@@ -981,7 +1046,10 @@ async fn fetch_breakdown(
                  COALESCE(SUM(CASE WHEN u.status = 'failed' THEN 1 ELSE 0 END), 0) AS failure_count,
                  AVG(u.latency_ms) AS avg_latency_ms,
                  COALESCE(SUM(u.total_tokens), 0) AS total_tokens,
-                 COALESCE(SUM(u.output_items), 0) AS output_items
+                 COALESCE(SUM(u.prompt_tokens), 0) AS prompt_tokens,
+                 COALESCE(SUM(u.output_items), 0) AS output_items,
+                 COALESCE(SUM(u.cached_prompt_tokens), 0) AS cached_prompt_tokens,
+                 COUNT(u.cached_prompt_tokens) AS cached_token_records
              FROM ai_usage_events u
              WHERE u.user_id = ?
                AND (? IS NULL OR u.created_at >= ?)
@@ -1010,7 +1078,10 @@ async fn fetch_breakdown(
                  COALESCE(SUM(CASE WHEN u.status = 'failed' THEN 1 ELSE 0 END), 0) AS failure_count,
                  AVG(u.latency_ms) AS avg_latency_ms,
                  COALESCE(SUM(u.total_tokens), 0) AS total_tokens,
-                 COALESCE(SUM(u.output_items), 0) AS output_items
+                 COALESCE(SUM(u.prompt_tokens), 0) AS prompt_tokens,
+                 COALESCE(SUM(u.output_items), 0) AS output_items,
+                 COALESCE(SUM(u.cached_prompt_tokens), 0) AS cached_prompt_tokens,
+                 COUNT(u.cached_prompt_tokens) AS cached_token_records
              FROM ai_usage_events u
              LEFT JOIN agents a ON a.id = u.agent_id AND a.user_id = u.user_id
              WHERE u.user_id = ?
@@ -1040,7 +1111,10 @@ async fn fetch_breakdown(
                  COALESCE(SUM(CASE WHEN u.status = 'failed' THEN 1 ELSE 0 END), 0) AS failure_count,
                  AVG(u.latency_ms) AS avg_latency_ms,
                  COALESCE(SUM(u.total_tokens), 0) AS total_tokens,
-                 COALESCE(SUM(u.output_items), 0) AS output_items
+                 COALESCE(SUM(u.prompt_tokens), 0) AS prompt_tokens,
+                 COALESCE(SUM(u.output_items), 0) AS output_items,
+                 COALESCE(SUM(u.cached_prompt_tokens), 0) AS cached_prompt_tokens,
+                 COUNT(u.cached_prompt_tokens) AS cached_token_records
              FROM ai_usage_events u
              LEFT JOIN projects p ON p.id = u.project_id AND p.user_id = u.user_id
              WHERE u.user_id = ?
@@ -1058,6 +1132,39 @@ async fn fetch_breakdown(
              ORDER BY total_tokens DESC, request_count DESC
              LIMIT 10"
         }
+        BreakdownKind::Conversation => {
+            "SELECT
+                 COALESCE(u.conversation_id, '') AS key,
+                 CASE
+                     WHEN u.conversation_id IS NULL THEN '非会话请求'
+                     ELSE COALESCE(cv.title, '已删除会话')
+                 END AS label,
+                 COUNT(*) AS request_count,
+                 COALESCE(SUM(CASE WHEN u.status = 'success' THEN 1 ELSE 0 END), 0) AS success_count,
+                 COALESCE(SUM(CASE WHEN u.status = 'failed' THEN 1 ELSE 0 END), 0) AS failure_count,
+                 AVG(u.latency_ms) AS avg_latency_ms,
+                 COALESCE(SUM(u.total_tokens), 0) AS total_tokens,
+                 COALESCE(SUM(u.prompt_tokens), 0) AS prompt_tokens,
+                 COALESCE(SUM(u.output_items), 0) AS output_items,
+                 COALESCE(SUM(u.cached_prompt_tokens), 0) AS cached_prompt_tokens,
+                 COUNT(u.cached_prompt_tokens) AS cached_token_records
+             FROM ai_usage_events u
+             LEFT JOIN conversations cv ON cv.id = u.conversation_id AND cv.user_id = u.user_id
+             WHERE u.user_id = ?
+               AND (? IS NULL OR u.created_at >= ?)
+               AND (? IS NULL OR u.project_id = ?)
+               AND (? IS NULL OR u.conversation_id = ?)
+               AND (? IS NULL OR u.agent_id = ?)
+               AND (? IS NULL OR u.endpoint_id = ?)
+               AND (? IS NULL OR u.api_key_fingerprint = ?)
+               AND (? IS NULL OR u.resource_kind = ?)
+               AND (? IS NULL OR u.model = ?)
+               AND (? IS NULL OR u.operation = ?)
+               AND (? IS NULL OR u.status = ?)
+             GROUP BY u.conversation_id, label
+             ORDER BY total_tokens DESC, request_count DESC
+             LIMIT 10"
+        }
         BreakdownKind::Operation => {
             "SELECT
                  u.operation AS key,
@@ -1067,7 +1174,10 @@ async fn fetch_breakdown(
                  COALESCE(SUM(CASE WHEN u.status = 'failed' THEN 1 ELSE 0 END), 0) AS failure_count,
                  AVG(u.latency_ms) AS avg_latency_ms,
                  COALESCE(SUM(u.total_tokens), 0) AS total_tokens,
-                 COALESCE(SUM(u.output_items), 0) AS output_items
+                 COALESCE(SUM(u.prompt_tokens), 0) AS prompt_tokens,
+                 COALESCE(SUM(u.output_items), 0) AS output_items,
+                 COALESCE(SUM(u.cached_prompt_tokens), 0) AS cached_prompt_tokens,
+                 COUNT(u.cached_prompt_tokens) AS cached_token_records
              FROM ai_usage_events u
              WHERE u.user_id = ?
                AND (? IS NULL OR u.created_at >= ?)
@@ -1093,7 +1203,10 @@ async fn fetch_breakdown(
                  COALESCE(SUM(CASE WHEN u.status = 'failed' THEN 1 ELSE 0 END), 0) AS failure_count,
                  AVG(u.latency_ms) AS avg_latency_ms,
                  COALESCE(SUM(u.total_tokens), 0) AS total_tokens,
-                 COALESCE(SUM(u.output_items), 0) AS output_items
+                 COALESCE(SUM(u.prompt_tokens), 0) AS prompt_tokens,
+                 COALESCE(SUM(u.output_items), 0) AS output_items,
+                 COALESCE(SUM(u.cached_prompt_tokens), 0) AS cached_prompt_tokens,
+                 COUNT(u.cached_prompt_tokens) AS cached_token_records
              FROM ai_usage_events u
              WHERE u.user_id = ?
                AND (? IS NULL OR u.created_at >= ?)
@@ -1148,6 +1261,12 @@ async fn fetch_breakdown(
             avg_latency_ms: row.avg_latency_ms.unwrap_or_default().round() as i64,
             total_tokens: row.total_tokens,
             output_items: row.output_items,
+            cached_prompt_tokens: row.cached_prompt_tokens,
+            cache_hit_ratio: cache_hit_ratio(
+                row.cached_prompt_tokens,
+                row.cached_token_records,
+                row.prompt_tokens,
+            ),
         })
         .collect())
 }
@@ -1184,6 +1303,8 @@ async fn list_records_with_query(
              u.prompt_tokens,
              u.completion_tokens,
              u.total_tokens,
+             u.cached_prompt_tokens,
+             u.prompt_prefix_hit_ratio,
              u.error_message,
              u.created_at
          FROM ai_usage_events u
@@ -1257,8 +1378,32 @@ async fn list_records_with_query(
             prompt_tokens: row.prompt_tokens,
             completion_tokens: row.completion_tokens,
             total_tokens: row.total_tokens,
+            cached_prompt_tokens: row.cached_prompt_tokens,
+            prompt_prefix_hit_ratio: row.prompt_prefix_hit_ratio,
             error_message: row.error_message,
             created_at: row.created_at,
         })
         .collect())
+}
+
+#[cfg(test)]
+mod cache_metrics_tests {
+    use super::cache_hit_ratio;
+
+    #[test]
+    fn ratio_needs_reported_records_and_positive_prompt_tokens() {
+        let ratio = cache_hit_ratio(800, 3, 1000).expect("ratio");
+        assert!((ratio - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ratio_is_none_without_reported_records() {
+        // 无供应商上报时 None 表示"无数据"，不能把命中率误报为 0。
+        assert_eq!(cache_hit_ratio(0, 0, 1000), None);
+    }
+
+    #[test]
+    fn ratio_is_none_with_zero_prompt_tokens() {
+        assert_eq!(cache_hit_ratio(0, 2, 0), None);
+    }
 }
