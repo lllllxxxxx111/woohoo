@@ -2213,6 +2213,7 @@ const endpointApi = createEndpointApi({
 export const listServerAiEndpoints = endpointApi.listServerAiEndpoints;
 export const createServerAiEndpoint = endpointApi.createServerAiEndpoint;
 export const updateServerAiEndpoint = endpointApi.updateServerAiEndpoint;
+export const setServerAiEndpointActive = endpointApi.setServerAiEndpointActive;
 export const deleteServerAiEndpoint = endpointApi.deleteServerAiEndpoint;
 export const listServerAiEndpointModels = endpointApi.listServerAiEndpointModels;
 export const listServerAiEndpointCapabilities = endpointApi.listServerAiEndpointCapabilities;

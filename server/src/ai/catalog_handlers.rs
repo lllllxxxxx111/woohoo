@@ -20,7 +20,8 @@ use super::{
         Agent, AgentContact, AiEndpoint, AiEndpointCapability, AiEndpointCapabilityView,
         AiEndpointModelsReq, AiEndpointModelsResp, AiEndpointView, AssignProjectAgentReq,
         CreateAgentReq, CreateEndpointReq, CreateProjectAgentReq, ProjectRoleCounts,
-        ProjectWorkflowSummary, UpdateAgentReq, UpdateEndpointReq, UpsertEndpointCapabilityReq,
+        ProjectWorkflowSummary, SetEndpointActiveReq, UpdateAgentReq, UpdateEndpointReq,
+        UpsertEndpointCapabilityReq,
     },
     handlers::{
         default_pass_rate, ensure_agent_access, ensure_project_access,
@@ -169,6 +170,38 @@ pub async fn update_endpoint(
     .bind(req.base_url.trim())
     .bind(&next_api_key_stored)
     .bind(req.default_model.as_deref().map(str::trim))
+    .bind(&id)
+    .bind(&user_id.0)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("AI 端点不存在".into()))?;
+
+    Ok(Json(build_endpoint_view(&state.db, endpoint).await?))
+}
+
+/**
+ * 启用/停用 AI 端点
+ *
+ * PUT /api/ai/endpoints/{id}/active
+ *
+ * 独立于 update_endpoint：启用/停用只翻转 is_active，不要求重传完整通道
+ * 配置（前端开关直接调用，避免误改 name/base_url）。
+ * 停用后的通道不参与聊天/图片/视频的通道选择，也不会被编排调度计入
+ * 可用端点（orchestrator 的 is_active = 1 计数）。
+ */
+pub async fn set_endpoint_active(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Path(id): Path<String>,
+    Json(req): Json<SetEndpointActiveReq>,
+) -> AppResult<Json<AiEndpointView>> {
+    let endpoint = sqlx::query_as::<_, AiEndpoint>(
+        "UPDATE ai_endpoints
+         SET is_active = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+         WHERE id = ? AND user_id = ?
+         RETURNING *",
+    )
+    .bind(req.is_active)
     .bind(&id)
     .bind(&user_id.0)
     .fetch_optional(&state.db)

@@ -1,6 +1,7 @@
 import type { AiProvider, AiSettings } from '../types';
 import { logger } from './logger';
 import { getServerBaseUrl } from './serverApi';
+import type { AiTask } from './serverApi';
 
 /** 获取认证请求头 */
 async function getAuthHeaders(): Promise<Record<string, string>> {
@@ -940,4 +941,23 @@ export async function removeTask(taskId: string): Promise<void> {
     const errorData = await response.json().catch(() => null);
     throw new Error(errorData?.error || `删除任务失败 (${response.status})`);
   }
+}
+
+/**
+ * 重试失败的任务：以原任务的会话/内容/端点偏好重新发起，
+ * 返回新的排队任务（按原参数重新计费）
+ */
+export async function retryTask(taskId: string): Promise<AiTask> {
+  const baseUrl = await getServerBaseUrl();
+  const headers = await getAuthHeaders();
+  const response = await fetch(`${baseUrl}/api/ai/tasks/${taskId}/retry`, {
+    method: 'POST',
+    headers,
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => null);
+    throw new Error(errorData?.error || `重试任务失败 (${response.status})`);
+  }
+  return (await response.json()) as AiTask;
 }

@@ -11,11 +11,12 @@ import {
   WifiOff,
   Square,
   Copy,
+  RotateCw,
 } from 'lucide-react';
 import { useAppStore } from '../../../../store';
 import { useShallow } from 'zustand/react/shallow';
 import { useToast } from '../../../../context/useToast';
-import { cancelTask } from '../../../../lib/ai';
+import { cancelTask, retryTask } from '../../../../lib/ai';
 import type { AiTask } from '../../../../lib/serverApi';
 import styles from './AutomationArea.module.css';
 
@@ -57,6 +58,7 @@ export const AutomationArea: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [cancellingIds, setCancellingIds] = useState<ReadonlySet<string>>(new Set());
+  const [retryingIds, setRetryingIds] = useState<ReadonlySet<string>>(new Set());
   const { showToast } = useToast();
 
   const handleCancelTask = async (taskId: string) => {
@@ -83,8 +85,42 @@ export const AutomationArea: React.FC = () => {
   };
 
   /**
-   * 失败任务没有服务端重试端点，忠实重发需要会话上下文（agent/消息流），
-   * 这里提供原始请求复制，方便回到对应会话/入口重新发起
+   * 重试失败任务：服务端以原任务的会话/内容/端点偏好重新发起并计费，
+   * 新任务经 SSE 快照回流到本列表
+   */
+  const handleRetryTask = async (taskId: string) => {
+    if (retryingIds.has(taskId)) {
+      return;
+    }
+    setRetryingIds((prev) => new Set(prev).add(taskId));
+    try {
+      const next = await retryTask(taskId);
+      showToast({
+        type: 'success',
+        title: '已重新发起',
+        message: `新任务 ${next.id.slice(0, 8)} 已排队，按原参数重新计费。`,
+      });
+    } catch (error) {
+      showToast({
+        type: 'error',
+        title: '重试失败',
+        message:
+          error instanceof Error
+            ? error.message
+            : '无法重试该任务（服务重启后历史任务不可重试，请回会话重新发起）',
+      });
+    } finally {
+      setRetryingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(taskId);
+        return next;
+      });
+    }
+  };
+
+  /**
+   * 服务端没有针对历史任务的复制场景时，提供原始请求复制，
+   * 方便回到对应会话/入口重新发起
    */
   const handleCopyTaskRequest = async (task: AiTask) => {
     const succeeded = await copyTextToClipboard(task.content);
@@ -419,13 +455,28 @@ export const AutomationArea: React.FC = () => {
                     </button>
                   )}
                   {task.status === 'failed' && (
-                    <button
-                      className={styles.toolBtn}
-                      onClick={() => void handleCopyTaskRequest(task)}
-                      style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
-                    >
-                      <Copy size={12} /> 复制原始请求
-                    </button>
+                    <>
+                      <button
+                        className={styles.toolBtn}
+                        disabled={retryingIds.has(task.id)}
+                        onClick={() => void handleRetryTask(task.id)}
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 4,
+                          opacity: retryingIds.has(task.id) ? 0.6 : 1,
+                        }}
+                      >
+                        <RotateCw size={12} /> {retryingIds.has(task.id) ? '重试中' : '重试任务'}
+                      </button>
+                      <button
+                        className={styles.toolBtn}
+                        onClick={() => void handleCopyTaskRequest(task)}
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                      >
+                        <Copy size={12} /> 复制原始请求
+                      </button>
+                    </>
                   )}
                 </div>
               </div>

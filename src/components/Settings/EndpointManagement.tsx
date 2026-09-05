@@ -19,6 +19,7 @@ import {
   listServerAiEndpoints,
   createServerAiEndpoint,
   updateServerAiEndpoint,
+  setServerAiEndpointActive,
   deleteServerAiEndpoint,
   listServerAiEndpointModels,
   testServerAiCompletionByEndpoint,
@@ -103,8 +104,40 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
   const [fetchingModels, setFetchingModels] = useState(false);
   const [capabilities, setCapabilities] = useState<ServerAiEndpointCapability[]>([]);
   const [capabilitiesLoading, setCapabilitiesLoading] = useState(false);
+  const [togglingActiveIds, setTogglingActiveIds] = useState<ReadonlySet<string>>(new Set());
   const { showToast } = useToast();
   const [form] = Form.useForm();
+
+  /** 启用/停用端点：只翻转 isActive，失败时保持原状并提示 */
+  const handleToggleEndpointActive = async (record: ServerAiEndpoint, nextActive: boolean) => {
+    if (togglingActiveIds.has(record.id)) {
+      return;
+    }
+    setTogglingActiveIds((prev) => new Set(prev).add(record.id));
+    try {
+      const updated = await setServerAiEndpointActive(record.id, nextActive);
+      setEndpoints((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      showToast({
+        type: 'success',
+        title: nextActive ? '通道已启用' : '通道已停用',
+        message: nextActive
+          ? `「${updated.name}」已恢复参与通道选择与编排调度`
+          : `「${updated.name}」已停用，聊天/图片/视频/编排将不再选用该通道`,
+      });
+    } catch (error) {
+      showToast({
+        type: 'error',
+        title: nextActive ? '启用失败' : '停用失败',
+        message: error instanceof Error ? error.message : '无法更新端点状态，请重试',
+      });
+    } finally {
+      setTogglingActiveIds((prev) => {
+        const next = new Set(prev);
+        next.delete(record.id);
+        return next;
+      });
+    }
+  };
 
   /** 根据设置和端点 ID 构建连通性签名，用于判断是否需要重新测试 */
   const buildConnectivitySignature = (
@@ -671,9 +704,19 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
     {
       title: '全局启用',
       dataIndex: 'isActive',
-      render: (isActive: boolean) => (
-        <Tooltip content="通道创建后自动启用；删除通道即停用">
-          <Switch checked={isActive} disabled />
+      render: (isActive: boolean, record: ServerAiEndpoint) => (
+        <Tooltip
+          content={
+            isActive
+              ? '参与通道选择与编排调度；停用后聊天/图片/视频不再选用该通道'
+              : '已停用：不参与通道选择与编排调度，点击启用'
+          }
+        >
+          <Switch
+            checked={isActive}
+            loading={togglingActiveIds.has(record.id)}
+            onChange={(next) => void handleToggleEndpointActive(record, next)}
+          />
         </Tooltip>
       ),
     },

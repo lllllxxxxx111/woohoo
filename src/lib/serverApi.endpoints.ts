@@ -156,6 +156,20 @@ export function createEndpointApi({
     invalidateApiCache(cacheKeys.aiEndpoints);
   };
 
+  /**
+   * 启用/停用指定端点（只翻转 isActive，不改动通道配置）。
+   * 停用后的通道不参与聊天/图片/视频的通道选择与编排调度。
+   */
+  const setServerAiEndpointActive = async (endpointId: string, isActive: boolean) => {
+    const endpoint = await requestApi<ServerAiEndpoint>(`/api/ai/endpoints/${endpointId}/active`, {
+      method: 'PUT',
+      body: JSON.stringify({ isActive }),
+    });
+
+    invalidateApiCache(cacheKeys.aiEndpoints);
+    return endpoint;
+  };
+
   const listServerAiEndpointModels = async (input: ListEndpointModelsInput) => {
     return requestApi<ListEndpointModelsResult>('/api/ai/endpoints/models', {
       method: 'POST',
@@ -194,6 +208,7 @@ export function createEndpointApi({
     listServerAiEndpoints,
     createServerAiEndpoint,
     updateServerAiEndpoint,
+    setServerAiEndpointActive,
     deleteServerAiEndpoint,
     listServerAiEndpointModels,
     listServerAiEndpointCapabilities,

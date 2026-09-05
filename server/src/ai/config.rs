@@ -284,6 +284,12 @@ pub struct UpdateEndpointReq {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SetEndpointActiveReq {
+    pub is_active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpsertEndpointCapabilityReq {
     pub capability: String,
     pub model: Option<String>,

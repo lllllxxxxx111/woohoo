@@ -15,7 +15,7 @@ use crate::{
 };
 
 use super::{
-    config::{AiChatReq, AiTask, AiTaskFilter},
+    config::{AiChatReq, AiTask, AiTaskFilter, AiTaskStatus},
     handlers::{
         enqueue_ai_task_for_request, resolve_stream_fallback_mode, task_matches_filter, to_json,
     },
@@ -117,6 +117,74 @@ pub async fn create_task(
         req,
         AiUsageOperation::Task,
         stream_fallback_mode,
+    )
+    .await?;
+
+    Ok((StatusCode::ACCEPTED, Json(task)))
+}
+
+/**
+ * 重试失败任务
+ *
+ * POST /api/ai/tasks/{id}/retry
+ *
+ * 从内存 runtime 取原任务记录，重建请求走标准入队链路（重新解析端点/模型、
+ * 重新计费、重新持久化用户消息与占位消息）。语义上是「重新发起」：
+ *   - 仅 failed 任务可重试；queued/running 拒绝，completed 提示无需重试；
+ *   - 原任务的 endpoint/model/output 参数作为偏好传入，解析失败时返回
+ *     明确错误（如端点已删除），由用户调整后重试；
+ *   - 任务记录仅存于内存，服务重启后历史任务不可重试（返回 404 引导回会话重发）。
+ */
+pub async fn retry_task(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Path(task_id): Path<String>,
+) -> AppResult<(StatusCode, Json<AiTask>)> {
+    let previous = state
+        .ai_runtime
+        .get_task(&user_id.0, &task_id)
+        .await
+        .ok_or_else(|| {
+            AppError::NotFound("任务记录不存在或已因服务重启清理，请回到对应会话重新发起".into())
+        })?;
+
+    match previous.status {
+        AiTaskStatus::Failed => {}
+        AiTaskStatus::Queued | AiTaskStatus::Running => {
+            return Err(AppError::Validation("任务仍在进行中，无法重试".into()));
+        }
+        AiTaskStatus::Completed => {
+            return Err(AppError::Validation("任务已成功完成，无需重试".into()));
+        }
+    }
+
+    let req = AiChatReq {
+        conversation_id: previous.conversation_id.clone(),
+        content: previous.content.clone(),
+        resource_refs: None,
+        agent_id: previous.agent_id.clone(),
+        endpoint_id: previous.endpoint_id.clone(),
+        model: previous.model.clone(),
+        force_stream_fallback: None,
+        system_prompt: None,
+        temperature: None,
+        top_p: None,
+        frequency_penalty: None,
+        max_tokens: None,
+        output_kind: previous.output_kind.clone(),
+        output_items: previous.output_items,
+        allow_assistant_actions: false,
+        confirmed_message_id: None,
+        confirmed_workflow_guard_message_id: None,
+        trigger_source: Some("retry".to_string()),
+    };
+
+    let task = enqueue_ai_task_for_request(
+        &state,
+        &user_id.0,
+        req,
+        AiUsageOperation::Task,
+        resolve_stream_fallback_mode(None, None),
     )
     .await?;
 

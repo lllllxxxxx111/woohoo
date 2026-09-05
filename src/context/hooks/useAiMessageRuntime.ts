@@ -183,7 +183,7 @@ export function useAiMessageRuntime({
       );
       if (disabledOrMissingKeyEndpoint) {
         throw new Error(
-          `匹配的 AI 通道没有保存 API Key 或当前不可用（provider=${settings.provider}）。请前往“设置 > API 通道”编辑该通道并重新保存密钥。`,
+          `匹配的 AI 通道没有保存 API Key 或已被停用（provider=${settings.provider}）。请前往“设置 > API 通道”启用该通道并确认密钥已保存。`,
         );
       }
 

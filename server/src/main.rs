@@ -464,6 +464,10 @@ async fn main() {
                 .delete(ai::catalog_handlers::delete_endpoint),
         )
         .route(
+            "/api/ai/endpoints/{id}/active",
+            axum::routing::put(ai::catalog_handlers::set_endpoint_active),
+        )
+        .route(
             "/api/ai/endpoints/{id}/capabilities",
             get(ai::catalog_handlers::list_endpoint_capabilities)
                 .put(ai::catalog_handlers::upsert_endpoint_capability),
@@ -490,6 +494,10 @@ async fn main() {
         .route(
             "/api/ai/tasks/{id}",
             get(ai::task_handlers::get_task).delete(ai::task_handlers::cancel_task),
+        )
+        .route(
+            "/api/ai/tasks/{id}/retry",
+            post(ai::task_handlers::retry_task),
         )
         .route(
             "/api/ai/tasks/{id}/remove",
