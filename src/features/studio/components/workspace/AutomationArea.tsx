@@ -10,6 +10,7 @@ import {
   Wifi,
   WifiOff,
   Square,
+  Copy,
 } from 'lucide-react';
 import { useAppStore } from '../../../../store';
 import { useShallow } from 'zustand/react/shallow';
@@ -17,6 +18,32 @@ import { useToast } from '../../../../context/useToast';
 import { cancelTask } from '../../../../lib/ai';
 import type { AiTask } from '../../../../lib/serverApi';
 import styles from './AutomationArea.module.css';
+
+/** 复制文本到剪贴板：优先 Clipboard API，不可用时回退 execCommand */
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // 忽略并回退到 execCommand
+  }
+
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const succeeded = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    return succeeded;
+  } catch {
+    return false;
+  }
+}
 
 export const AutomationArea: React.FC = () => {
   const { activeState, aiTasks: tasks, isSseConnected: isConnected, sseError } = useAppStore(
@@ -53,6 +80,21 @@ export const AutomationArea: React.FC = () => {
         return next;
       });
     }
+  };
+
+  /**
+   * 失败任务没有服务端重试端点，忠实重发需要会话上下文（agent/消息流），
+   * 这里提供原始请求复制，方便回到对应会话/入口重新发起
+   */
+  const handleCopyTaskRequest = async (task: AiTask) => {
+    const succeeded = await copyTextToClipboard(task.content);
+    showToast({
+      type: succeeded ? 'success' : 'error',
+      title: succeeded ? '原始请求已复制' : '复制失败',
+      message: succeeded
+        ? '已复制失败任务的原始请求，可到对应会话或功能入口重新发起。'
+        : '当前环境不支持自动复制，请手动记录任务内容。',
+    });
   };
 
   const getStatusClass = (status: string) => {
@@ -374,6 +416,15 @@ export const AutomationArea: React.FC = () => {
                       }}
                     >
                       <Square size={12} /> {cancellingIds.has(task.id) ? '取消中' : '取消任务'}
+                    </button>
+                  )}
+                  {task.status === 'failed' && (
+                    <button
+                      className={styles.toolBtn}
+                      onClick={() => void handleCopyTaskRequest(task)}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                    >
+                      <Copy size={12} /> 复制原始请求
                     </button>
                   )}
                 </div>

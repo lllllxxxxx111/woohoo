@@ -397,3 +397,30 @@
   text-align: center;
   line-height: 1.6;
 }
+
+/* 规划中占位：真实能力入口清单 */
+.capabilityList {
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.capabilityItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.capabilityItem svg {
+  flex-shrink: 0;
+  color: var(--bg-accent);
+}

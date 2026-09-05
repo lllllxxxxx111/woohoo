@@ -1,10 +1,13 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Space, Tag, Typography, Spin, Button } from '@arco-design/web-react';
-import { Activity, AlertTriangle, CheckCircle, XCircle } from 'lucide-react';
+import { Activity, AlertTriangle, CheckCircle, RefreshCw, XCircle } from 'lucide-react';
 import { getOpsOverview, listOpsFindings } from '../../lib/serverApi';
 import type { OpsOverview, InspectionFinding } from '../../lib/serverApi.ops';
 
 const { Text } = Typography;
+
+/** 运维数据自动刷新间隔（心跳/告警变化较慢，30s 足够且开销可忽略） */
+const REFRESH_INTERVAL_MS = 30_000;
 
 /** 运维监控面板组件 */
 export const OpsMonitorPanel: React.FC = () => {
@@ -12,35 +15,30 @@ export const OpsMonitorPanel: React.FC = () => {
   const [findings, setFindings] = useState<InspectionFinding[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [reloadTick, setReloadTick] = useState(0);
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
 
-  useEffect(() => {
-    let isActive = true;
+  const load = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
+    try {
+      const [ov, fd] = await Promise.all([getOpsOverview(), listOpsFindings(false, 20)]);
+      setOverview(ov);
+      setFindings(fd);
+      setLastUpdated(Date.now());
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : '运维数据加载失败');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-    Promise.all([getOpsOverview(), listOpsFindings(false, 20)])
-      .then(([ov, fd]) => {
-        if (isActive) {
-          setOverview(ov);
-          setFindings(fd);
-        }
-      })
-      .catch((error) => {
-        if (isActive) {
-          setLoadError(error instanceof Error ? error.message : '运维数据加载失败');
-        }
-      })
-      .finally(() => {
-        if (isActive) setLoading(false);
-      });
+  useEffect(() => {
+    void load();
+    const intervalId = window.setInterval(() => void load(), REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(intervalId);
+  }, [load]);
 
-    return () => {
-      isActive = false;
-    };
-  }, [reloadTick]);
-
-  if (loading) {
+  if (loading && !overview) {
     return (
       <div style={{ textAlign: 'center', padding: 20 }}>
         <Spin />
@@ -48,19 +46,19 @@ export const OpsMonitorPanel: React.FC = () => {
     );
   }
 
-  if (loadError || !overview) {
+  if (loadError && !overview) {
     return (
       <Space direction="vertical" size="small" style={{ width: '100%' }}>
-        <Text type="secondary">
-          {loadError
-            ? `无法加载运维数据：${loadError}。请确认后端服务正在运行。`
-            : '无法加载运维数据，请确认后端服务正在运行。'}
-        </Text>
-        <Button size="mini" type="outline" onClick={() => setReloadTick((t) => t + 1)}>
+        <Text type="secondary">无法加载运维数据：{loadError}。请确认后端服务正在运行。</Text>
+        <Button size="mini" type="outline" onClick={() => void load()}>
           重试
         </Button>
       </Space>
     );
+  }
+
+  if (!overview) {
+    return <Text type="secondary">无法加载运维数据，请确认后端服务正在运行。</Text>;
   }
 
   const summary = overview.notificationSummary;
@@ -68,6 +66,14 @@ export const OpsMonitorPanel: React.FC = () => {
 
   return (
     <Space direction="vertical" size="medium" style={{ width: '100%' }}>
+      {loadError ? (
+        <Text type="secondary" style={{ color: 'var(--color-danger-light-4)' }}>
+          后台刷新失败：{loadError}（当前展示的是上次成功的数据）。
+          <Button size="mini" type="text" onClick={() => void load()}>
+            重试
+          </Button>
+        </Text>
+      ) : null}
       <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <Activity size={16} style={{ color: 'var(--color-primary-6)' }} />
@@ -130,6 +136,31 @@ export const OpsMonitorPanel: React.FC = () => {
           ))}
         </div>
       )}
+
+      <div
+        style={{
+          marginTop: 4,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          fontSize: 12,
+        }}
+      >
+        <Text type="secondary">
+          {lastUpdated
+            ? `上次更新：${new Date(lastUpdated).toLocaleTimeString()} · 每 30 秒自动刷新`
+            : '每 30 秒自动刷新'}
+        </Text>
+        <Button
+          size="mini"
+          type="text"
+          icon={<RefreshCw size={12} />}
+          loading={loading && Boolean(overview)}
+          onClick={() => void load()}
+        >
+          刷新
+        </Button>
+      </div>
     </Space>
   );
 };
