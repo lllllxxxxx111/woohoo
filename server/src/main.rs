@@ -138,7 +138,7 @@ async fn main() {
     }
 
     // 创建 AI 客户端
-    let ai_client = AiClient::new();
+    let ai_client = AiClient::new().with_stream_include_usage(config.ai_stream_include_usage);
     let ai_runtime =
         ai::runtime::AiTaskRuntime::new(config.ai_max_concurrent_tasks, Some(pool.clone()));
 

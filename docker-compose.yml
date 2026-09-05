@@ -15,6 +15,7 @@ services:
       AI_CHAT_HISTORY_TRUNCATION_ENABLED: ${AI_CHAT_HISTORY_TRUNCATION_ENABLED:-true}
       AI_CHAT_HISTORY_PREFIX_KEEP: ${AI_CHAT_HISTORY_PREFIX_KEEP:-8}
       AI_CHAT_HISTORY_RECENT_KEEP: ${AI_CHAT_HISTORY_RECENT_KEEP:-40}
+      AI_STREAM_INCLUDE_USAGE: ${AI_STREAM_INCLUDE_USAGE:-true}
       RUNTIME_MANIFEST_PATH: /data/runtime/server-info.json
       # This file is intentionally a local Demo/development profile.
       JWT_SECRET: ${JWT_SECRET:-woohoo-demo-jwt-secret-change-before-production-2026}

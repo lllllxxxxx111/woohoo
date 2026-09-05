@@ -54,6 +54,7 @@ docker compose -f docker-compose.production.yml up --build -d
 | `AI_CHAT_HISTORY_TRUNCATION_ENABLED` | `true` | 可选 | 会话历史前缀稳定截断开关；设为 `false` 恢复全量历史旧行为 |
 | `AI_CHAT_HISTORY_PREFIX_KEEP` | `8` | 可选 | 截断时保留的最早轮次数量（锚定前缀） |
 | `AI_CHAT_HISTORY_RECENT_KEEP` | `40` | 可选 | 截断时保留的最近消息数量 |
+| `AI_STREAM_INCLUDE_USAGE` | `true` | 可选 | 流式请求附带 `stream_options.include_usage` 上报 usage；网关拒绝（400/422）时自动降级重试 |
 
 ## 健康检查与发布记录
 

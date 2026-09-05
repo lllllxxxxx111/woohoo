@@ -568,6 +568,7 @@ pub async fn ai_chat_stream(
     }
     let prompt_tokens_estimate = usage::estimate_prompt_tokens(&prepared.messages);
     let stream_started = Instant::now();
+    let stream_usage_capture = super::client::StreamUsageCapture::new();
     let ai_stream = state
         .ai_client
         .chat_stream(
@@ -579,6 +580,7 @@ pub async fn ai_chat_stream(
             context.top_p,
             context.frequency_penalty,
             context.max_tokens,
+            &stream_usage_capture,
         )
         .await;
     let ai_stream = match ai_stream {
@@ -857,6 +859,15 @@ pub async fn ai_chat_stream(
         let latency_ms = stream_started.elapsed().as_millis() as i64;
         let usage = if full_content.is_empty() && stream_error.is_some() {
             usage::unavailable_usage()
+        } else if let Some(vendor_usage) = stream_usage_capture.take() {
+            // 供应商上报的实际 usage（含缓存命中 tokens），替代估算值。
+            usage::UsageNumbers {
+                cached_prompt_tokens: vendor_usage.cached_prompt_tokens,
+                prompt_tokens: vendor_usage.prompt_tokens,
+                completion_tokens: vendor_usage.completion_tokens,
+                total_tokens: vendor_usage.total_tokens,
+                token_source: usage::AiUsageTokenSource::Actual,
+            }
         } else {
             let completion_tokens = usage::estimate_tokens(&full_content);
             UsageNumbers {
@@ -1366,6 +1377,7 @@ async fn run_ai_task(
     }
 
     let started = Instant::now();
+    let task_usage_capture = super::client::StreamUsageCapture::new();
     match state
         .ai_client
         .chat_stream(
@@ -1377,6 +1389,7 @@ async fn run_ai_task(
             context.top_p,
             context.frequency_penalty,
             context.max_tokens,
+            &task_usage_capture,
         )
         .await
     {
@@ -1502,7 +1515,8 @@ async fn run_ai_task(
                 super::client::AiResponse {
                     content: final_content,
                     model: context.model.clone(),
-                    usage: None,
+                    // 流式任务路径：供应商上报的实际 usage（含缓存命中），否则回退估算。
+                    usage: task_usage_capture.take(),
                 },
                 persisted_message_id.as_deref(),
             )

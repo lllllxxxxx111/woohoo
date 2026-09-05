@@ -550,6 +550,8 @@ fn build_models_url(base_url: &str) -> String {
 pub struct AiClient {
     http: Client,
     fallback_state: Arc<Mutex<HashMap<String, StreamFallbackState>>>,
+    /// 流式请求是否附带 stream_options.include_usage 请求供应商上报 usage。
+    stream_include_usage: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -565,6 +567,40 @@ struct ChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<i64>,
     stream: bool,
+    /// OpenAI 兼容的流式 usage 上报开关；部分网关不识别该字段，
+    /// 请求失败时由 chat_stream 自动降级重试（不带 stream_options）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamOptions {
+    include_usage: bool,
+}
+
+/// 流式请求的 usage 收集句柄。
+/// `chat_stream` 调用方创建并传入；流结束后通过 `take()` 获取供应商上报的
+/// usage（需要 `stream_options.include_usage` 生效，部分供应商也会主动上报）。
+#[derive(Clone, Default)]
+pub struct StreamUsageCapture {
+    inner: Arc<Mutex<Option<TokenUsage>>>,
+}
+
+impl StreamUsageCapture {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 取出供应商上报的 usage；仅首次调用返回 Some，之后为 None。
+    pub fn take(&self) -> Option<TokenUsage> {
+        self.inner.lock().ok().and_then(|mut guard| guard.take())
+    }
+
+    fn set(&self, usage: TokenUsage) {
+        if let Ok(mut guard) = self.inner.lock() {
+            *guard = Some(usage);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -607,7 +643,14 @@ impl AiClient {
                 .build()
                 .expect("Failed to create HTTP client"),
             fallback_state: Arc::new(Mutex::new(HashMap::new())),
+            stream_include_usage: true,
         }
+    }
+
+    /// 设置流式请求是否请求供应商上报 usage（来自 AI_STREAM_INCLUDE_USAGE 配置）。
+    pub fn with_stream_include_usage(mut self, enabled: bool) -> Self {
+        self.stream_include_usage = enabled;
+        self
     }
 
     pub async fn list_models(&self, base_url: &str, api_key: &str) -> AppResult<Vec<String>> {
@@ -698,11 +741,11 @@ impl AiClient {
                 )
                 .await
             {
-                Ok(streamed_content) if !streamed_content.is_empty() => {
+                Ok((streamed_content, streamed_usage)) if !streamed_content.is_empty() => {
                     return Ok(AiResponse {
                         content: streamed_content,
                         model: model.to_string(),
-                        usage: None,
+                        usage: streamed_usage,
                     });
                 }
                 Ok(_) if matches!(stream_fallback_mode, StreamFallbackMode::Force) => {
@@ -739,6 +782,7 @@ impl AiClient {
             frequency_penalty,
             max_tokens,
             stream: false,
+            stream_options: None,
         };
         let url = build_chat_url(base_url);
 
@@ -785,7 +829,7 @@ impl AiClient {
                     cached_prefer_stream,
                     "读取非流式响应体失败，触发流式回退",
                 );
-                let streamed_content = self
+                let (streamed_content, streamed_usage) = self
                     .collect_completion_via_stream(
                         base_url,
                         api_key,
@@ -806,7 +850,7 @@ impl AiClient {
                 return Ok(AiResponse {
                     content: streamed_content,
                     model: model.to_string(),
-                    usage: None,
+                    usage: streamed_usage,
                 });
             }
         };
@@ -823,6 +867,8 @@ impl AiClient {
             )));
         }
 
+        // 流式兜底路径捕获的供应商 usage；原非流式响应自带 usage 时优先用后者。
+        let mut streamed_usage: Option<TokenUsage> = None;
         let content = if let Some(content) = extract_completion_text(&parsed) {
             self.reset_stream_fallback_hits(&fallback_key);
             content
@@ -842,7 +888,7 @@ impl AiClient {
                 "检测到非流式响应缺少可读文本，触发流式回退",
             );
 
-            let streamed_content = self
+            let (streamed_content, fallback_usage) = self
                 .collect_completion_via_stream(
                     base_url,
                     api_key,
@@ -861,6 +907,7 @@ impl AiClient {
                     preview
                 )));
             }
+            streamed_usage = fallback_usage;
             streamed_content
         } else {
             let preview = summarize_response_body(&parsed.to_string());
@@ -870,7 +917,9 @@ impl AiClient {
             )));
         };
 
-        let usage = parse_token_usage(&parsed);
+        // 第二条兜底路径里原非流式响应可能已带 usage（只是缺文本），
+        // 优先用它；流式兜底上报的 usage 作为回退。
+        let usage = parse_token_usage(&parsed).or(streamed_usage);
         let response_model = parsed
             .get("model")
             .and_then(Value::as_str)
@@ -895,7 +944,8 @@ impl AiClient {
         top_p: Option<f64>,
         frequency_penalty: Option<f64>,
         max_tokens: Option<i64>,
-    ) -> AppResult<String> {
+    ) -> AppResult<(String, Option<TokenUsage>)> {
+        let usage_capture = StreamUsageCapture::new();
         let stream = self
             .chat_stream(
                 base_url,
@@ -906,6 +956,7 @@ impl AiClient {
                 top_p,
                 frequency_penalty,
                 max_tokens,
+                &usage_capture,
             )
             .await?;
         futures::pin_mut!(stream);
@@ -940,7 +991,7 @@ impl AiClient {
             }
         }
 
-        Ok(content.trim().to_string())
+        Ok((content.trim().to_string(), usage_capture.take()))
     }
 
     fn is_stream_preferred(&self, key: &str) -> bool {
@@ -989,46 +1040,74 @@ impl AiClient {
         top_p: Option<f64>,
         frequency_penalty: Option<f64>,
         max_tokens: Option<i64>,
+        usage_capture: &StreamUsageCapture,
     ) -> AppResult<impl futures::Stream<Item = Result<String, AppError>>> {
         // SSRF 运行时校验：防止 DNS rebinding
         crate::ai::ssrf_guard::validate_endpoint_url(base_url).await?;
 
         let url = build_chat_url(base_url);
 
-        let req = ChatRequest {
-            model: model.to_string(),
-            messages,
-            temperature,
-            top_p,
-            frequency_penalty,
-            max_tokens,
-            stream: true,
+        let build_request = |include_usage: bool| {
+            let req = ChatRequest {
+                model: model.to_string(),
+                messages: messages.clone(),
+                temperature,
+                top_p,
+                frequency_penalty,
+                max_tokens,
+                stream: true,
+                stream_options: include_usage.then_some(StreamOptions {
+                    include_usage: true,
+                }),
+            };
+            let mut request = self
+                .http
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .header("Accept-Encoding", "identity");
+            if !api_key.trim().is_empty() {
+                request = request.header("Authorization", format!("Bearer {}", api_key.trim()));
+            }
+            request.json(&req)
         };
 
-        let mut request = self
-            .http
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .header("Accept-Encoding", "identity");
-
-        if !api_key.trim().is_empty() {
-            request = request.header("Authorization", format!("Bearer {}", api_key.trim()));
-        }
-
-        let resp = request.json(&req).send().await.map_err(|e| {
+        let include_usage = self.stream_include_usage;
+        let mut resp = build_request(include_usage).send().await.map_err(|e| {
             AppError::Internal(format!("AI 调用失败: {}", summarize_reqwest_error(&e)))
         })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(AppError::Internal(format!(
-                "AI API 返回错误 {}: {}",
-                status, body
-            )));
+            // 部分 OpenAI 兼容网关不识别 stream_options 字段（400/422），
+            // 降级为不带该字段的请求重试一次，保证流式功能不因指标采集受损。
+            if include_usage && matches!(status.as_u16(), 400 | 422) {
+                tracing::warn!(
+                    base_url = %sanitize_base_url(base_url),
+                    status = %status,
+                    "stream_options.include_usage 请求被拒绝，降级为不带 stream_options 重试"
+                );
+                resp = build_request(false).send().await.map_err(|e| {
+                    AppError::Internal(format!("AI 调用失败: {}", summarize_reqwest_error(&e)))
+                })?;
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(AppError::Internal(format!(
+                        "AI API 返回错误 {}: {}",
+                        status, body
+                    )));
+                }
+            } else {
+                return Err(AppError::Internal(format!(
+                    "AI API 返回错误 {}: {}",
+                    status, body
+                )));
+            }
         }
 
+        let usage_capture = usage_capture.clone();
         let stream = async_stream::stream! {
             let mut byte_stream = resp.bytes_stream();
             let mut buffer = String::new();
@@ -1087,6 +1166,15 @@ impl AiClient {
                             return;
                         }
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                            // 供应商 usage 块（通常在 [DONE] 前的最后一块）：
+                            // 记录到句柄供调用方在流结束后取用。
+                            if json.get("usage").is_some_and(Value::is_object) {
+                                if let Some(usage) = parse_token_usage(&json).filter(|usage| {
+                                    usage.total_tokens > 0 || usage.completion_tokens > 0
+                                }) {
+                                    usage_capture.set(usage);
+                                }
+                            }
                             if let Some(content) = extract_stream_chunk_text(&json) {
                                 if !content.is_empty() {
                                     emitted_content = true;
@@ -1110,6 +1198,13 @@ impl AiClient {
                     let data = &remaining[6..];
                     if data != "[DONE]" {
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                            if json.get("usage").is_some_and(Value::is_object) {
+                                if let Some(usage) = parse_token_usage(&json).filter(|usage| {
+                                    usage.total_tokens > 0 || usage.completion_tokens > 0
+                                }) {
+                                    usage_capture.set(usage);
+                                }
+                            }
                             if let Some(content) = extract_stream_chunk_text(&json) {
                                 if !content.is_empty() {
                                     yield Ok(content);
@@ -1619,8 +1714,9 @@ fn classify_stream_error(error: &reqwest::Error) -> &'static str {
 mod tests {
     use super::{
         append_transport_error_hint, build_image_generation_url, build_stream_fallback_cache_key,
-        extract_api_error_message, extract_completion_text, parse_image_generate_response,
-        parse_token_usage, should_retry_with_stream, ImageGenerationApiKind,
+        extract_api_error_message, extract_completion_text, extract_stream_chunk_text,
+        parse_image_generate_response, parse_token_usage, should_retry_with_stream, ChatRequest,
+        ImageGenerationApiKind, StreamOptions, StreamUsageCapture, TokenUsage,
     };
     use serde_json::json;
 
@@ -1928,5 +2024,91 @@ mod tests {
         // 0 命中与未上报等价：视为无缓存数据而不是命中率为 0。
         let usage = parse_token_usage(&zero_cached).expect("usage");
         assert_eq!(usage.cached_prompt_tokens, None);
+    }
+
+    #[test]
+    fn stream_usage_capture_take_semantics() {
+        let capture = StreamUsageCapture::new();
+        assert!(capture.take().is_none(), "未上报时 take 返回 None");
+
+        capture.set(TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+            cached_prompt_tokens: Some(80),
+        });
+        let usage = capture.take().expect("set 后首次 take 返回 Some");
+        assert_eq!(usage.cached_prompt_tokens, Some(80));
+        assert!(capture.take().is_none(), "take 只生效一次");
+    }
+
+    #[test]
+    fn stream_usage_chunk_sets_capture_without_content() {
+        // 供应商 usage 块通常choices 为空且位于 [DONE] 前；
+        // 不应产出内容，但应写入句柄（含缓存命中 tokens）。
+        let chunk = json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 900,
+                "completion_tokens": 150,
+                "total_tokens": 1050,
+                "prompt_tokens_details": { "cached_tokens": 700 }
+            }
+        });
+
+        assert_eq!(extract_stream_chunk_text(&chunk), None);
+
+        let capture = StreamUsageCapture::new();
+        if let Some(usage) = parse_token_usage(&chunk)
+            .filter(|usage| usage.total_tokens > 0 || usage.completion_tokens > 0)
+        {
+            capture.set(usage);
+        }
+        let usage = capture.take().expect("usage 块应被捕获");
+        assert_eq!(usage.prompt_tokens, 900);
+        assert_eq!(usage.cached_prompt_tokens, Some(700));
+    }
+
+    #[test]
+    fn stream_null_usage_chunk_is_ignored() {
+        // 部分网关发送 "usage": null 的空块，不得捕获为零值 usage。
+        let chunk = json!({ "choices": [], "usage": null });
+        assert!(!chunk.get("usage").is_some_and(serde_json::Value::is_object));
+
+        let capture = StreamUsageCapture::new();
+        let parsed = parse_token_usage(&chunk)
+            .filter(|usage| usage.total_tokens > 0 || usage.completion_tokens > 0);
+        if let Some(usage) = parsed {
+            capture.set(usage);
+        }
+        assert!(capture.take().is_none());
+    }
+
+    #[test]
+    fn chat_request_serializes_stream_options_only_when_set() {
+        let with_options = ChatRequest {
+            model: "m".into(),
+            messages: vec![],
+            temperature: None,
+            top_p: None,
+            frequency_penalty: None,
+            max_tokens: None,
+            stream: true,
+            stream_options: Some(StreamOptions {
+                include_usage: true,
+            }),
+        };
+        let value = serde_json::to_value(&with_options).expect("serialize");
+        assert_eq!(
+            value["stream_options"]["include_usage"],
+            serde_json::Value::Bool(true)
+        );
+
+        let without_options = ChatRequest {
+            stream_options: None,
+            ..with_options
+        };
+        let value = serde_json::to_value(&without_options).expect("serialize");
+        assert!(value.get("stream_options").is_none());
     }
 }

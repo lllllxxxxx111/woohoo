@@ -22,6 +22,8 @@ pub struct AppConfig {
     pub ai_chat_history_prefix_keep: usize,
     /// AI 会话历史截断时保留的最近消息数量。
     pub ai_chat_history_recent_keep: usize,
+    /// 流式请求是否请求供应商上报 usage（OpenAI 兼容 stream_options.include_usage）。
+    pub ai_stream_include_usage: bool,
     pub runtime_manifest_path: String,
     pub password_hash_cost: u32,
     pub debug_log_path: String,
@@ -108,6 +110,11 @@ impl AppConfig {
                 .unwrap_or_else(|_| "40".into())
                 .parse()
                 .unwrap_or(40),
+            ai_stream_include_usage: env::var("AI_STREAM_INCLUDE_USAGE")
+                .unwrap_or_else(|_| "true".into())
+                .to_lowercase()
+                .parse()
+                .unwrap_or(true),
             runtime_manifest_path: env::var("RUNTIME_MANIFEST_PATH")
                 .unwrap_or_else(|_| "./data/runtime/server-info.json".into()),
             password_hash_cost: env::var("BCRYPT_COST")
@@ -266,6 +273,7 @@ pub(crate) fn test_config() -> AppConfig {
         ai_chat_history_truncation_enabled: true,
         ai_chat_history_prefix_keep: 8,
         ai_chat_history_recent_keep: 40,
+        ai_stream_include_usage: true,
         runtime_manifest_path: "./data/runtime/server-info.json".into(),
         password_hash_cost: 10,
         debug_log_path: "./data/runtime/usage-debug.log".into(),
