@@ -12,6 +12,7 @@ import {
   Popconfirm,
   Select,
   Switch,
+  Tooltip,
 } from '@arco-design/web-react';
 import { Plus, Network, Key, Server, Zap, Eye, EyeOff } from 'lucide-react';
 import {
@@ -98,7 +99,6 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [verifiedConfigSignature, setVerifiedConfigSignature] = useState<string | null>(null);
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
-  const [, setStoredApiKey] = useState('');
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [capabilities, setCapabilities] = useState<ServerAiEndpointCapability[]>([]);
@@ -287,7 +287,6 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
     setEditingId(null);
     setVerifiedConfigSignature(null);
     setApiKeyVisible(false);
-    setStoredApiKey('');
     setCapabilities([]);
     setModelOptions([]);
     form.resetFields();
@@ -305,7 +304,6 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
     setEditingId(record.id);
     setVerifiedConfigSignature(null);
     setApiKeyVisible(false);
-    setStoredApiKey('');
     setModelOptions(uniqModels([
       record.defaultModel,
       ...(record.capabilities || []).map((capability) => capability.model),
@@ -673,7 +671,11 @@ export const EndpointManagement: React.FC<EndpointManagementProps> = ({
     {
       title: '全局启用',
       dataIndex: 'isActive',
-      render: (isActive: boolean) => <Switch checked={isActive} disabled />,
+      render: (isActive: boolean) => (
+        <Tooltip content="通道创建后自动启用；删除通道即停用">
+          <Switch checked={isActive} disabled />
+        </Tooltip>
+      ),
     },
     {
       title: '操作',

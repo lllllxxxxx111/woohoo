@@ -19,6 +19,7 @@ import {
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { cancelTask } from '../../../../lib/ai';
+import { useToast } from '../../../../context/useToast';
 import type { Message, AgentContact, Asset, MessageMeta, ResourceRef } from '../../../../types';
 import FilePreview from './FilePreview';
 import { escapeRegExp, formatAssetTypeLabel, resolveMentionedAsset } from './chatAreaUtils';
@@ -266,6 +267,31 @@ const MessageItem = React.memo<MessageItemProps>(
   }) => {
     const isError = message.role === 'system' && message.status === 'error';
     const meta = message.meta;
+    const { showToast } = useToast();
+    const [cancellingTaskIds, setCancellingTaskIds] = useState<ReadonlySet<string>>(new Set());
+
+    const handleCancelTask = async (taskId: string) => {
+      if (cancellingTaskIds.has(taskId)) {
+        return;
+      }
+      setCancellingTaskIds((prev) => new Set(prev).add(taskId));
+      try {
+        await cancelTask(taskId);
+        showToast({ type: 'success', title: '已请求取消', message: '取消指令已发送，等待任务终止' });
+      } catch (error) {
+        showToast({
+          type: 'error',
+          title: '取消失败',
+          message: error instanceof Error ? error.message : '无法取消该任务',
+        });
+      } finally {
+        setCancellingTaskIds((prev) => {
+          const next = new Set(prev);
+          next.delete(taskId);
+          return next;
+        });
+      }
+    };
     const canDeleteCurrentMessage = canDeleteMessage && message.role === 'user';
     const canCopyCurrentMessage =
       canCopyMessage && (message.role === 'user' || message.role === 'ai');
@@ -287,6 +313,8 @@ const MessageItem = React.memo<MessageItemProps>(
           return '已完成';
         case 'failed':
           return '失败';
+        case 'cancelled':
+          return '已取消';
         case 'missing':
           return '任务缺失';
         case 'scope_mismatch':
@@ -305,6 +333,8 @@ const MessageItem = React.memo<MessageItemProps>(
         case 'missing':
         case 'scope_mismatch':
           return 'red';
+        case 'cancelled':
+          return 'gray';
         case 'running':
           return 'arcoblue';
         case 'queued':
@@ -1156,14 +1186,15 @@ const MessageItem = React.memo<MessageItemProps>(
                         className={styles.cancelTaskBtn}
                         onClick={() => {
                           if (meta?.taskId) {
-                            cancelTask(meta.taskId).catch(() => {});
+                            void handleCancelTask(meta.taskId);
                           }
                         }}
+                        disabled={meta?.taskId ? cancellingTaskIds.has(meta.taskId) : false}
                         title="取消此任务"
                         type="button"
                       >
                         <Square size={12} />
-                        取消
+                        {meta?.taskId && cancellingTaskIds.has(meta.taskId) ? '取消中' : '取消'}
                       </button>
                     )}
                   {typeof meta?.attemptIndex === 'number' && meta.attemptIndex > 0 && (

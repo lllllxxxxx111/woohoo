@@ -480,6 +480,7 @@ export const UsageDashboard: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [transactions, setTransactions] = useState<CreditTransaction[]>([]);
   const [transactionsLoading, setTransactionsLoading] = useState(false);
+  const [transactionsError, setTransactionsError] = useState<string | null>(null);
   const requestIdRef = useRef(0);
   const summaryCacheRef = useRef<{
     key: string;
@@ -578,32 +579,42 @@ export const UsageDashboard: React.FC = () => {
 
   useEffect(() => {
     let isActive = true;
-    void listServerAiEndpoints().then((next) => {
-      if (isActive) setEndpointOptions(next.map((e) => ({ id: e.id, name: e.name })));
-    });
-    return () => {
-      isActive = false;
-    };
-  }, []);
-
-  /** 加载积分交易历史 */
-  useEffect(() => {
-    let isActive = true;
-    setTransactionsLoading(true);
-    void listImageCreditTransactions()
-      .then((result) => {
-        if (isActive) setTransactions(result);
+    listServerAiEndpoints()
+      .then((next) => {
+        if (isActive) setEndpointOptions(next.map((e) => ({ id: e.id, name: e.name })));
       })
-      .catch(() => {
-        // 交易历史加载失败不阻塞主面板
-      })
-      .finally(() => {
-        if (isActive) setTransactionsLoading(false);
+      .catch((error) => {
+        if (isActive) {
+          showToast({
+            type: 'error',
+            title: '通道列表加载失败',
+            message:
+              error instanceof Error ? error.message : '无法读取 API 通道，通道筛选暂不可用',
+          });
+        }
       });
     return () => {
       isActive = false;
     };
+  }, [showToast]);
+
+  /** 加载积分交易历史 */
+  const loadTransactions = useCallback(async () => {
+    setTransactionsLoading(true);
+    setTransactionsError(null);
+    try {
+      const result = await listImageCreditTransactions();
+      setTransactions(result);
+    } catch (error) {
+      setTransactionsError(error instanceof Error ? error.message : '交易历史加载失败');
+    } finally {
+      setTransactionsLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    void loadTransactions();
+  }, [loadTransactions]);
 
   const columns = [
     {
@@ -1011,6 +1022,18 @@ export const UsageDashboard: React.FC = () => {
             </span>
           </h3>
         </div>
+        {transactionsError && (
+          <Alert
+            type="error"
+            content={`交易历史加载失败：${transactionsError}`}
+            action={
+              <Button size="mini" type="outline" onClick={() => void loadTransactions()}>
+                重试
+              </Button>
+            }
+            style={{ marginBottom: 8 }}
+          />
+        )}
         <Table
           columns={[
             {

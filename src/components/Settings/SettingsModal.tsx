@@ -166,7 +166,8 @@ export const SettingsModal: React.FC = () => {
       : `${formatCreditAmount(credits?.balance ?? 0)} 积分`;
   const currentModelText = draftAiSettings.model || '未配置模型';
   const currentProviderText = draftAiSettings.provider || '未配置';
-  const requiresGlobalSave = activeTab === 'model' || activeTab === 'workflow';
+  const requiresGlobalSave =
+    activeTab === 'model' || activeTab === 'workflow' || activeTab === 'policy';
   const shouldValidateAiSettings = activeTab === 'model' && !serverAiEndpointId;
 
   const updateDraftField = <K extends keyof AiSettings>(key: K, value: AiSettings[K]) => {
@@ -214,7 +215,9 @@ export const SettingsModal: React.FC = () => {
         const successMessage =
           activeTab === 'workflow'
             ? `制作流程参数已保存：${normalizedDraftAiSettings.multiAgentBetaEnabled ? '已开启编排' : '编排未开启'}`
-            : `当前默认模型：${normalizedDraftAiSettings.model || '未设置'}`;
+            : activeTab === 'policy'
+              ? `助理动作策略已保存：${normalizedDraftAiSettings.assistantActionsEnabled === false ? '已禁止动作' : `单次最多 ${normalizedDraftAiSettings.maxActionsPerResponse ?? 5} 个动作`}`
+              : `当前默认模型：${normalizedDraftAiSettings.model || '未设置'}`;
         showToast({
           type: 'success',
           title: '配置已保存',

@@ -42,7 +42,14 @@ export interface MessageMeta {
   provider?: string;
   triggerSource?: 'edit' | 'rewind' | 'normal' | string;
   taskId?: string;
-  taskStatus?: 'queued' | 'running' | 'completed' | 'failed' | 'missing' | 'scope_mismatch';
+  taskStatus?:
+    | 'queued'
+    | 'running'
+    | 'completed'
+    | 'failed'
+    | 'cancelled'
+    | 'missing'
+    | 'scope_mismatch';
   operation?: string;
   outputKind?: 'text' | 'image' | 'video' | 'audio' | 'document' | 'other' | string;
   outputItems?: number;

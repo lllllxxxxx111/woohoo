@@ -19,6 +19,43 @@ const HelpModal = lazy(() =>
   import('./components/Help/HelpModal').then((module) => ({ default: module.HelpModal })),
 );
 
+const BootstrapErrorScreen: React.FC<{ message: string }> = ({ message }) => (
+  <div
+    style={{
+      position: 'absolute',
+      inset: 0,
+      zIndex: 100,
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: 'var(--bg-primary)',
+      color: 'var(--text-primary)',
+      padding: '24px',
+      textAlign: 'center',
+      gap: '12px',
+    }}
+  >
+    <h2 style={{ margin: 0, fontWeight: 600, fontSize: '1.1rem' }}>初始化失败</h2>
+    <p style={{ margin: 0, color: 'var(--text-secondary)', maxWidth: '640px' }}>{message}</p>
+    <button
+      type="button"
+      onClick={() => window.location.reload()}
+      style={{
+        marginTop: '4px',
+        border: '1px solid var(--border-color)',
+        borderRadius: '10px',
+        background: 'var(--bg-card)',
+        color: 'var(--text-primary)',
+        padding: '8px 14px',
+        cursor: 'pointer',
+      }}
+    >
+      重试初始化
+    </button>
+  </div>
+);
+
 const AppContent: React.FC = () => {
   const { isServerWorkspaceReady, workspaceBootstrapError, isAuthenticated, language } =
     useAppStore(
@@ -94,47 +131,14 @@ const AppContent: React.FC = () => {
           </div>
         ) : !isAuthenticated ? (
           workspaceBootstrapError ? (
-            <div
-              style={{
-                position: 'absolute',
-                inset: 0,
-                zIndex: 100,
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                backgroundColor: 'var(--bg-primary)',
-                color: 'var(--text-primary)',
-                padding: '24px',
-                textAlign: 'center',
-                gap: '12px',
-              }}
-            >
-              <h2 style={{ margin: 0, fontWeight: 600, fontSize: '1.1rem' }}>初始化失败</h2>
-              <p style={{ margin: 0, color: 'var(--text-secondary)', maxWidth: '640px' }}>
-                {workspaceBootstrapError}
-              </p>
-              <button
-                type="button"
-                onClick={() => window.location.reload()}
-                style={{
-                  marginTop: '4px',
-                  border: '1px solid var(--border-color)',
-                  borderRadius: '10px',
-                  background: 'var(--bg-card)',
-                  color: 'var(--text-primary)',
-                  padding: '8px 14px',
-                  cursor: 'pointer',
-                }}
-              >
-                重试初始化
-              </button>
-            </div>
+            <BootstrapErrorScreen message={workspaceBootstrapError} />
           ) : (
             <Suspense fallback={null}>
               <AuthModal />
             </Suspense>
           )
+        ) : workspaceBootstrapError ? (
+          <BootstrapErrorScreen message={workspaceBootstrapError} />
         ) : (
           <>
             <Sidebar />

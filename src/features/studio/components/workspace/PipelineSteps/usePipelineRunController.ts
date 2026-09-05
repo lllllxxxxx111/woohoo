@@ -195,7 +195,7 @@ export function usePipelineRunController(
   const [promptOptimizations, setPromptOptimizations] = useState<PipelinePromptOptimization[]>(
     [],
   );
-  const [isLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -253,6 +253,7 @@ export function usePipelineRunController(
       setLoadError('');
       return;
     }
+    setIsLoading(true);
     try {
       setLoadError('');
       const runs = await listPipelineRuns({
@@ -293,6 +294,8 @@ export function usePipelineRunController(
       const message = error instanceof Error ? error.message : '流程数据加载失败，请稍后重试';
       setLoadError(message === 'UNAUTHORIZED' ? '登录状态已失效，请重新登录后再查看流程。' : message);
       logger.error('Failed to load pipeline run:', error);
+    } finally {
+      setIsLoading(false);
     }
   }, [projectId, conversationId, pipelineType, triggerSource]);
 

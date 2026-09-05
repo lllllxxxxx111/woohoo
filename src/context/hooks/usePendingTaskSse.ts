@@ -118,6 +118,37 @@ export function collectStalePendingTaskIds(
   return staleIds;
 }
 
+/** 服务端取消任务时的固定错误文案（server/src/ai/runtime.rs cancel_task） */
+export const TASK_CANCELLED_ERROR_TEXT = '用户取消';
+
+export type TerminalTaskOutcome = {
+  content: string;
+  status: 'done' | 'error';
+  taskStatus: 'failed' | 'cancelled';
+  lastError: string | null;
+};
+
+/**
+ * 服务端取消任务时事件名为 cancelled，但 task.status 仍复用 failed；
+ * 快照重放里没有事件名，只能靠固定错误文案识别「用户取消」
+ */
+export function resolveTerminalTaskOutcome(
+  task: { error?: string | null },
+  sseEvent: string,
+): TerminalTaskOutcome {
+  const isCancelled = sseEvent === 'cancelled' || (task.error ?? '') === TASK_CANCELLED_ERROR_TEXT;
+  if (isCancelled) {
+    return { content: '任务已取消。', status: 'done', taskStatus: 'cancelled', lastError: null };
+  }
+  const errorMessage = task.error || '未知错误';
+  return {
+    content: `任务失败：${errorMessage}`,
+    status: 'error',
+    taskStatus: 'failed',
+    lastError: errorMessage,
+  };
+}
+
 export function usePendingTaskSse({
   isServerWorkspaceReady,
   isAuthenticated,
@@ -219,9 +250,9 @@ export function usePendingTaskSse({
     }, 30000);
 
     /**
-     * 处理单个任务的聊天消息更新
+     * 处理单个任务的聊天消息更新（sseEvent 为 SSE 事件名，快照重放时为 snapshot）
      */
-    const handleTaskUpdate = (task: AiTask) => {
+    const handleTaskUpdate = (task: AiTask, sseEvent: string) => {
       if (cancelled) {
         return;
       }
@@ -316,7 +347,8 @@ export function usePendingTaskSse({
           );
           break;
 
-        case 'failed':
+        case 'failed': {
+          const outcome = resolveTerminalTaskOutcome(task, sseEvent);
           requiresWorkspaceRefresh = true;
           pendingTaskMapRef.current.delete(task.id);
           updateMessageLocally(
@@ -326,13 +358,18 @@ export function usePendingTaskSse({
             (message) => ({
               ...message,
               role: 'system',
-              content: `任务失败：${task.error || '未知错误'}`,
-              status: 'error',
+              content: outcome.content,
+              status: outcome.status,
               model: undefined,
-              meta: mergeTaskMessageMeta(message.meta, task, pendingTask.provider),
+              meta: {
+                ...mergeTaskMessageMeta(message.meta, task, pendingTask.provider),
+                taskStatus: outcome.taskStatus,
+                lastError: outcome.lastError,
+              },
             }),
           );
           break;
+        }
 
         default:
           break;
@@ -453,7 +490,7 @@ export function usePendingTaskSse({
             if (Array.isArray(data.tasks)) {
               syncSnapshotTimestamps(data.tasks);
               useAppStore.getState().setAiTasks(data.tasks);
-              data.tasks.forEach((task: AiTask) => handleTaskUpdate(task));
+              data.tasks.forEach((task: AiTask) => handleTaskUpdate(task, 'snapshot'));
             }
             break;
 
@@ -463,7 +500,7 @@ export function usePendingTaskSse({
           case 'failed':
           case 'cancelled':
             if (data.task) {
-              handleTaskUpdate(data.task);
+              handleTaskUpdate(data.task, eventType || 'message');
               const store = useAppStore.getState();
               store.setAiTasks(store.aiTasks.map((t) => (t.id === data.task.id ? data.task : t)));
             }

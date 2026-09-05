@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Space, Tag, Typography, Spin } from '@arco-design/web-react';
+import { Space, Tag, Typography, Spin, Button } from '@arco-design/web-react';
 import { Activity, AlertTriangle, CheckCircle, XCircle } from 'lucide-react';
 import { getOpsOverview, listOpsFindings } from '../../lib/serverApi';
 import type { OpsOverview, InspectionFinding } from '../../lib/serverApi.ops';
@@ -11,10 +11,13 @@ export const OpsMonitorPanel: React.FC = () => {
   const [overview, setOverview] = useState<OpsOverview | null>(null);
   const [findings, setFindings] = useState<InspectionFinding[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadTick, setReloadTick] = useState(0);
 
   useEffect(() => {
     let isActive = true;
     setLoading(true);
+    setLoadError(null);
 
     Promise.all([getOpsOverview(), listOpsFindings(false, 20)])
       .then(([ov, fd]) => {
@@ -23,8 +26,10 @@ export const OpsMonitorPanel: React.FC = () => {
           setFindings(fd);
         }
       })
-      .catch(() => {
-        // Ops 面板加载失败不阻塞
+      .catch((error) => {
+        if (isActive) {
+          setLoadError(error instanceof Error ? error.message : '运维数据加载失败');
+        }
       })
       .finally(() => {
         if (isActive) setLoading(false);
@@ -33,7 +38,7 @@ export const OpsMonitorPanel: React.FC = () => {
     return () => {
       isActive = false;
     };
-  }, []);
+  }, [reloadTick]);
 
   if (loading) {
     return (
@@ -43,8 +48,19 @@ export const OpsMonitorPanel: React.FC = () => {
     );
   }
 
-  if (!overview) {
-    return <Text type="secondary">无法加载运维数据，请确认后端服务正在运行。</Text>;
+  if (loadError || !overview) {
+    return (
+      <Space direction="vertical" size="small" style={{ width: '100%' }}>
+        <Text type="secondary">
+          {loadError
+            ? `无法加载运维数据：${loadError}。请确认后端服务正在运行。`
+            : '无法加载运维数据，请确认后端服务正在运行。'}
+        </Text>
+        <Button size="mini" type="outline" onClick={() => setReloadTick((t) => t + 1)}>
+          重试
+        </Button>
+      </Space>
+    );
   }
 
   const summary = overview.notificationSummary;

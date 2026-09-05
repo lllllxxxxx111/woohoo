@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { collectStalePendingTaskIds, type PendingAiTask } from './usePendingTaskSse';
+import {
+  collectStalePendingTaskIds,
+  resolveTerminalTaskOutcome,
+  TASK_CANCELLED_ERROR_TEXT,
+  type PendingAiTask,
+} from './usePendingTaskSse';
 
 function makePendingTask(overrides: Partial<PendingAiTask> = {}): PendingAiTask {
   return {
@@ -39,5 +44,47 @@ describe('collectStalePendingTaskIds', () => {
     ]);
 
     expect(collectStalePendingTaskIds(pendingTasks, lastEventTimes, 1600, 600)).toEqual([]);
+  });
+});
+
+describe('resolveTerminalTaskOutcome', () => {
+  it('treats the cancelled SSE event as a user cancel, not a failure', () => {
+    const outcome = resolveTerminalTaskOutcome({ error: TASK_CANCELLED_ERROR_TEXT }, 'cancelled');
+
+    expect(outcome).toEqual({
+      content: '任务已取消。',
+      status: 'done',
+      taskStatus: 'cancelled',
+      lastError: null,
+    });
+  });
+
+  it('recognizes user-cancelled tasks replayed from snapshots by the fixed error text', () => {
+    const outcome = resolveTerminalTaskOutcome(
+      { error: TASK_CANCELLED_ERROR_TEXT },
+      'snapshot',
+    );
+
+    expect(outcome.taskStatus).toBe('cancelled');
+    expect(outcome.status).toBe('done');
+    expect(outcome.content).toBe('任务已取消。');
+  });
+
+  it('keeps genuine failures as errors with the server error message', () => {
+    const outcome = resolveTerminalTaskOutcome({ error: '上游 500' }, 'failed');
+
+    expect(outcome).toEqual({
+      content: '任务失败：上游 500',
+      status: 'error',
+      taskStatus: 'failed',
+      lastError: '上游 500',
+    });
+  });
+
+  it('falls back to a generic message when a failure carries no error text', () => {
+    const outcome = resolveTerminalTaskOutcome({ error: null }, 'failed');
+
+    expect(outcome.content).toBe('任务失败：未知错误');
+    expect(outcome.lastError).toBe('未知错误');
   });
 });

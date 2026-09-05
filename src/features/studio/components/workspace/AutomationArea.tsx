@@ -9,10 +9,12 @@ import {
   FileText,
   Wifi,
   WifiOff,
+  Square,
 } from 'lucide-react';
 import { useAppStore } from '../../../../store';
 import { useShallow } from 'zustand/react/shallow';
 import { useToast } from '../../../../context/useToast';
+import { cancelTask } from '../../../../lib/ai';
 import type { AiTask } from '../../../../lib/serverApi';
 import styles from './AutomationArea.module.css';
 
@@ -27,7 +29,31 @@ export const AutomationArea: React.FC = () => {
   );
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
+  const [cancellingIds, setCancellingIds] = useState<ReadonlySet<string>>(new Set());
   const { showToast } = useToast();
+
+  const handleCancelTask = async (taskId: string) => {
+    if (cancellingIds.has(taskId)) {
+      return;
+    }
+    setCancellingIds((prev) => new Set(prev).add(taskId));
+    try {
+      await cancelTask(taskId);
+      showToast({ type: 'success', title: '已请求取消', message: '取消指令已发送，等待任务终止' });
+    } catch (error) {
+      showToast({
+        type: 'error',
+        title: '取消失败',
+        message: error instanceof Error ? error.message : '无法取消该任务',
+      });
+    } finally {
+      setCancellingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(taskId);
+        return next;
+      });
+    }
+  };
 
   const getStatusClass = (status: string) => {
     switch (status) {
@@ -136,9 +162,16 @@ export const AutomationArea: React.FC = () => {
     }
   };
 
-  const filteredTasks = tasks.filter((task) =>
-    `${parseTaskName(task)} ${task.content}`.toLowerCase().includes(searchQuery.toLowerCase()),
-  );
+  const filteredTasks = tasks.filter((task) => {
+    const matchesStatus = !statusFilter || task.status === statusFilter;
+    const matchesSearch = `${parseTaskName(task)} ${task.content}`
+      .toLowerCase()
+      .includes(searchQuery.toLowerCase());
+    return matchesStatus && matchesSearch;
+  });
+
+  const statusFilterLabel = (value: string) =>
+    value === 'running' ? '运行中' : value === 'completed' ? '已完成' : '失败';
 
   return (
     <div className={styles.container}>
@@ -154,11 +187,18 @@ export const AutomationArea: React.FC = () => {
         </div>
         <div className={styles.actions}>
           <button className={styles.toolBtn} onClick={() => {
-            const next = statusFilter === null ? 'running' : statusFilter === 'running' ? 'completed' : null;
+            const next =
+              statusFilter === null
+                ? 'running'
+                : statusFilter === 'running'
+                  ? 'completed'
+                  : statusFilter === 'completed'
+                    ? 'failed'
+                    : null;
             setStatusFilter(next);
-            showToast({ type: 'info', title: '筛选', message: next ? `显示：${next === 'running' ? '运行中' : '已完成'}` : '显示全部' });
+            showToast({ type: 'info', title: '筛选', message: next ? `显示：${statusFilterLabel(next)}` : '显示全部' });
           }}>
-            <Filter size={16} /> 筛选
+            <Filter size={16} /> 筛选{statusFilter ? `（${statusFilterLabel(statusFilter)}）` : ''}
           </button>
           <div className={styles.sseStatus}>
             {isConnected ? (
@@ -178,18 +218,22 @@ export const AutomationArea: React.FC = () => {
 
       {!isConnected && !sseError && <div className={styles.connectingBar}>正在建立实时连接...</div>}
 
-      {filteredTasks.length === 0 && isConnected ? (
+      {filteredTasks.length === 0 ? (
         <div className={styles.emptyContainer}>
           <div className={styles.emptyIcon}>
             <AutomationEmpty />
           </div>
-          <h3>暂无自动化任务</h3>
+          <h3>{isConnected ? '暂无自动化任务' : '暂时无法获取任务'}</h3>
           <p>
-            {activeState.chatSessionId
-              ? '当前会话下没有排队或正在处理的后端任务。'
-              : activeState.projectId
-                ? '当前项目下没有排队或正在处理的后端任务。'
-                : '当前没有选中项目或会话。'}
+            {!isConnected
+              ? '与后端的实时连接未建立，任务列表可能不完整。请确认本地服务已启动后重试。'
+              : statusFilter
+                ? `没有${statusFilterLabel(statusFilter)}的任务，可切换筛选或清除搜索条件。`
+                : activeState.chatSessionId
+                  ? '当前会话下没有排队或正在处理的后端任务。'
+                  : activeState.projectId
+                    ? '当前项目下没有排队或正在处理的后端任务。'
+                    : '当前没有选中项目或会话。'}
           </p>
         </div>
       ) : (
@@ -317,6 +361,21 @@ export const AutomationArea: React.FC = () => {
                   <span style={{ fontSize: 12, color: 'var(--color-text-4)' }}>
                     任务 ID: {task.id.slice(0, 8)}... {task.model ? `· ${task.model}` : ''}
                   </span>
+                  {(task.status === 'queued' || task.status === 'running') && (
+                    <button
+                      className={styles.toolBtn}
+                      disabled={cancellingIds.has(task.id)}
+                      onClick={() => void handleCancelTask(task.id)}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 4,
+                        opacity: cancellingIds.has(task.id) ? 0.6 : 1,
+                      }}
+                    >
+                      <Square size={12} /> {cancellingIds.has(task.id) ? '取消中' : '取消任务'}
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
