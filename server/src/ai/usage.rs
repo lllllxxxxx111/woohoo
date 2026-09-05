@@ -1541,3 +1541,467 @@ mod series_aggregation_tests {
         std::fs::remove_file(&db_path).ok();
     }
 }
+
+#[cfg(test)]
+mod totals_breakdown_tests {
+    use super::{
+        fetch_breakdown, fetch_totals, normalize_query, AiUsageQuery, BreakdownKind,
+        NormalizedUsageQuery,
+    };
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use sqlx::SqlitePool;
+    use std::path::PathBuf;
+    use std::str::FromStr;
+
+    /// 与 001_init + 035 一致的 ai_usage_events 最小建表，
+    /// 另加 breakdown LEFT JOIN 用到的关联表壳（仅 id/user_id/name|title 列）。
+    const EVENTS_SCHEMA: &str = "
+        CREATE TABLE ai_usage_events (
+            id TEXT PRIMARY KEY NOT NULL,
+            user_id TEXT NOT NULL,
+            project_id TEXT,
+            conversation_id TEXT,
+            agent_id TEXT,
+            endpoint_id TEXT,
+            api_key_fingerprint TEXT NOT NULL DEFAULT '',
+            provider TEXT NOT NULL,
+            model TEXT,
+            operation TEXT NOT NULL,
+            status TEXT NOT NULL,
+            resource_kind TEXT NOT NULL DEFAULT 'text',
+            output_items INTEGER NOT NULL DEFAULT 0,
+            latency_ms INTEGER NOT NULL DEFAULT 0,
+            prompt_tokens INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            token_source TEXT NOT NULL DEFAULT 'unavailable',
+            input_chars INTEGER NOT NULL DEFAULT 0,
+            output_chars INTEGER NOT NULL DEFAULT 0,
+            request_fingerprint TEXT NOT NULL DEFAULT '',
+            attempt_group_key TEXT NOT NULL DEFAULT '',
+            attempt_index INTEGER NOT NULL DEFAULT 1,
+            is_redo INTEGER NOT NULL DEFAULT 0,
+            trigger_source TEXT,
+            error_message TEXT,
+            cached_prompt_tokens INTEGER,
+            prompt_prefix_hit_ratio REAL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )";
+    const ENDPOINTS_SCHEMA: &str =
+        "CREATE TABLE ai_endpoints (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, name TEXT)";
+    const CONVERSATIONS_SCHEMA: &str =
+        "CREATE TABLE conversations (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, title TEXT)";
+
+    async fn create_pool(prefix: &str) -> (SqlitePool, PathBuf) {
+        let db_path =
+            std::env::temp_dir().join(format!("{}-{}.sqlite", prefix, uuid::Uuid::new_v4()));
+        let database_url = format!("sqlite://{}", db_path.to_string_lossy().replace('\\', "/"));
+        let options = SqliteConnectOptions::from_str(&database_url)
+            .expect("invalid sqlite url")
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("connect test sqlite");
+        for statement in [EVENTS_SCHEMA, ENDPOINTS_SCHEMA, CONVERSATIONS_SCHEMA] {
+            sqlx::query(statement)
+                .execute(&pool)
+                .await
+                .expect("create schema");
+        }
+        (pool, db_path)
+    }
+
+    /// 可定制列的事件行，未覆盖的字段取 Default（success / chat / ep-1 / c1 / actual）。
+    struct EventRow {
+        id: &'static str,
+        created_at: &'static str,
+        project_id: Option<&'static str>,
+        conversation_id: Option<&'static str>,
+        agent_id: Option<&'static str>,
+        endpoint_id: Option<&'static str>,
+        api_key_fingerprint: &'static str,
+        model: Option<&'static str>,
+        operation: &'static str,
+        status: &'static str,
+        latency_ms: i64,
+        prompt_tokens: i64,
+        completion_tokens: i64,
+        total_tokens: i64,
+        token_source: &'static str,
+        attempt_group_key: &'static str,
+        attempt_index: i64,
+        is_redo: i64,
+        cached_prompt_tokens: Option<i64>,
+    }
+
+    impl Default for EventRow {
+        fn default() -> Self {
+            Self {
+                id: "",
+                created_at: "2026-09-01T10:00:00Z",
+                project_id: Some("p1"),
+                conversation_id: Some("c1"),
+                agent_id: None,
+                endpoint_id: Some("ep-1"),
+                api_key_fingerprint: "",
+                model: Some("gpt-test"),
+                operation: "chat",
+                status: "success",
+                latency_ms: 100,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                token_source: "actual",
+                attempt_group_key: "",
+                attempt_index: 1,
+                is_redo: 0,
+                cached_prompt_tokens: None,
+            }
+        }
+    }
+
+    async fn insert_event(pool: &SqlitePool, row: EventRow) {
+        sqlx::query(
+            "INSERT INTO ai_usage_events
+                (id, user_id, project_id, conversation_id, agent_id, endpoint_id,
+                 api_key_fingerprint, provider, model, operation, status,
+                 latency_ms, prompt_tokens, completion_tokens, total_tokens, token_source,
+                 attempt_group_key, attempt_index, is_redo, cached_prompt_tokens, created_at)
+             VALUES (?, 'user-1', ?, ?, ?, ?, ?, 'openai', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(row.id)
+        .bind(row.project_id)
+        .bind(row.conversation_id)
+        .bind(row.agent_id)
+        .bind(row.endpoint_id)
+        .bind(row.api_key_fingerprint)
+        .bind(row.model)
+        .bind(row.operation)
+        .bind(row.status)
+        .bind(row.latency_ms)
+        .bind(row.prompt_tokens)
+        .bind(row.completion_tokens)
+        .bind(row.total_tokens)
+        .bind(row.token_source)
+        .bind(row.attempt_group_key)
+        .bind(row.attempt_index)
+        .bind(row.is_redo)
+        .bind(row.cached_prompt_tokens)
+        .bind(row.created_at)
+        .execute(pool)
+        .await
+        .expect("insert event");
+    }
+
+    async fn seed_join_tables(pool: &SqlitePool) {
+        sqlx::query(
+            "INSERT INTO ai_endpoints (id, user_id, name) VALUES ('ep-1', 'user-1', '主力通道')",
+        )
+        .execute(pool)
+        .await
+        .expect("seed endpoint");
+        sqlx::query(
+            "INSERT INTO conversations (id, user_id, title) VALUES ('c1', 'user-1', '会话一')",
+        )
+        .execute(pool)
+        .await
+        .expect("seed conversation");
+    }
+
+    fn all_time_query() -> NormalizedUsageQuery {
+        normalize_query(AiUsageQuery {
+            days: Some(0),
+            ..Default::default()
+        })
+        .expect("normalize query")
+    }
+
+    #[tokio::test]
+    async fn fetch_totals_sums_outcome_tokens_and_cache_columns() {
+        let (pool, db_path) = create_pool("woohoo-usage-totals").await;
+        seed_join_tables(&pool).await;
+
+        insert_event(
+            &pool,
+            EventRow {
+                id: "e1",
+                attempt_group_key: "g1",
+                prompt_tokens: 100,
+                completion_tokens: 50,
+                total_tokens: 150,
+                latency_ms: 100,
+                cached_prompt_tokens: Some(80),
+                ..Default::default()
+            },
+        )
+        .await;
+        insert_event(
+            &pool,
+            EventRow {
+                id: "e2",
+                status: "failed",
+                attempt_group_key: "g1",
+                attempt_index: 2,
+                is_redo: 1,
+                token_source: "unavailable",
+                prompt_tokens: 50,
+                latency_ms: 300,
+                ..Default::default()
+            },
+        )
+        .await;
+        insert_event(
+            &pool,
+            EventRow {
+                id: "e3",
+                attempt_group_key: "g2",
+                attempt_index: 2,
+                is_redo: 1,
+                prompt_tokens: 100,
+                completion_tokens: 300,
+                total_tokens: 400,
+                cached_prompt_tokens: Some(100),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let totals = fetch_totals(&pool, "user-1", &all_time_query())
+            .await
+            .expect("fetch totals");
+
+        assert_eq!(totals.request_count, 3);
+        assert_eq!(totals.success_count, 2);
+        assert_eq!(totals.failure_count, 1);
+        assert_eq!(totals.avg_latency_ms, 167, "(100+300+100)/3 应四舍五入");
+        assert_eq!(totals.max_latency_ms, 300);
+        assert_eq!(totals.prompt_tokens, 250);
+        assert_eq!(totals.completion_tokens, 350);
+        assert_eq!(totals.total_tokens, 550);
+        assert_eq!(totals.actual_token_records, 2);
+        assert_eq!(totals.estimated_token_records, 0);
+        assert_eq!(totals.unavailable_token_records, 1);
+        assert_eq!(totals.cached_prompt_tokens, 180);
+        assert_eq!(totals.cached_token_records, 2);
+        assert_eq!(totals.attempt_group_count, 2);
+        assert_eq!(totals.redo_request_count, 2);
+        assert_eq!(totals.redo_total_tokens, 400);
+        assert_eq!(totals.first_pass_success_count, 1);
+        assert_eq!(totals.first_pass_success_tokens, 150);
+        assert_eq!(totals.retry_success_count, 1);
+        assert_eq!(totals.retry_success_tokens, 400);
+        assert_eq!(totals.project_count, 1);
+        assert_eq!(totals.conversation_count, 1);
+
+        pool.close().await;
+        std::fs::remove_file(&db_path).ok();
+    }
+
+    #[tokio::test]
+    async fn fetch_totals_respects_optional_operation_and_status_filters() {
+        let (pool, db_path) = create_pool("woohoo-usage-totals-filter").await;
+
+        insert_event(
+            &pool,
+            EventRow {
+                id: "e1",
+                total_tokens: 150,
+                ..Default::default()
+            },
+        )
+        .await;
+        insert_event(
+            &pool,
+            EventRow {
+                id: "e2",
+                operation: "image_gen",
+                status: "failed",
+                total_tokens: 900,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let operation_query = normalize_query(AiUsageQuery {
+            days: Some(0),
+            operation: Some("chat".into()),
+            ..Default::default()
+        })
+        .expect("normalize query");
+        let totals = fetch_totals(&pool, "user-1", &operation_query)
+            .await
+            .expect("fetch totals");
+        assert_eq!(totals.request_count, 1);
+        assert_eq!(totals.total_tokens, 150);
+
+        let status_query = normalize_query(AiUsageQuery {
+            days: Some(0),
+            status: Some("failed".into()),
+            ..Default::default()
+        })
+        .expect("normalize query");
+        let totals = fetch_totals(&pool, "user-1", &status_query)
+            .await
+            .expect("fetch totals");
+        assert_eq!(totals.request_count, 1);
+        assert_eq!(totals.total_tokens, 900);
+
+        pool.close().await;
+        std::fs::remove_file(&db_path).ok();
+    }
+
+    #[tokio::test]
+    async fn fetch_breakdown_endpoint_resolves_join_labels_and_orders_by_tokens() {
+        let (pool, db_path) = create_pool("woohoo-usage-breakdown-endpoint").await;
+        seed_join_tables(&pool).await;
+
+        insert_event(
+            &pool,
+            EventRow {
+                id: "a",
+                prompt_tokens: 300,
+                total_tokens: 300,
+                cached_prompt_tokens: Some(150),
+                ..Default::default()
+            },
+        )
+        .await;
+        insert_event(
+            &pool,
+            EventRow {
+                id: "b",
+                status: "failed",
+                endpoint_id: Some("ep-1"),
+                total_tokens: 100,
+                ..Default::default()
+            },
+        )
+        .await;
+        insert_event(
+            &pool,
+            EventRow {
+                id: "c",
+                endpoint_id: None,
+                conversation_id: None,
+                prompt_tokens: 200,
+                total_tokens: 200,
+                ..Default::default()
+            },
+        )
+        .await;
+        insert_event(
+            &pool,
+            EventRow {
+                id: "d",
+                endpoint_id: Some("ep-gone"),
+                total_tokens: 50,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let items = fetch_breakdown(&pool, "user-1", &all_time_query(), BreakdownKind::Endpoint)
+            .await
+            .expect("fetch breakdown");
+
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].key, "ep-1");
+        assert_eq!(items[0].label, "主力通道");
+        assert_eq!(items[0].request_count, 2);
+        assert_eq!(items[0].success_count, 1);
+        assert_eq!(items[0].failure_count, 1);
+        assert_eq!(items[0].total_tokens, 400);
+        assert_eq!(items[0].cached_prompt_tokens, 150);
+        assert!(
+            (items[0].cache_hit_ratio.unwrap() - 0.5).abs() < 1e-9,
+            "命中率 = 150/300"
+        );
+
+        assert_eq!(items[1].key, "");
+        assert_eq!(items[1].label, "默认端点");
+        assert_eq!(items[1].total_tokens, 200);
+        assert_eq!(items[1].cache_hit_ratio, None);
+
+        assert_eq!(items[2].key, "ep-gone");
+        assert_eq!(items[2].label, "已删除端点");
+
+        pool.close().await;
+        std::fs::remove_file(&db_path).ok();
+    }
+
+    #[tokio::test]
+    async fn fetch_breakdown_conversation_uses_titles_and_marks_non_conversation() {
+        let (pool, db_path) = create_pool("woohoo-usage-breakdown-conversation").await;
+        seed_join_tables(&pool).await;
+
+        insert_event(
+            &pool,
+            EventRow {
+                id: "a",
+                prompt_tokens: 100,
+                total_tokens: 100,
+                cached_prompt_tokens: Some(50),
+                ..Default::default()
+            },
+        )
+        .await;
+        insert_event(
+            &pool,
+            EventRow {
+                id: "b",
+                conversation_id: None,
+                total_tokens: 70,
+                ..Default::default()
+            },
+        )
+        .await;
+        insert_event(
+            &pool,
+            EventRow {
+                id: "c",
+                conversation_id: Some("c-gone"),
+                total_tokens: 30,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let items = fetch_breakdown(
+            &pool,
+            "user-1",
+            &all_time_query(),
+            BreakdownKind::Conversation,
+        )
+        .await
+        .expect("fetch breakdown");
+
+        assert_eq!(items.len(), 3);
+        let known = items
+            .iter()
+            .find(|item| item.key == "c1")
+            .expect("conversation group");
+        assert_eq!(known.label, "会话一");
+        assert_eq!(known.request_count, 1);
+        assert!(
+            (known.cache_hit_ratio.unwrap() - 0.5).abs() < 1e-9,
+            "命中率 = 50/100"
+        );
+
+        let orphan = items
+            .iter()
+            .find(|item| item.key.is_empty())
+            .expect("non-conversation group");
+        assert_eq!(orphan.label, "非会话请求");
+
+        let deleted = items
+            .iter()
+            .find(|item| item.key == "c-gone")
+            .expect("deleted conversation group");
+        assert_eq!(deleted.label, "已删除会话");
+
+        pool.close().await;
+        std::fs::remove_file(&db_path).ok();
+    }
+}

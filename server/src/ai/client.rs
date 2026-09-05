@@ -2112,3 +2112,133 @@ mod tests {
         assert!(value.get("stream_options").is_none());
     }
 }
+
+#[cfg(test)]
+mod stream_degrade_tests {
+    use super::{AiClient, ChatMessage, StreamUsageCapture};
+    use futures::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    fn find_header_end(buffer: &[u8]) -> Option<usize> {
+        buffer.windows(4).position(|window| window == b"\r\n\r\n")
+    }
+
+    /// 读取一个完整 HTTP 请求（header + Content-Length 定长 body）。
+    async fn read_http_request(stream: &mut TcpStream) -> String {
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let header_end = loop {
+            let n = stream.read(&mut chunk).await.expect("read request");
+            assert!(n > 0, "连接在 header 读取完成前关闭");
+            buffer.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = find_header_end(&buffer) {
+                break pos;
+            }
+        };
+        let head = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+        let content_length = head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.trim().eq_ignore_ascii_case("content-length") {
+                    value.trim().parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        let mut body = buffer[header_end + 4..].to_vec();
+        while body.len() < content_length {
+            let n = stream.read(&mut chunk).await.expect("read body");
+            assert!(n > 0, "连接在 body 读取完成前关闭");
+            body.extend_from_slice(&chunk[..n]);
+        }
+        body.truncate(content_length);
+        String::from_utf8_lossy(&body).to_string()
+    }
+
+    /// 回复一个带 Content-Length 的 HTTP 响应并关闭连接。
+    async fn respond(stream: &mut TcpStream, status_line: &str, body: &str) {
+        let response = format!(
+            "{status_line}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write response");
+        stream.flush().await.expect("flush response");
+        stream.shutdown().await.expect("shutdown");
+    }
+
+    /// 400/422 自动降级：首请求带 stream_options 被拒后，
+    /// 重试请求不带该字段且流式内容与 usage 上报不受影响。
+    #[tokio::test]
+    async fn chat_stream_downgrades_after_400_and_retries_without_stream_options() {
+        // 本地 mock 走 loopback，需要开发模式放行（仅影响当前测试进程）
+        std::env::set_var("WOOHOO_DEV_ALLOW_PRIVATE_ENDPOINTS", "true");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = tokio::spawn(async move {
+            // 第 1 个请求：带 stream_options → 400 拒绝
+            let (mut socket, _) = listener.accept().await.expect("accept first request");
+            let body = read_http_request(&mut socket).await;
+            assert!(
+                body.contains("stream_options"),
+                "首请求应携带 stream_options: {body}"
+            );
+            respond(&mut socket, "HTTP/1.1 400 Bad Request", "").await;
+
+            // 第 2 个请求：降级重试，不带 stream_options → 200 SSE
+            let (mut socket, _) = listener.accept().await.expect("accept retry request");
+            let body = read_http_request(&mut socket).await;
+            assert!(
+                !body.contains("stream_options"),
+                "重试请求不应携带 stream_options: {body}"
+            );
+            let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+                       data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\n\
+                       data: [DONE]\n\n";
+            respond(&mut socket, "HTTP/1.1 200 OK", sse).await;
+        });
+
+        let client = AiClient::new().with_stream_include_usage(true);
+        let capture = StreamUsageCapture::new();
+        let base_url = format!("http://{addr}/v1");
+
+        let stream = client
+            .chat_stream(
+                &base_url,
+                "sk-test",
+                "gpt-test",
+                vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: "ping".to_string(),
+                }],
+                None,
+                None,
+                None,
+                None,
+                &capture,
+            )
+            .await
+            .expect("chat_stream 应在 400 后降级重试成功");
+        tokio::pin!(stream);
+
+        let mut content = String::new();
+        while let Some(item) = stream.next().await {
+            content.push_str(&item.expect("stream item"));
+        }
+        assert!(content.contains("hi"), "应产出降级响应的内容: {content}");
+
+        let usage = capture.take().expect("降级响应的 usage 仍应上报");
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.total_tokens, 12);
+        assert_eq!(usage.cached_prompt_tokens, None);
+
+        server.await.expect("mock server task");
+    }
+}
