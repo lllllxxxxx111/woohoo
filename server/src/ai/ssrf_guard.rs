@@ -24,6 +24,25 @@ use crate::error::{AppError, AppResult};
 /// 开发模式开关环境变量名：允许 loopback / RFC1918 私网 endpoint
 const DEV_ALLOW_PRIVATE_ENV: &str = "WOOHOO_DEV_ALLOW_PRIVATE_ENDPOINTS";
 
+/// 测试专用：跨测试模块共享的环境变量操作锁。
+/// dev_mode/is_production 的环境变量测试与本文件外的集成测试
+/// （如流式降级测试需临时放行 loopback）都必须持锁，否则并发
+/// set_var/remove_var 会互相踩踏（偶发校验失败/断言失败）。
+#[cfg(test)]
+pub(crate) mod env_test_support {
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 拿到环境变量操作锁；容忍毒化——前一个测试 panic 后其 EnvGuard
+    /// 仍会在 Drop 里恢复环境变量，后续测试不应被 PoisonError 级联拖垮。
+    pub(crate) fn lock_env() -> MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 /// 生产环境标志环境变量名（与 main.rs 中 CORS / JWT 检查保持一致）
 const PROD_ENV_NAME: &str = "RUST_ENV";
 
@@ -480,7 +499,6 @@ pub fn is_absolute_url(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     // =========================================================================
     // 第一部分：纯逻辑测试（不读取 / 修改环境变量，可全并行）
@@ -1176,10 +1194,8 @@ mod tests {
     // 第二部分：环境变量读取测试（需串行化，避免并行测试相互污染）
     // =========================================================================
 
-    /// 环境变量测试串行化锁：仅用于 dev_mode_allows_private / is_production_environment
-    /// / assert_dev_mode_safe_at_startup 这三类直接读取环境变量的测试。
-    /// 其他测试使用 _with(dev_mode) 参数化版本，完全不触碰环境变量。
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// 环境变量测试串行化锁在文件顶部的 env_test_support 模块，
+    /// 供本模块与外部集成测试（流式降级 mock）共享。
 
     /// 测试辅助：保存并清理相关环境变量，返回用于恢复的 Guard。
     /// 仅供需要直接操作环境变量的少量测试使用。
@@ -1191,7 +1207,7 @@ mod tests {
 
     impl EnvGuard {
         fn acquire() -> Self {
-            let lock = ENV_LOCK.lock().unwrap();
+            let lock = super::env_test_support::lock_env();
             let old_dev = std::env::var(DEV_ALLOW_PRIVATE_ENV).ok();
             let old_prod = std::env::var(PROD_ENV_NAME).ok();
             std::env::remove_var(DEV_ALLOW_PRIVATE_ENV);

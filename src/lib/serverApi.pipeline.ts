@@ -17,6 +17,10 @@ type UsageQueryParams = {
   operation?: string;
   status?: string;
   limit?: number;
+  /** 自由文本搜索（模型/操作/状态/资源类型与项目/智能体/端点名称） */
+  search?: string;
+  /** 服务端分页偏移 */
+  offset?: number;
 };
 
 type TaskListParams = {
@@ -345,6 +349,13 @@ export type PipelineSseEvent = {
   data: string;
 };
 
+/** 记录分页结果：total 为同过滤条件（含 search）下的记录总数 */
+export interface UsageRecordsPage {
+  records: AiUsageRecord[];
+  total: number;
+}
+
+
 export function createUsageTaskPipelineApi(requestApi: RequestApi) {
   const getUsageSummary = async (params?: UsageQueryParams): Promise<AiUsageSummary> => {
     const query = new URLSearchParams();
@@ -354,12 +365,12 @@ export function createUsageTaskPipelineApi(requestApi: RequestApi) {
     return requestApi<AiUsageSummary>(`/api/ai/usage/summary?${query.toString()}`);
   };
 
-  const getUsageRecords = async (params?: UsageQueryParams): Promise<AiUsageRecord[]> => {
+  const getUsageRecords = async (params?: UsageQueryParams): Promise<UsageRecordsPage> => {
     const query = new URLSearchParams();
     if (params) {
       appendDefinedQuery(query, params);
     }
-    return requestApi<AiUsageRecord[]>(`/api/ai/usage/records?${query.toString()}`);
+    return requestApi<UsageRecordsPage>(`/api/ai/usage/records?${query.toString()}`);
   };
 
   const listAiTasks = async (params?: TaskListParams): Promise<AiTask[]> => {

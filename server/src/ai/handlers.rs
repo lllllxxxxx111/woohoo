@@ -390,14 +390,16 @@ pub async fn ai_chat(
                 build_usage_record(
                     &user_id.0,
                     &context,
-                    AiUsageOperation::Chat,
-                    AiUsageStatus::Failed,
-                    latency_ms,
-                    prepared.input_chars,
-                    0,
-                    usage::unavailable_usage(),
-                    Some(error.to_string()),
-                    prepared.prompt_prefix_hit_ratio,
+                    UsageRecordCore {
+                        operation: AiUsageOperation::Chat,
+                        status: AiUsageStatus::Failed,
+                        latency_ms,
+                        input_chars: prepared.input_chars,
+                        output_chars: 0,
+                        usage: usage::unavailable_usage(),
+                        error_message: Some(error.to_string()),
+                        prompt_prefix_hit_ratio: prepared.prompt_prefix_hit_ratio,
+                    },
                 ),
             )
             .await;
@@ -423,14 +425,16 @@ pub async fn ai_chat(
                     build_usage_record(
                         &user_id.0,
                         &context,
-                        AiUsageOperation::Chat,
-                        AiUsageStatus::Failed,
-                        latency_ms,
-                        prepared.input_chars,
-                        result.content.chars().count() as i64,
-                        usage,
-                        Some(error.to_string()),
-                        prepared.prompt_prefix_hit_ratio,
+                        UsageRecordCore {
+                            operation: AiUsageOperation::Chat,
+                            status: AiUsageStatus::Failed,
+                            latency_ms,
+                            input_chars: prepared.input_chars,
+                            output_chars: result.content.chars().count() as i64,
+                            usage,
+                            error_message: Some(error.to_string()),
+                            prompt_prefix_hit_ratio: prepared.prompt_prefix_hit_ratio,
+                        },
                     ),
                 )
                 .await;
@@ -461,14 +465,16 @@ pub async fn ai_chat(
             build_usage_record(
                 &user_id.0,
                 &context,
-                AiUsageOperation::Chat,
-                AiUsageStatus::Failed,
-                latency_ms,
-                prepared.input_chars,
-                finalized.content.chars().count() as i64,
-                usage,
-                Some(error.to_string()),
-                prepared.prompt_prefix_hit_ratio,
+                UsageRecordCore {
+                    operation: AiUsageOperation::Chat,
+                    status: AiUsageStatus::Failed,
+                    latency_ms,
+                    input_chars: prepared.input_chars,
+                    output_chars: finalized.content.chars().count() as i64,
+                    usage,
+                    error_message: Some(error.to_string()),
+                    prompt_prefix_hit_ratio: prepared.prompt_prefix_hit_ratio,
+                },
             ),
         )
         .await;
@@ -479,14 +485,16 @@ pub async fn ai_chat(
         build_usage_record(
             &user_id.0,
             &context,
-            AiUsageOperation::Chat,
-            AiUsageStatus::Success,
-            latency_ms,
-            prepared.input_chars,
-            finalized.content.chars().count() as i64,
-            usage,
-            None,
-            prepared.prompt_prefix_hit_ratio,
+            UsageRecordCore {
+                operation: AiUsageOperation::Chat,
+                status: AiUsageStatus::Success,
+                latency_ms,
+                input_chars: prepared.input_chars,
+                output_chars: finalized.content.chars().count() as i64,
+                usage,
+                error_message: None,
+                prompt_prefix_hit_ratio: prepared.prompt_prefix_hit_ratio,
+            },
         ),
     )
     .await;
@@ -596,14 +604,16 @@ pub async fn ai_chat_stream(
                 build_usage_record(
                     &user_id.0,
                     &context,
-                    AiUsageOperation::Stream,
-                    AiUsageStatus::Failed,
-                    stream_started.elapsed().as_millis() as i64,
-                    prepared.input_chars,
-                    0,
-                    usage::unavailable_usage(),
-                    Some(error.to_string()),
-                    prepared.prompt_prefix_hit_ratio,
+                    UsageRecordCore {
+                        operation: AiUsageOperation::Stream,
+                        status: AiUsageStatus::Failed,
+                        latency_ms: stream_started.elapsed().as_millis() as i64,
+                        input_chars: prepared.input_chars,
+                        output_chars: 0,
+                        usage: usage::unavailable_usage(),
+                        error_message: Some(error.to_string()),
+                        prompt_prefix_hit_ratio: prepared.prompt_prefix_hit_ratio,
+                    },
                 ),
             )
             .await;
@@ -641,146 +651,176 @@ pub async fn ai_chat_stream(
         };
 
     let sse_stream = async_stream::stream! {
-        use futures::StreamExt;
+            use futures::StreamExt;
 
-        let mut full_content = String::new();
-        let mut visible_content = String::new();
-        let mut persisted_visible_content = String::new();
-        let mut last_stream_persist_at = Instant::now();
-        let mut stream_error: Option<String> = None;
-        let mut postprocess_error: Option<String> = None;
-        futures::pin_mut!(ai_stream);
+            let mut full_content = String::new();
+            let mut visible_content = String::new();
+            let mut persisted_visible_content = String::new();
+            let mut last_stream_persist_at = Instant::now();
+            let mut stream_error: Option<String> = None;
+            let mut postprocess_error: Option<String> = None;
+            futures::pin_mut!(ai_stream);
 
-        while let Some(result) = ai_stream.next().await {
-            match result {
-                Ok(chunk) => {
-                    full_content.push_str(&chunk);
-                    let next_visible_content = visible_stream_content(&full_content);
-                    if let Some(delta) = next_visible_content.strip_prefix(&visible_content) {
-                        if !delta.is_empty() {
-                            yield Ok(Event::default().data(delta));
+            while let Some(result) = ai_stream.next().await {
+                match result {
+                    Ok(chunk) => {
+                        full_content.push_str(&chunk);
+                        let next_visible_content = visible_stream_content(&full_content);
+                        if let Some(delta) = next_visible_content.strip_prefix(&visible_content) {
+                            if !delta.is_empty() {
+                                yield Ok(Event::default().data(delta));
+                            }
+                        } else if next_visible_content != visible_content {
+                            tracing::warn!("Visible AI stream content diverged unexpectedly");
                         }
-                    } else if next_visible_content != visible_content {
-                        tracing::warn!("Visible AI stream content diverged unexpectedly");
-                    }
-                    visible_content = next_visible_content;
+                        visible_content = next_visible_content;
 
-                    if let Some(message) = persisted_stream_message.as_ref() {
-                        let should_persist_snapshot =
-                            !visible_content.is_empty()
-                            && visible_content != persisted_visible_content
-                            && (
-                                last_stream_persist_at.elapsed() >= Duration::from_millis(400)
-                                || visible_content
-                                    .len()
-                                    .saturating_sub(persisted_visible_content.len())
-                                    >= 96
-                            );
+                        if let Some(message) = persisted_stream_message.as_ref() {
+                            let should_persist_snapshot =
+                                !visible_content.is_empty()
+                                && visible_content != persisted_visible_content
+                                && (
+                                    last_stream_persist_at.elapsed() >= Duration::from_millis(400)
+                                    || visible_content
+                                        .len()
+                                        .saturating_sub(persisted_visible_content.len())
+                                        >= 96
+                                );
 
-                        if should_persist_snapshot {
-                            match update_streaming_assistant_message_content(
-                                &db,
-                                &context_for_finalize,
-                                &message.id,
-                                &model_for_save,
-                                &visible_content,
-                            )
-                            .await
-                            {
-                                Ok(()) => {
-                                    persisted_visible_content = visible_content.clone();
-                                    last_stream_persist_at = Instant::now();
-                                }
-                                Err(error) => {
-                                    tracing::warn!(
-                                        message_id = %message.id,
-                                        error = %error,
-                                        "Failed to persist streaming assistant content snapshot"
-                                    );
+                            if should_persist_snapshot {
+                                match update_streaming_assistant_message_content(
+                                    &db,
+                                    &context_for_finalize,
+                                    &message.id,
+                                    &model_for_save,
+                                    &visible_content,
+                                )
+                                .await
+                                {
+                                    Ok(()) => {
+                                        persisted_visible_content = visible_content.clone();
+                                        last_stream_persist_at = Instant::now();
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            message_id = %message.id,
+                                            error = %error,
+                                            "Failed to persist streaming assistant content snapshot"
+                                        );
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                Err(error) => {
-                    tracing::error!("AI stream error: {}", error);
-                    stream_error = Some(error.to_string());
-                    yield Ok(Event::default().event("error").data(error.to_string()));
-                    break;
-                }
-            }
-        }
-
-        if stream_error.is_some() {
-            if let Some(error_message) = stream_error.as_ref() {
-                if let Some(message) = persisted_stream_message.as_ref() {
-                    if let Err(message_error) = fail_streaming_assistant_message(
-                        &db,
-                        &context_for_finalize,
-                        &message.id,
-                        &model_for_save,
-                        error_message,
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            "Failed to update stream placeholder into failure message: {}",
-                            message_error
-                        );
+                    Err(error) => {
+                        tracing::error!("AI stream error: {}", error);
+                        stream_error = Some(error.to_string());
+                        yield Ok(Event::default().event("error").data(error.to_string()));
+                        break;
                     }
-                } else if let Err(message_error) =
-                    save_failure_message(&db, &context_for_finalize, error_message, None).await
-                {
-                    tracing::warn!(
-                        "Failed to persist stream failure message: {}",
-                        message_error
-                    );
                 }
             }
-        } else if !full_content.is_empty() {
-            match finalize_assistant_response(
-                &state_for_finalize,
-                &request_user_id,
-                &context_for_finalize,
-                &full_content,
-            )
-            .await
-            {
-                Ok(finalized) => {
-                    let save_result = if let Some(message) = persisted_stream_message.as_ref() {
-                        finalize_streaming_assistant_message(
+
+            if stream_error.is_some() {
+                if let Some(error_message) = stream_error.as_ref() {
+                    if let Some(message) = persisted_stream_message.as_ref() {
+                        if let Err(message_error) = fail_streaming_assistant_message(
                             &db,
                             &context_for_finalize,
                             &message.id,
                             &model_for_save,
-                            &finalized.content,
-                            None,
-                            &finalized.action_results,
-                            finalized.pending_action_envelope.as_ref(),
-                            finalized.project_workflow.as_ref(),
-                            finalized.workflow_guard.as_ref(),
+                            error_message,
                         )
                         .await
-                    } else {
-                        save_assistant_message(
-                            &db,
-                            &context_for_finalize,
-                            &model_for_save,
-                            &finalized.content,
-                            None,
-                            None,
-                            &finalized.action_results,
-                            finalized.pending_action_envelope.as_ref(),
-                            finalized.project_workflow.as_ref(),
-                            finalized.workflow_guard.as_ref(),
-                        )
-                        .await
-                    };
-
-                    if let Err(error) = save_result
+                        {
+                            tracing::warn!(
+                                "Failed to update stream placeholder into failure message: {}",
+                                message_error
+                            );
+                        }
+                    } else if let Err(message_error) =
+                        save_failure_message(&db, &context_for_finalize, error_message, None).await
                     {
+                        tracing::warn!(
+                            "Failed to persist stream failure message: {}",
+                            message_error
+                        );
+                    }
+                }
+            } else if !full_content.is_empty() {
+                match finalize_assistant_response(
+                    &state_for_finalize,
+                    &request_user_id,
+                    &context_for_finalize,
+                    &full_content,
+                )
+                .await
+                {
+                    Ok(finalized) => {
+                        let save_result = if let Some(message) = persisted_stream_message.as_ref() {
+                            finalize_streaming_assistant_message(
+                                &db,
+                                &context_for_finalize,
+                                &message.id,
+                                &model_for_save,
+                                &finalized.content,
+                                None,
+                                &finalized.action_results,
+                                finalized.pending_action_envelope.as_ref(),
+                                finalized.project_workflow.as_ref(),
+                                finalized.workflow_guard.as_ref(),
+                            )
+                            .await
+                        } else {
+                            save_assistant_message(
+                                &db,
+                                &context_for_finalize,
+                                &model_for_save,
+                                &finalized.content,
+                                None,
+                                None,
+                                &finalized.action_results,
+                                finalized.pending_action_envelope.as_ref(),
+                                finalized.project_workflow.as_ref(),
+                                finalized.workflow_guard.as_ref(),
+                            )
+                            .await
+                        };
+
+                        if let Err(error) = save_result
+                        {
+                            let error_message = error.to_string();
+                            tracing::error!("Failed to persist AI stream response: {}", error_message);
+                            postprocess_error = Some(error_message.clone());
+                            if let Some(message) = persisted_stream_message.as_ref() {
+                                if let Err(message_error) = fail_streaming_assistant_message(
+                                    &db,
+                                    &context_for_finalize,
+                                    &message.id,
+                                    &model_for_save,
+                                    &error_message,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        "Failed to update stream placeholder after save error: {}",
+                                        message_error
+                                    );
+                                }
+                            } else if let Err(message_error) =
+                                save_failure_message(&db, &context_for_finalize, &error_message, None)
+                                    .await
+                            {
+                                tracing::warn!(
+                                    "Failed to persist stream save error message: {}",
+                                    message_error
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
                         let error_message = error.to_string();
-                        tracing::error!("Failed to persist AI stream response: {}", error_message);
+                        tracing::error!("Failed to finalize AI stream response: {}", error_message);
                         postprocess_error = Some(error_message.clone());
                         if let Some(message) = persisted_stream_message.as_ref() {
                             if let Err(message_error) = fail_streaming_assistant_message(
@@ -793,128 +833,98 @@ pub async fn ai_chat_stream(
                             .await
                             {
                                 tracing::warn!(
-                                    "Failed to update stream placeholder after save error: {}",
+                                    "Failed to update stream placeholder after finalize error: {}",
                                     message_error
                                 );
                             }
                         } else if let Err(message_error) =
-                            save_failure_message(&db, &context_for_finalize, &error_message, None)
-                                .await
+                            save_failure_message(&db, &context_for_finalize, &error_message, None).await
                         {
                             tracing::warn!(
-                                "Failed to persist stream save error message: {}",
+                                "Failed to persist stream post-processing error: {}",
                                 message_error
                             );
                         }
                     }
                 }
-                Err(error) => {
-                    let error_message = error.to_string();
-                    tracing::error!("Failed to finalize AI stream response: {}", error_message);
-                    postprocess_error = Some(error_message.clone());
-                    if let Some(message) = persisted_stream_message.as_ref() {
-                        if let Err(message_error) = fail_streaming_assistant_message(
-                            &db,
-                            &context_for_finalize,
-                            &message.id,
-                            &model_for_save,
-                            &error_message,
-                        )
-                        .await
-                        {
-                            tracing::warn!(
-                                "Failed to update stream placeholder after finalize error: {}",
-                                message_error
-                            );
-                        }
-                    } else if let Err(message_error) =
-                        save_failure_message(&db, &context_for_finalize, &error_message, None).await
-                    {
-                        tracing::warn!(
-                            "Failed to persist stream post-processing error: {}",
-                            message_error
-                        );
-                    }
+            } else if let Some(message) = persisted_stream_message.as_ref() {
+                let error_message = "AI 流式响应为空";
+                postprocess_error = Some(error_message.to_string());
+                if let Err(message_error) = fail_streaming_assistant_message(
+                    &db,
+                    &context_for_finalize,
+                    &message.id,
+                    &model_for_save,
+                    error_message,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        "Failed to update empty stream placeholder into failure message: {}",
+                        message_error
+                    );
                 }
             }
-        } else if let Some(message) = persisted_stream_message.as_ref() {
-            let error_message = "AI 流式响应为空";
-            postprocess_error = Some(error_message.to_string());
-            if let Err(message_error) = fail_streaming_assistant_message(
+
+            let latency_ms = stream_started.elapsed().as_millis() as i64;
+            let usage = if full_content.is_empty() && stream_error.is_some() {
+                usage::unavailable_usage()
+            } else if let Some(vendor_usage) = stream_usage_capture.take() {
+                // 供应商上报的实际 usage（含缓存命中 tokens），替代估算值。
+                usage::UsageNumbers {
+                    cached_prompt_tokens: vendor_usage.cached_prompt_tokens,
+                    prompt_tokens: vendor_usage.prompt_tokens,
+                    completion_tokens: vendor_usage.completion_tokens,
+                    total_tokens: vendor_usage.total_tokens,
+                    token_source: usage::AiUsageTokenSource::Actual,
+                }
+            } else {
+                let completion_tokens = usage::estimate_tokens(&full_content);
+                UsageNumbers {
+                    cached_prompt_tokens: None,
+                    prompt_tokens: prompt_tokens_estimate,
+                    completion_tokens,
+                    total_tokens: prompt_tokens_estimate + completion_tokens,
+                    token_source: usage::AiUsageTokenSource::Estimated,
+                }
+            };
+            let status = if stream_error.is_some() || postprocess_error.is_some() {
+                AiUsageStatus::Failed
+            } else {
+                AiUsageStatus::Success
+            };
+            record_usage_and_bill_safe(
                 &db,
-                &context_for_finalize,
-                &message.id,
-                &model_for_save,
-                error_message,
-            )
-            .await
-            {
-                tracing::warn!(
-                    "Failed to update empty stream placeholder into failure message: {}",
-                    message_error
-                );
-            }
-        }
+                build_direct_usage_record(DirectUsageRecordParams {
+    user_id: &request_user_id,
+    project_id: Some(project_id.clone()),
+    conversation_id: Some(conversation_id.clone()),
+    agent_id: agent_id.clone(),
+    endpoint_id: Some(endpoint_id.clone()),
+    provider: &provider,
+    api_key: &api_key,
+    model: Some(model_for_save.clone()),
+    operation: AiUsageOperation::Stream,
+    status,
+    output_kind,
+    output_items: if status == AiUsageStatus::Success { output_items } else { 0 },
+    content: &request_content,
+    latency_ms,
+    input_chars,
+    output_chars: full_content.chars().count() as i64,
+    usage,
+    trigger_source: None,
+    error_message: postprocess_error.clone().or(stream_error.clone()),
+    prompt_prefix_hit_ratio: prepared.prompt_prefix_hit_ratio,
+    }),
+            ).await;
 
-        let latency_ms = stream_started.elapsed().as_millis() as i64;
-        let usage = if full_content.is_empty() && stream_error.is_some() {
-            usage::unavailable_usage()
-        } else if let Some(vendor_usage) = stream_usage_capture.take() {
-            // 供应商上报的实际 usage（含缓存命中 tokens），替代估算值。
-            usage::UsageNumbers {
-                cached_prompt_tokens: vendor_usage.cached_prompt_tokens,
-                prompt_tokens: vendor_usage.prompt_tokens,
-                completion_tokens: vendor_usage.completion_tokens,
-                total_tokens: vendor_usage.total_tokens,
-                token_source: usage::AiUsageTokenSource::Actual,
-            }
-        } else {
-            let completion_tokens = usage::estimate_tokens(&full_content);
-            UsageNumbers {
-                cached_prompt_tokens: None,
-                prompt_tokens: prompt_tokens_estimate,
-                completion_tokens,
-                total_tokens: prompt_tokens_estimate + completion_tokens,
-                token_source: usage::AiUsageTokenSource::Estimated,
+            if let Some(error_message) = postprocess_error.as_ref() {
+                yield Ok(Event::default().event("error").data(error_message.clone()));
+            } else if status == AiUsageStatus::Success {
+                yield Ok(Event::default().event("done").data("[DONE]"));
             }
         };
-        let status = if stream_error.is_some() || postprocess_error.is_some() {
-            AiUsageStatus::Failed
-        } else {
-            AiUsageStatus::Success
-        };
-        record_usage_and_bill_safe(
-            &db,
-            build_direct_usage_record(
-                &request_user_id,
-                Some(project_id.clone()),
-                Some(conversation_id.clone()),
-                agent_id.clone(),
-                Some(endpoint_id.clone()),
-                &provider,
-                &api_key,
-                Some(model_for_save.clone()),
-                AiUsageOperation::Stream,
-                status,
-                output_kind,
-                if status == AiUsageStatus::Success { output_items } else { 0 },
-                &request_content,
-                latency_ms,
-                input_chars,
-                full_content.chars().count() as i64,
-                usage,
-                None,
-                postprocess_error.clone().or(stream_error.clone()),
-                prepared.prompt_prefix_hit_ratio,
-            ),
-        ).await;
-
-        if let Some(error_message) = postprocess_error.as_ref() {
-            yield Ok(Event::default().event("error").data(error_message.clone()));
-        } else if status == AiUsageStatus::Success {
-            yield Ok(Event::default().event("done").data("[DONE]"));
-        }
-    };
 
     Ok(Sse::new(sse_stream).keep_alive(
         KeepAlive::new()
@@ -983,28 +993,28 @@ pub async fn test_endpoint(
         Err(error) => {
             record_usage_safe(
                 &state.db,
-                build_direct_usage_record(
-                    &user_id.0,
-                    None,
-                    None,
-                    None,
-                    None,
-                    req.provider.trim(),
-                    req.api_key.trim(),
-                    Some(req.model.trim().to_string()),
-                    AiUsageOperation::Test,
-                    AiUsageStatus::Failed,
+                build_direct_usage_record(DirectUsageRecordParams {
+                    user_id: &user_id.0,
+                    project_id: None,
+                    conversation_id: None,
+                    agent_id: None,
+                    endpoint_id: None,
+                    provider: req.provider.trim(),
+                    api_key: req.api_key.trim(),
+                    model: Some(req.model.trim().to_string()),
+                    operation: AiUsageOperation::Test,
+                    status: AiUsageStatus::Failed,
                     output_kind,
-                    0,
-                    &content,
+                    output_items: 0,
+                    content: &content,
                     latency_ms,
                     input_chars,
-                    0,
-                    usage::unavailable_usage(),
-                    None,
-                    Some(error.to_string()),
-                    None,
-                ),
+                    output_chars: 0,
+                    usage: usage::unavailable_usage(),
+                    trigger_source: None,
+                    error_message: Some(error.to_string()),
+                    prompt_prefix_hit_ratio: None,
+                }),
             )
             .await;
             return Err(error);
@@ -1013,28 +1023,28 @@ pub async fn test_endpoint(
     let usage = usage::usage_from_response(&messages, &result.content, result.usage.as_ref());
     record_usage_safe(
         &state.db,
-        build_direct_usage_record(
-            &user_id.0,
-            None,
-            None,
-            None,
-            None,
-            req.provider.trim(),
-            req.api_key.trim(),
-            Some(result.model.clone()),
-            AiUsageOperation::Test,
-            AiUsageStatus::Success,
+        build_direct_usage_record(DirectUsageRecordParams {
+            user_id: &user_id.0,
+            project_id: None,
+            conversation_id: None,
+            agent_id: None,
+            endpoint_id: None,
+            provider: req.provider.trim(),
+            api_key: req.api_key.trim(),
+            model: Some(result.model.clone()),
+            operation: AiUsageOperation::Test,
+            status: AiUsageStatus::Success,
             output_kind,
             output_items,
-            &content,
+            content: &content,
             latency_ms,
             input_chars,
-            result.content.chars().count() as i64,
+            output_chars: result.content.chars().count() as i64,
             usage,
-            None,
-            None,
-            None,
-        ),
+            trigger_source: None,
+            error_message: None,
+            prompt_prefix_hit_ratio: None,
+        }),
     )
     .await;
 
@@ -1704,14 +1714,16 @@ async fn finalize_task_success(
         build_usage_record(
             user_id,
             context,
-            AiUsageOperation::Task,
-            AiUsageStatus::Success,
-            latency_ms,
-            prepared.input_chars,
-            finalized.content.chars().count() as i64,
-            usage,
-            None,
-            prepared.prompt_prefix_hit_ratio,
+            UsageRecordCore {
+                operation: AiUsageOperation::Task,
+                status: AiUsageStatus::Success,
+                latency_ms,
+                input_chars: prepared.input_chars,
+                output_chars: finalized.content.chars().count() as i64,
+                usage,
+                error_message: None,
+                prompt_prefix_hit_ratio: prepared.prompt_prefix_hit_ratio,
+            },
         ),
     )
     .await;
@@ -1770,14 +1782,16 @@ async fn fail_task_execution(
         build_usage_record(
             user_id,
             context,
-            AiUsageOperation::Task,
-            AiUsageStatus::Failed,
-            latency_ms,
-            input_chars,
-            output_chars,
-            usage,
-            Some(error_message.clone()),
-            prompt_prefix_hit_ratio,
+            UsageRecordCore {
+                operation: AiUsageOperation::Task,
+                status: AiUsageStatus::Failed,
+                latency_ms,
+                input_chars,
+                output_chars,
+                usage,
+                error_message: Some(error_message.clone()),
+                prompt_prefix_hit_ratio,
+            },
         ),
     )
     .await;

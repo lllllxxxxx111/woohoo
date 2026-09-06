@@ -151,6 +151,10 @@ pub struct AiUsageQuery {
     pub operation: Option<String>,
     pub status: Option<String>,
     pub limit: Option<usize>,
+    /// 自由文本搜索：模糊匹配模型/操作/状态/资源类型与项目/智能体/端点名称
+    pub search: Option<String>,
+    /// 服务端分页偏移（records 分页用）
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -298,6 +302,8 @@ struct NormalizedUsageQuery {
     pub operation: Option<String>,
     pub status: Option<String>,
     pub limit: i64,
+    pub offset: i64,
+    pub search: Option<String>,
     pub days: Option<i64>,
 }
 
@@ -564,13 +570,107 @@ pub async fn build_summary(
     })
 }
 
+/** 记录分页结果：total 为同过滤条件（含 search）下的记录总数 */
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageRecordsPage {
+    pub records: Vec<AiUsageRecord>,
+    pub total: i64,
+}
+
 pub async fn list_records(
     pool: &SqlitePool,
     user_id: &str,
     query: AiUsageQuery,
-) -> AppResult<Vec<AiUsageRecord>> {
+) -> AppResult<UsageRecordsPage> {
     let query = normalize_query(query)?;
-    list_records_with_query(pool, user_id, &query).await
+    let records = list_records_with_query(pool, user_id, &query).await?;
+    let total = count_records_with_query(pool, user_id, &query).await?;
+    Ok(UsageRecordsPage { records, total })
+}
+
+/// LIKE 通配符转义（配合 SQL 里的 ESCAPE '\' 使用）
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// records 取数与计数共用的过滤条件。
+/// search 对模型/操作/状态/资源类型与项目/智能体/端点名称做模糊匹配，
+/// 覆盖前端搜索框原本只能在 50 条切片内做的客户端过滤。
+const RECORDS_FILTER_SQL: &str = "WHERE u.user_id = ?
+       AND (? IS NULL OR u.created_at >= ?)
+       AND (? IS NULL OR u.project_id = ?)
+       AND (? IS NULL OR u.conversation_id = ?)
+       AND (? IS NULL OR u.agent_id = ?)
+       AND (? IS NULL OR u.endpoint_id = ?)
+       AND (? IS NULL OR u.api_key_fingerprint = ?)
+       AND (? IS NULL OR u.resource_kind = ?)
+       AND (? IS NULL OR u.model = ?)
+       AND (? IS NULL OR u.operation = ?)
+       AND (? IS NULL OR u.status = ?)
+       AND (? IS NULL OR u.model LIKE ? ESCAPE '\\'
+                        OR u.operation LIKE ? ESCAPE '\\'
+                        OR u.status LIKE ? ESCAPE '\\'
+                        OR u.resource_kind LIKE ? ESCAPE '\\'
+                        OR p.name LIKE ? ESCAPE '\\'
+                        OR a.name LIKE ? ESCAPE '\\'
+                        OR ep.name LIKE ? ESCAPE '\\')";
+
+/// 同过滤条件下的记录总数（分页器用）。绑定顺序与 list_records_with_query 一致。
+async fn count_records_with_query(
+    pool: &SqlitePool,
+    user_id: &str,
+    query: &NormalizedUsageQuery,
+) -> AppResult<i64> {
+    let sql = format!(
+        "SELECT COUNT(*)
+         FROM ai_usage_events u
+         LEFT JOIN projects p ON p.id = u.project_id AND p.user_id = u.user_id
+         LEFT JOIN agents a ON a.id = u.agent_id AND a.user_id = u.user_id
+         LEFT JOIN ai_endpoints ep ON ep.id = u.endpoint_id AND ep.user_id = u.user_id
+         {RECORDS_FILTER_SQL}"
+    );
+    let search_pattern = query
+        .search
+        .as_deref()
+        .map(escape_like)
+        .map(|pattern| format!("%{pattern}%"));
+
+    Ok(sqlx::query_scalar::<_, i64>(&sql)
+        .bind(user_id)
+        .bind(query.from_ts.as_deref())
+        .bind(query.from_ts.as_deref())
+        .bind(query.project_id.as_deref())
+        .bind(query.project_id.as_deref())
+        .bind(query.conversation_id.as_deref())
+        .bind(query.conversation_id.as_deref())
+        .bind(query.agent_id.as_deref())
+        .bind(query.agent_id.as_deref())
+        .bind(query.endpoint_id.as_deref())
+        .bind(query.endpoint_id.as_deref())
+        .bind(query.api_key_fingerprint.as_deref())
+        .bind(query.api_key_fingerprint.as_deref())
+        .bind(query.resource_kind.as_deref())
+        .bind(query.resource_kind.as_deref())
+        .bind(query.model.as_deref())
+        .bind(query.model.as_deref())
+        .bind(query.operation.as_deref())
+        .bind(query.operation.as_deref())
+        .bind(query.status.as_deref())
+        .bind(query.status.as_deref())
+        .bind(search_pattern.as_deref())
+        .bind(search_pattern.as_deref())
+        .bind(search_pattern.as_deref())
+        .bind(search_pattern.as_deref())
+        .bind(search_pattern.as_deref())
+        .bind(search_pattern.as_deref())
+        .bind(search_pattern.as_deref())
+        .bind(search_pattern.as_deref())
+        .fetch_one(pool)
+        .await?)
 }
 
 pub fn estimate_tokens(content: &str) -> i64 {
@@ -749,6 +849,8 @@ fn normalize_query(query: AiUsageQuery) -> AppResult<NormalizedUsageQuery> {
         operation,
         status,
         limit: query.limit.unwrap_or(20).clamp(1, 200) as i64,
+        offset: query.offset.unwrap_or(0).clamp(0, 1_000_000) as i64,
+        search: normalize_filter(query.search),
         days,
     })
 }
@@ -1280,7 +1382,13 @@ async fn list_records_with_query(
     user_id: &str,
     query: &NormalizedUsageQuery,
 ) -> AppResult<Vec<AiUsageRecord>> {
-    let rows = sqlx::query_as::<_, UsageRecordRow>(
+    let search_pattern = query
+        .search
+        .as_deref()
+        .map(escape_like)
+        .map(|pattern| format!("%{pattern}%"));
+    // SQL 必须绑定到局部变量：query 借用其字符串，不能传临时值
+    let sql = format!(
         "SELECT
              u.id,
              u.project_id,
@@ -1315,44 +1423,45 @@ async fn list_records_with_query(
          LEFT JOIN projects p ON p.id = u.project_id AND p.user_id = u.user_id
          LEFT JOIN agents a ON a.id = u.agent_id AND a.user_id = u.user_id
          LEFT JOIN ai_endpoints ep ON ep.id = u.endpoint_id AND ep.user_id = u.user_id
-         WHERE u.user_id = ?
-           AND (? IS NULL OR u.created_at >= ?)
-           AND (? IS NULL OR u.project_id = ?)
-           AND (? IS NULL OR u.conversation_id = ?)
-           AND (? IS NULL OR u.agent_id = ?)
-           AND (? IS NULL OR u.endpoint_id = ?)
-           AND (? IS NULL OR u.api_key_fingerprint = ?)
-           AND (? IS NULL OR u.resource_kind = ?)
-           AND (? IS NULL OR u.model = ?)
-           AND (? IS NULL OR u.operation = ?)
-           AND (? IS NULL OR u.status = ?)
+         {RECORDS_FILTER_SQL}
          ORDER BY u.created_at DESC, u.id DESC
-         LIMIT ?",
-    )
-    .bind(user_id)
-    .bind(query.from_ts.as_deref())
-    .bind(query.from_ts.as_deref())
-    .bind(query.project_id.as_deref())
-    .bind(query.project_id.as_deref())
-    .bind(query.conversation_id.as_deref())
-    .bind(query.conversation_id.as_deref())
-    .bind(query.agent_id.as_deref())
-    .bind(query.agent_id.as_deref())
-    .bind(query.endpoint_id.as_deref())
-    .bind(query.endpoint_id.as_deref())
-    .bind(query.api_key_fingerprint.as_deref())
-    .bind(query.api_key_fingerprint.as_deref())
-    .bind(query.resource_kind.as_deref())
-    .bind(query.resource_kind.as_deref())
-    .bind(query.model.as_deref())
-    .bind(query.model.as_deref())
-    .bind(query.operation.as_deref())
-    .bind(query.operation.as_deref())
-    .bind(query.status.as_deref())
-    .bind(query.status.as_deref())
-    .bind(query.limit)
-    .fetch_all(pool)
-    .await?;
+         LIMIT ?
+         OFFSET ?"
+    );
+    let rows = sqlx::query_as::<_, UsageRecordRow>(sql.as_str())
+        .bind(user_id)
+        .bind(query.from_ts.as_deref())
+        .bind(query.from_ts.as_deref())
+        .bind(query.project_id.as_deref())
+        .bind(query.project_id.as_deref())
+        .bind(query.conversation_id.as_deref())
+        .bind(query.conversation_id.as_deref())
+        .bind(query.agent_id.as_deref())
+        .bind(query.agent_id.as_deref())
+        .bind(query.endpoint_id.as_deref())
+        .bind(query.endpoint_id.as_deref())
+        .bind(query.api_key_fingerprint.as_deref())
+        .bind(query.api_key_fingerprint.as_deref())
+        .bind(query.resource_kind.as_deref())
+        .bind(query.resource_kind.as_deref())
+        .bind(query.model.as_deref())
+        .bind(query.model.as_deref())
+        .bind(query.operation.as_deref())
+        .bind(query.operation.as_deref())
+        .bind(query.status.as_deref())
+        .bind(query.status.as_deref())
+        .bind(search_pattern.as_deref())
+        .bind(search_pattern.as_deref())
+        .bind(search_pattern.as_deref())
+        .bind(search_pattern.as_deref())
+        .bind(search_pattern.as_deref())
+        .bind(search_pattern.as_deref())
+        .bind(search_pattern.as_deref())
+        .bind(search_pattern.as_deref())
+        .bind(query.limit)
+        .bind(query.offset)
+        .fetch_all(pool)
+        .await?;
 
     Ok(rows
         .into_iter()

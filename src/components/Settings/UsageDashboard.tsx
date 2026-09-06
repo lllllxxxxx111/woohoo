@@ -6,6 +6,7 @@ import {
   Empty,
   Input,
   Menu,
+  Pagination,
   Select,
   Space,
   Table,
@@ -18,6 +19,7 @@ import {
   AiUsageRecord,
   AiUsageSeriesPoint,
   AiUsageSummary,
+  getUsageRecords,
   getUsageSummary,
   listImageCreditTransactions,
   listServerAiEndpoints,
@@ -114,6 +116,9 @@ const STATUS_OPTIONS = [
 
 const USAGE_SUMMARY_CACHE_TTL_MS = 10_000;
 const USAGE_ERROR_TOAST_COOLDOWN_MS = 15_000;
+
+/** 请求记录分页大小（服务端分页） */
+const RECORDS_PAGE_SIZE = 50;
 
 /** 过滤掉 undefined 和空字符串的筛选条件 */
 function normalizeFilters(filters: UsageFilters) {
@@ -469,6 +474,10 @@ export const UsageDashboard: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState<AiUsageSummary | null>(null);
   const [records, setRecords] = useState<AiUsageRecord[]>([]);
+  const [recordsPage, setRecordsPage] = useState(1);
+  const [recordsTotal, setRecordsTotal] = useState(0);
+  const [recordsLoading, setRecordsLoading] = useState(false);
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [endpointOptions, setEndpointOptions] = useState<Array<{ id: string; name: string }>>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [filters, setFilters] = useState<UsageFilters>({ days: 30, bucket: 'day' });
@@ -520,7 +529,6 @@ export const UsageDashboard: React.FC = () => {
         Date.now() - cached.fetchedAt < USAGE_SUMMARY_CACHE_TTL_MS
       ) {
         setSummary(cached.summary);
-        setRecords(cached.summary.recent);
         setLoadError(null);
         return;
       }
@@ -545,13 +553,11 @@ export const UsageDashboard: React.FC = () => {
           fetchedAt: Date.now(),
         };
         setSummary(nextSummary);
-        setRecords(nextSummary.recent);
         setLoadError(null);
       } catch (error) {
         if (requestId !== requestIdRef.current) return;
         const message = error instanceof Error ? error.message : String(error);
         setSummary((prev) => prev ?? createEmptySummary(nextFilters));
-        setRecords((prev) => prev);
         setLoadError(message);
         const now = Date.now();
         if (now - lastErrorToastAtRef.current > USAGE_ERROR_TOAST_COOLDOWN_MS) {
@@ -576,6 +582,48 @@ export const UsageDashboard: React.FC = () => {
   useEffect(() => {
     void fetchData(debouncedFilters);
   }, [debouncedFilters, fetchData]);
+
+  /** 请求记录：服务端分页 + 搜索，独立于汇总请求 */
+  const recordsRequestIdRef = useRef(0);
+  const fetchRecords = useCallback(
+    async (nextFilters: UsageFilters, page: number, search: string) => {
+      const requestId = recordsRequestIdRef.current + 1;
+      recordsRequestIdRef.current = requestId;
+      setRecordsLoading(true);
+      try {
+        const page_ = await getUsageRecords({
+          ...normalizeFilters(nextFilters),
+          limit: RECORDS_PAGE_SIZE,
+          offset: (page - 1) * RECORDS_PAGE_SIZE,
+          search: search.trim() || undefined,
+        });
+        if (requestId !== recordsRequestIdRef.current) return;
+        setRecords(page_.records);
+        setRecordsTotal(page_.total);
+      } catch (error) {
+        if (requestId !== recordsRequestIdRef.current) return;
+        const message = error instanceof Error ? error.message : String(error);
+        showToast({ type: 'error', title: '加载请求记录失败', message });
+      } finally {
+        if (requestId === recordsRequestIdRef.current) setRecordsLoading(false);
+      }
+    },
+    [showToast],
+  );
+
+  useEffect(() => {
+    void fetchRecords(debouncedFilters, recordsPage, debouncedSearch);
+  }, [debouncedFilters, recordsPage, debouncedSearch, fetchRecords]);
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => setDebouncedSearch(searchQuery), 250);
+    return () => window.clearTimeout(timeoutId);
+  }, [searchQuery]);
+
+  /** 筛选或搜索变化时回到第一页 */
+  useEffect(() => {
+    setRecordsPage(1);
+  }, [debouncedFilters, debouncedSearch]);
 
   useEffect(() => {
     let isActive = true;
@@ -767,25 +815,7 @@ export const UsageDashboard: React.FC = () => {
 
   const currentSummary = summary ?? createEmptySummary(filters);
   const isEmpty = currentSummary.totals.requestCount === 0;
-  const filteredRecords = useMemo(() => {
-    const normalizedQuery = searchQuery.trim().toLowerCase();
-    if (!normalizedQuery) {
-      return records;
-    }
 
-    return records.filter((record) =>
-      [
-        record.operation,
-        record.resourceKind,
-        record.model,
-        record.projectName,
-        record.agentName,
-        record.status,
-      ]
-        .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
-        .some((value) => value.toLowerCase().includes(normalizedQuery)),
-    );
-  }, [records, searchQuery]);
 
   return (
     <div className={styles.dashboard}>
@@ -985,13 +1015,13 @@ export const UsageDashboard: React.FC = () => {
             <span
               style={{ fontWeight: 400, fontSize: 13, color: 'var(--text-muted)', marginLeft: 12 }}
             >
-              最后 50 条记录
+              共 {recordsTotal} 条记录
             </span>
           </h3>
           <Space>
             <Input
               allowClear
-              placeholder="搜索流水..."
+              placeholder="搜索流水（模型/操作/项目/智能体等）..."
               prefix={<Search size={14} />}
               style={{ width: 220 }}
               value={searchQuery}
@@ -1001,14 +1031,24 @@ export const UsageDashboard: React.FC = () => {
         </div>
         <Table
           columns={columns}
-          data={filteredRecords}
+          data={records}
           rowKey="id"
           pagination={false}
           border={false}
-          loading={loading}
+          loading={loading || recordsLoading}
           scroll={{ x: 990, y: 320 }}
           style={{ width: '100%' }}
         />
+        <div style={{ marginTop: 12, display: 'flex', justifyContent: 'flex-end' }}>
+          <Pagination
+            size="small"
+            total={recordsTotal}
+            pageSize={RECORDS_PAGE_SIZE}
+            current={recordsPage}
+            showTotal
+            onChange={(page) => setRecordsPage(page)}
+          />
+        </div>
       </div>
 
       <div className={styles.mainTableCard}>

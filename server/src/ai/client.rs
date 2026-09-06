@@ -2176,7 +2176,10 @@ mod stream_degrade_tests {
     /// 重试请求不带该字段且流式内容与 usage 上报不受影响。
     #[tokio::test]
     async fn chat_stream_downgrades_after_400_and_retries_without_stream_options() {
-        // 本地 mock 走 loopback，需要开发模式放行（仅影响当前测试进程）
+        // 本地 mock 走 loopback，需要开发模式放行。环境变量操作必须持
+        // ssrf 测试共享锁：并发跑的 dev_mode/is_production 环境变量测试
+        // 与本测试的 set_var/remove_var 若不串行化，会偶发互相踩踏。
+        let _env_guard = crate::ai::ssrf_guard::env_test_support::lock_env();
         std::env::set_var("WOOHOO_DEV_ALLOW_PRIVATE_ENDPOINTS", "true");
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -2240,5 +2243,8 @@ mod stream_degrade_tests {
         assert_eq!(usage.cached_prompt_tokens, None);
 
         server.await.expect("mock server task");
+
+        // 恢复环境（锁仍持有至测试结束；后续 env 测试的 EnvGuard 也会自愈）
+        std::env::remove_var("WOOHOO_DEV_ALLOW_PRIVATE_ENDPOINTS");
     }
 }

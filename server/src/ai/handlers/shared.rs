@@ -601,107 +601,117 @@ pub(crate) fn provider_requires_api_key(provider: &str) -> bool {
     )
 }
 
+/// 基于 ResolvedChatContext 记录用量时随调用变化的字段。
+/// 其余维度（项目/会话/智能体/端点/模型/内容等）从 context 展开。
+pub(crate) struct UsageRecordCore {
+    pub operation: AiUsageOperation,
+    pub status: AiUsageStatus,
+    pub latency_ms: i64,
+    pub input_chars: i64,
+    pub output_chars: i64,
+    pub usage: UsageNumbers,
+    pub error_message: Option<String>,
+    pub prompt_prefix_hit_ratio: Option<f64>,
+}
+
 pub(crate) fn build_usage_record(
     user_id: &str,
     context: &ResolvedChatContext,
-    operation: AiUsageOperation,
-    status: AiUsageStatus,
-    latency_ms: i64,
-    input_chars: i64,
-    output_chars: i64,
-    usage: UsageNumbers,
-    error_message: Option<String>,
-    prompt_prefix_hit_ratio: Option<f64>,
+    core: UsageRecordCore,
 ) -> RecordAiUsageInput {
-    build_direct_usage_record(
+    build_direct_usage_record(DirectUsageRecordParams {
         user_id,
-        Some(context.conversation.project_id.clone()),
-        Some(context.conversation.id.clone()),
-        context.agent.as_ref().map(|item| item.id.clone()),
-        Some(context.endpoint.id.clone()),
-        &context.endpoint.provider,
+        project_id: Some(context.conversation.project_id.clone()),
+        conversation_id: Some(context.conversation.id.clone()),
+        agent_id: context.agent.as_ref().map(|item| item.id.clone()),
+        endpoint_id: Some(context.endpoint.id.clone()),
+        provider: &context.endpoint.provider,
         // 使用已解密的明文 API Key 计算 fingerprint，确保新旧密钥产生一致的指纹
-        &context.decrypted_api_key,
-        Some(context.model.clone()),
-        operation,
-        status,
-        context.output_kind,
-        if status == AiUsageStatus::Success {
+        api_key: &context.decrypted_api_key,
+        model: Some(context.model.clone()),
+        operation: core.operation,
+        status: core.status,
+        output_kind: context.output_kind,
+        output_items: if core.status == AiUsageStatus::Success {
             context.output_items
         } else {
             0
         },
-        &context.content,
-        latency_ms,
-        input_chars,
-        output_chars,
-        usage,
-        context.trigger_source.clone(),
-        error_message,
-        prompt_prefix_hit_ratio,
-    )
+        content: &context.content,
+        latency_ms: core.latency_ms,
+        input_chars: core.input_chars,
+        output_chars: core.output_chars,
+        usage: core.usage,
+        trigger_source: context.trigger_source.clone(),
+        error_message: core.error_message,
+        prompt_prefix_hit_ratio: core.prompt_prefix_hit_ratio,
+    })
 }
 
-pub(crate) fn build_direct_usage_record(
-    user_id: &str,
-    project_id: Option<String>,
-    conversation_id: Option<String>,
-    agent_id: Option<String>,
-    endpoint_id: Option<String>,
-    provider: &str,
-    api_key: &str,
-    model: Option<String>,
-    operation: AiUsageOperation,
-    status: AiUsageStatus,
-    output_kind: usage::AiUsageResourceKind,
-    output_items: i64,
-    content: &str,
-    latency_ms: i64,
-    input_chars: i64,
-    output_chars: i64,
-    usage: UsageNumbers,
-    trigger_source: Option<String>,
-    error_message: Option<String>,
-    prompt_prefix_hit_ratio: Option<f64>,
-) -> RecordAiUsageInput {
-    let request_fingerprint = usage::fingerprint_request(content);
+/// 直连用量记录参数（无 ResolvedChatContext 的路径：流式直连、端点连通性
+/// 测试等）。此前是 20 个位置参数，历史上极易传参错位，改为命名结构体。
+pub(crate) struct DirectUsageRecordParams<'a> {
+    pub user_id: &'a str,
+    pub project_id: Option<String>,
+    pub conversation_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub endpoint_id: Option<String>,
+    pub provider: &'a str,
+    pub api_key: &'a str,
+    pub model: Option<String>,
+    pub operation: AiUsageOperation,
+    pub status: AiUsageStatus,
+    pub output_kind: usage::AiUsageResourceKind,
+    pub output_items: i64,
+    pub content: &'a str,
+    pub latency_ms: i64,
+    pub input_chars: i64,
+    pub output_chars: i64,
+    pub usage: UsageNumbers,
+    pub trigger_source: Option<String>,
+    pub error_message: Option<String>,
+    pub prompt_prefix_hit_ratio: Option<f64>,
+}
+
+pub(crate) fn build_direct_usage_record(params: DirectUsageRecordParams<'_>) -> RecordAiUsageInput {
+    let request_fingerprint = usage::fingerprint_request(params.content);
     let attempt_group_key = usage::build_attempt_group_key(
-        user_id,
-        project_id.as_deref(),
-        conversation_id.as_deref(),
-        agent_id.as_deref(),
-        output_kind,
-        operation,
-        content,
+        params.user_id,
+        params.project_id.as_deref(),
+        params.conversation_id.as_deref(),
+        params.agent_id.as_deref(),
+        params.output_kind,
+        params.operation,
+        params.content,
     );
 
     RecordAiUsageInput {
-        user_id: user_id.to_string(),
-        project_id,
-        conversation_id,
-        agent_id,
-        endpoint_id,
-        api_key_fingerprint: usage::fingerprint_api_key(api_key),
-        provider: provider.to_string(),
-        model,
-        operation,
-        status,
-        resource_kind: output_kind,
-        output_items: output_items.max(0),
-        latency_ms,
-        prompt_tokens: usage.prompt_tokens,
-        completion_tokens: usage.completion_tokens,
-        total_tokens: usage.total_tokens,
-        token_source: usage.token_source,
-        input_chars,
-        output_chars,
+        user_id: params.user_id.to_string(),
+        project_id: params.project_id,
+        conversation_id: params.conversation_id,
+        agent_id: params.agent_id,
+        endpoint_id: params.endpoint_id,
+        api_key_fingerprint: usage::fingerprint_api_key(params.api_key),
+        provider: params.provider.to_string(),
+        model: params.model,
+        operation: params.operation,
+        status: params.status,
+        resource_kind: params.output_kind,
+        output_items: params.output_items.max(0),
+        latency_ms: params.latency_ms,
+        prompt_tokens: params.usage.prompt_tokens,
+        completion_tokens: params.usage.completion_tokens,
+        total_tokens: params.usage.total_tokens,
+        token_source: params.usage.token_source,
+        input_chars: params.input_chars,
+        output_chars: params.output_chars,
         request_fingerprint,
         billing_ref_id: Uuid::new_v4().to_string(),
         attempt_group_key,
-        trigger_source,
-        error_message,
-        cached_prompt_tokens: usage.cached_prompt_tokens,
-        prompt_prefix_hit_ratio,
+        trigger_source: params.trigger_source,
+        error_message: params.error_message,
+        cached_prompt_tokens: params.usage.cached_prompt_tokens,
+        prompt_prefix_hit_ratio: params.prompt_prefix_hit_ratio,
     }
 }
 

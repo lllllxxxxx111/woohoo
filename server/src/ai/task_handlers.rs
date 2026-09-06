@@ -97,9 +97,9 @@ pub async fn usage_records(
     State(state): State<AppState>,
     Extension(user_id): Extension<UserId>,
     Query(query): Query<AiUsageQuery>,
-) -> AppResult<Json<Vec<usage::AiUsageRecord>>> {
-    let records = usage::list_records(&state.db, &user_id.0, query).await?;
-    Ok(Json(records))
+) -> AppResult<Json<usage::UsageRecordsPage>> {
+    let page = usage::list_records(&state.db, &user_id.0, query).await?;
+    Ok(Json(page))
 }
 
 /// POST /api/ai/tasks
